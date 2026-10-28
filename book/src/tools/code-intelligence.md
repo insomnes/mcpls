@@ -139,3 +139,35 @@ Use it to see inferred types of `let` bindings without hovering over each one.
 ## What's Next
 
 Continue with [Diagnostics and Formatting](diagnostics.md) to see what the compiler reports.
+
+## get_document_outline
+
+Returns a compact, flat page of navigation entries. Use `get_document_symbols` when you need complete ranges and children.
+
+Arguments: required absolute `file_path`; optional `query`, `kind_filter`, `offset` and `limit`.
+`query` matches a case-sensitive substring of each symbol's own name, up to 1,000 bytes.
+`kind_filter` accepts the existing symbol kind names or numeric LSP kinds.
+`offset` defaults to 0 after filtering. `limit` defaults to 100 and accepts 1 through 200.
+
+```json
+{ "file_path": "/work/app/src/models.rs", "query": "User", "offset": 0, "limit": 100 }
+```
+
+```json
+{
+  "symbols": [{ "name_path": ["models", "User"], "kind": 23, "position": { "line": 10, "character": 8 } }],
+  "fidelity": "hierarchical",
+  "truncated": false,
+  "next_offset": null
+}
+```
+
+Hierarchical responses use depth-first server order, preserve ancestor names, and navigate to the symbol's selection start.
+Flat responses retain server order and the supplied container name as one path segment.
+Their `fidelity` is `flat`, and their range-start navigation positions are approximate.
+Duplicate names remain separate entries. Positions use 1-based lines and UTF-16 characters.
+When `positions_degraded` is present, follow the [position warning](overview.md#reading-results).
+
+Use `next_offset` for the next page when `truncated` is true. Restart pagination after document changes.
+The limit bounds returned entries; it does not bound the language server's original response.
+This tool returns navigation information and does not apply edits.

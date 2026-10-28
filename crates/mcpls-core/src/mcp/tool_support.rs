@@ -44,6 +44,7 @@ pub(super) enum McpTool {
     RenameSymbol,
     GetCompletions,
     GetDocumentSymbols,
+    GetDocumentOutline,
     FormatDocument,
     WorkspaceSymbolSearch,
     GetCodeActions,
@@ -72,7 +73,7 @@ pub(super) enum McpTool {
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 31] = [
+    pub(super) const ALL: [Self; 32] = [
         Self::GetHover,
         Self::GetDefinition,
         Self::GetReferences,
@@ -80,6 +81,7 @@ impl McpTool {
         Self::RenameSymbol,
         Self::GetCompletions,
         Self::GetDocumentSymbols,
+        Self::GetDocumentOutline,
         Self::FormatDocument,
         Self::WorkspaceSymbolSearch,
         Self::GetCodeActions,
@@ -136,6 +138,9 @@ impl McpTool {
             Self::GetCompletions => ("get_completions", Document(ToolKind::Completions)),
             Self::GetDocumentSymbols => {
                 ("get_document_symbols", Document(ToolKind::DocumentSymbols))
+            }
+            Self::GetDocumentOutline => {
+                ("get_document_outline", Document(ToolKind::DocumentSymbols))
             }
             Self::FormatDocument => ("format_document", Document(ToolKind::FormatDocument)),
             Self::WorkspaceSymbolSearch => (

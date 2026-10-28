@@ -37,11 +37,11 @@ use super::session::{
 use super::tool_support::{McpTool, ToolSupportReport, prefixed_tool_name};
 use super::tools::{
     CachedDiagnosticsParams, CallHierarchyCallsParams, CodeActionsParams, CompletionsParams,
-    DeclarationParams, DiagnosticsParams, DocumentSymbolsParams, FoldingRangesParams,
-    FormatDocumentParams, FormatRangeParams, InlayHintsParams, NavigationParams, PositionParams,
-    RangeParams, ReferencesParams, RenameParams, RestartServerParams, ServerLogsParams,
-    ServerMessagesParams, SymbolTargetInput, SymbolTargetParams, ToolSupportParams,
-    TypeHierarchyWalkParams, WorkspaceSymbolParams,
+    DeclarationParams, DiagnosticsParams, DocumentOutlineParams, DocumentSymbolsParams,
+    FoldingRangesParams, FormatDocumentParams, FormatRangeParams, InlayHintsParams,
+    NavigationParams, PositionParams, RangeParams, ReferencesParams, RenameParams,
+    RestartServerParams, ServerLogsParams, ServerMessagesParams, SymbolTargetInput,
+    SymbolTargetParams, ToolSupportParams, TypeHierarchyWalkParams, WorkspaceSymbolParams,
 };
 use crate::bridge::resources::{
     DiagnosticsResourceUri, MAX_SUBSCRIPTIONS, ResolvedResource, make_uri, parse_uri,
@@ -50,9 +50,9 @@ use crate::bridge::{
     AddressableTool, Addressed, BoundedRange, CallHierarchyPrepareResult, CheckedHierarchyItem,
     ClientPath, CodeActionsResult, CompletionsResult, DiagnosticInfo, DiagnosticsAvailability,
     DiagnosticsOrigin, DiagnosticsResult, DocumentDiagnosticsResult, DocumentHighlightsResult,
-    DocumentOpenState, DocumentSymbolsResult, DocumentVersion, FoldingRangesResult,
-    FormatDocumentResult, HierarchyItem, HoverResult, IncomingCallsResult, Indexed,
-    InlayHintsResult, KindFilter, KindFilterField, KindFilterInput, LocationsResult,
+    DocumentOpenState, DocumentOutlineResult, DocumentSymbolsResult, DocumentVersion,
+    FoldingRangesResult, FormatDocumentResult, HierarchyItem, HoverResult, IncomingCallsResult,
+    Indexed, InlayHintsResult, KindFilter, KindFilterField, KindFilterInput, LocationsResult,
     NotificationCache, OutgoingCallsResult, Position, PositionEncoding, PositionRange,
     PrepareRenameResult, ReferencesResult, RenameResult, RestartServerResult, RouteSignals,
     SelectionRangesResult, ServerLogsResult, ServerMessagesResult, SignatureHelpResult,
@@ -928,6 +928,31 @@ impl McplsServer {
             self.context
                 .translator
                 .handle_document_symbols(file_path)
+                .await,
+        )
+    }
+
+    /// Return compact document navigation.
+    #[tool(
+        description = concat!("Compact symbol page in server order. Restart pagination after edits. Flat positions are approximate. `truncated` means more matches remain; limits do not bound the LSP response. ", positions_note_response!()),
+        title = "Document Outline"
+    )]
+    async fn get_document_outline(
+        &self,
+        Parameters(DocumentOutlineParams {
+            file_path,
+            query,
+            kind_filter,
+            offset,
+            limit,
+        }): Parameters<DocumentOutlineParams>,
+    ) -> Result<Json<DocumentOutlineResult>, McpError> {
+        let file_path = parse_client_path(file_path)?;
+        let kind_filter = parse_kind_filter(kind_filter, KindFilterField::KindFilter)?;
+        self.structured_result(
+            self.context
+                .translator
+                .handle_document_outline(file_path, query, kind_filter, offset, limit)
                 .await,
         )
     }
@@ -5250,6 +5275,7 @@ sleep 0.3
             ("rename_symbol", true, false, true),
             ("get_completions", true, false, true),
             ("get_document_symbols", true, false, true),
+            ("get_document_outline", true, false, true),
             ("format_document", true, false, true),
             ("workspace_symbol_search", true, false, true),
             ("get_code_actions", true, false, true),
@@ -7023,6 +7049,16 @@ sleep 0.3
                 }))
                 .await
                 .map(|_| ()),
+            McpTool::GetDocumentOutline => server
+                .get_document_outline(Parameters(DocumentOutlineParams {
+                    file_path: PathBuf::from(file_path.clone()),
+                    query: None,
+                    kind_filter: None,
+                    offset: 0,
+                    limit: 100,
+                }))
+                .await
+                .map(|_| ()),
             McpTool::FormatDocument => server
                 .format_document(Parameters(FormatDocumentParams {
                     file_path: PathBuf::from(file_path.clone()),
@@ -7260,7 +7296,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 31);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 32);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

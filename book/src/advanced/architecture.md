@@ -13,7 +13,7 @@ flowchart TB
     Client["AI client"]
     subgraph mcpls["mcpls (single binary)"]
         direction LR
-        MCP["MCP server<br/>31 tools"] --> Bridge["Translation layer<br/>(bridge)"] --> LSPc["LSP clients"]
+        MCP["MCP server<br/>32 tools"] --> Bridge["Translation layer<br/>(bridge)"] --> LSPc["LSP clients"]
     end
     Servers["rust-analyzer, pyright,<br/>typescript-language-server, ..."]
     Client <-->|"MCP over stdio or HTTP"| MCP

@@ -7,8 +7,8 @@ use lsp_types::{
 
 use super::Translator;
 use super::dto::{
-    DocumentSymbolsResult, Location, Symbol, WorkspaceSymbol, WorkspaceSymbolResult,
-    lsp_kind_to_u32,
+    DocumentOutlineResult, DocumentSymbolsResult, Location, OutlineSymbol, Symbol, WorkspaceSymbol,
+    WorkspaceSymbolResult, lsp_kind_to_u32,
 };
 use super::encoding_ctx::EncodingCtx;
 use super::kind_filter::SymbolKindFilter;
@@ -167,6 +167,99 @@ impl Translator {
 
         Ok(DocumentSymbolsResult {
             symbols: tree.into_symbols(),
+            positions_degraded: ctx.positions_degraded(),
+        })
+    }
+
+    /// Return a filtered page of compact document symbols.
+    ///
+    /// Pagination is stateless. Restart it after document changes. The limit
+    /// bounds returned entries, not the language server's original response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid query/limit, routing, capability or document errors,
+    /// or a failed LSP request.
+    pub async fn handle_document_outline(
+        &self,
+        file_path: ClientPath,
+        query: Option<String>,
+        kind_filter: Option<SymbolKindFilter>,
+        offset: usize,
+        limit: u32,
+    ) -> Result<DocumentOutlineResult> {
+        validate_query_length(query.as_deref().unwrap_or_default())?;
+        if !(1..=200).contains(&limit) {
+            return Err(Error::InvalidToolParams(
+                "limit must be between 1 and 200".to_owned(),
+            ));
+        }
+        let FetchedSymbols { doc, ctx, response } =
+            self.request_document_symbols(&file_path).await?;
+        let tree = symbol_tree(response, &ctx, doc.uri()).await;
+        let (fidelity, entries) = match tree {
+            DocumentSymbolTree::Hierarchical(symbols) => {
+                let mut entries = Vec::new();
+                let mut stack: Vec<_> = symbols
+                    .into_iter()
+                    .rev()
+                    .map(|symbol| (symbol, Vec::new()))
+                    .collect();
+                while let Some((symbol, mut name_path)) = stack.pop() {
+                    name_path.push(symbol.name);
+                    if let Some(children) = symbol.children {
+                        stack.extend(
+                            children
+                                .into_iter()
+                                .rev()
+                                .map(|child| (child, name_path.clone())),
+                        );
+                    }
+                    entries.push(OutlineSymbol {
+                        name_path,
+                        kind: symbol.kind,
+                        position: symbol.selection_range.start,
+                    });
+                }
+                (super::SymbolFidelity::Hierarchical, entries)
+            }
+            DocumentSymbolTree::Flat(symbols) => {
+                let entries = symbols
+                    .into_iter()
+                    .map(|flat| {
+                        let mut name_path: Vec<_> = flat.container_name.into_iter().collect();
+                        name_path.push(flat.symbol.name);
+                        OutlineSymbol {
+                            name_path,
+                            kind: flat.symbol.kind,
+                            position: flat.symbol.range.start,
+                        }
+                    })
+                    .collect();
+                (super::SymbolFidelity::Flat, entries)
+            }
+        };
+        let kind = kind_filter.map(|filter| u32::from(filter.kind()));
+        let mut matching = entries
+            .into_iter()
+            .filter(|entry| {
+                kind.is_none_or(|kind| entry.kind == kind)
+                    && query.as_ref().is_none_or(|query| {
+                        entry
+                            .name_path
+                            .last()
+                            .is_some_and(|name| name.contains(query))
+                    })
+            })
+            .skip(offset);
+        let symbols: Vec<_> = matching.by_ref().take(limit as usize).collect();
+        let truncated = matching.next().is_some();
+        let next_offset = truncated.then(|| offset.saturating_add(symbols.len()));
+        Ok(DocumentOutlineResult {
+            symbols,
+            fidelity,
+            truncated,
+            next_offset,
             positions_degraded: ctx.positions_degraded(),
         })
     }
@@ -444,6 +537,180 @@ mod tests {
     use crate::bridge::translator::testing::*;
     use crate::config::{LanguageId, ServerCommand, ServerId, TimeoutSecs, ToolRouter, ToolSet};
     use crate::test_lsp::client_path;
+
+    /// Compact navigation keeps ancestry, duplicate entries and matching-page order.
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one public-boundary fixture checks related navigation cases"
+    )]
+    async fn test_document_outline_navigation_contract() {
+        let dir = TempDir::new().unwrap();
+        let (translator, mut server) = translator_with_capabilities(
+            &dir,
+            &ServerId::from_static("rust"),
+            lsp_types::ServerCapabilities {
+                document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                ..Default::default()
+            },
+        );
+        let path = dir.path().join("main.rs");
+        fs::write(&path, "parent child duplicate\n").unwrap();
+        let range = serde_json::json!({
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 22}
+        });
+        let selection = serde_json::json!({
+            "start": {"line": 0, "character": 7},
+            "end": {"line": 0, "character": 12}
+        });
+        let child = serde_json::json!({
+            "name": "child", "kind": 12, "range": range, "selectionRange": selection
+        });
+        let nested = serde_json::json!([{
+            "name": "Parent", "kind": 5, "range": range, "selectionRange": range,
+            "children": [child, child]
+        }]);
+        let flat = serde_json::json!([{
+            "name": "child", "kind": 12, "containerName": "A.B::C",
+            "location": {"uri": Url::from_file_path(&path).unwrap().to_string(), "range": selection}
+        }]);
+        let mut wire = BufReader::new(&mut server.write_stdout);
+        let full_request = translator.handle_document_symbols(client_path(&path));
+        let full_reply = async {
+            assert_eq!(
+                read_framed_message(&mut wire).await["method"],
+                "textDocument/didOpen"
+            );
+            let request = read_framed_message(&mut wire).await;
+            assert_eq!(request["method"], "textDocument/documentSymbol");
+            write_response(&mut server.read_half_stdin, &request["id"], nested.clone()).await;
+        };
+        let (full, ()) = tokio::join!(full_request, full_reply);
+        let full_size = serde_json::to_vec(&full.unwrap()).unwrap().len();
+        for (payload, query, offset, limit, paths, fidelity, next) in [
+            (
+                nested.clone(),
+                None,
+                0,
+                100,
+                vec![
+                    vec!["Parent"],
+                    vec!["Parent", "child"],
+                    vec!["Parent", "child"],
+                ],
+                "hierarchical",
+                None,
+            ),
+            (
+                nested.clone(),
+                Some("child"),
+                0,
+                1,
+                vec![vec!["Parent", "child"]],
+                "hierarchical",
+                Some(1),
+            ),
+            (
+                nested.clone(),
+                Some("child"),
+                1,
+                1,
+                vec![vec!["Parent", "child"]],
+                "hierarchical",
+                None,
+            ),
+            (
+                nested.clone(),
+                Some("Parent"),
+                0,
+                100,
+                vec![vec!["Parent"]],
+                "hierarchical",
+                None,
+            ),
+            (
+                nested.clone(),
+                Some("Child"),
+                0,
+                100,
+                vec![],
+                "hierarchical",
+                None,
+            ),
+            (nested, None, 99, 200, vec![], "hierarchical", None),
+            (
+                flat,
+                None,
+                0,
+                100,
+                vec![vec!["A.B::C", "child"]],
+                "flat",
+                None,
+            ),
+            (
+                serde_json::Value::Null,
+                None,
+                0,
+                100,
+                vec![],
+                "hierarchical",
+                None,
+            ),
+        ] {
+            let request = translator.handle_document_outline(
+                client_path(&path),
+                query.map(str::to_owned),
+                None,
+                offset,
+                limit,
+            );
+            let reply = async {
+                let request = read_framed_message(&mut wire).await;
+                assert_eq!(request["method"], "textDocument/documentSymbol");
+                write_response(&mut server.read_half_stdin, &request["id"], payload).await;
+            };
+            let (result, ()) = Box::pin(timeout(Duration::from_secs(2), async {
+                tokio::join!(request, reply)
+            }))
+            .await
+            .unwrap();
+            let result = result.unwrap();
+            if paths.len() == 3 {
+                let compact_size = serde_json::to_vec(&result).unwrap().len();
+                println!(
+                    "representative nested response bytes: full={full_size}, outline={compact_size}"
+                );
+                assert!(compact_size < full_size);
+            }
+            assert_eq!(
+                result
+                    .symbols
+                    .iter()
+                    .map(|s| s.name_path.clone())
+                    .collect::<Vec<_>>(),
+                paths
+            );
+            assert_eq!(serde_json::to_value(result.fidelity).unwrap(), fidelity);
+            assert_eq!(result.next_offset, next);
+            assert_eq!(result.truncated, next.is_some());
+            for symbol in result.symbols {
+                assert_eq!(symbol.position.line, 1);
+                assert_eq!(
+                    symbol.position.character,
+                    if symbol.kind == 5 { 1 } else { 8 }
+                );
+            }
+        }
+        for (query, limit) in [(None, 0), (None, 201), (Some("x".repeat(1001)), 100)] {
+            assert!(
+                translator
+                    .handle_document_outline(client_path(&path), query, None, 0, limit)
+                    .await
+                    .is_err()
+            );
+        }
+    }
 
     /// #355/#467 regression: `SymbolKindFilter`'s name-matching branch
     /// accepts/rejects `kind_filter` values based on `SymbolKind`'s derived

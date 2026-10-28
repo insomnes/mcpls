@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `get_document_outline` returns filtered, paginated navigation entries with ancestor names, numeric kinds, positions and ancestry fidelity. Existing full document symbols remain available.
+
 ### Fixed
 
 - Accept diagnostic full reports with an empty `kind` discriminator, including stock gopls v0.24.0 responses. Required diagnostic items remain validated.

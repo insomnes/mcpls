@@ -731,6 +731,34 @@ pub struct DocumentSymbolsResult {
     pub positions_degraded: Option<PositionDegradation>,
 }
 
+/// One compact navigation entry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OutlineSymbol {
+    /// Ancestor names followed by the symbol name.
+    pub name_path: Vec<String>,
+    /// Numeric LSP symbol kind.
+    pub kind: u32,
+    /// Navigation position; approximate for flat responses.
+    pub position: Position2D,
+}
+
+/// A page of document symbols in server order.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentOutlineResult {
+    /// Matching navigation entries.
+    pub symbols: Vec<OutlineSymbol>,
+    /// Ancestry supplied by the server.
+    pub fidelity: super::SymbolFidelity,
+    /// Further matching entries remain.
+    pub truncated: bool,
+    /// Next offset, or null when complete.
+    pub next_offset: Option<usize>,
+    /// Set when returned character offsets are inexact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "PositionDegradation")]
+    pub positions_degraded: Option<PositionDegradation>,
+}
+
 /// Result of a format document request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FormatDocumentResult {
@@ -1638,6 +1666,16 @@ impl ServerText for DocumentSymbolsResult {
             positions_degraded: _,
         } = self;
         symbols.redact_server_text(redactions);
+    }
+}
+
+impl ServerText for DocumentOutlineResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        for symbol in &mut self.symbols {
+            for name in &mut symbol.name_path {
+                redactions.note_payload(name);
+            }
+        }
     }
 }
 

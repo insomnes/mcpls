@@ -577,6 +577,25 @@ pub struct DocumentSymbolsParams {
     pub file_path: PathBuf,
 }
 
+/// Parameters for compact document navigation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentOutlineParams {
+    /// Absolute file path.
+    pub file_path: PathBuf,
+    /// Case-sensitive substring of the symbol's own name; at most 1,000 bytes.
+    pub query: Option<String>,
+    /// Symbol kind name or numeric LSP kind.
+    pub kind_filter: Option<KindFilterInput<SymbolKindFilter>>,
+    /// Offset after filtering.
+    #[serde(default)]
+    pub offset: usize,
+    /// Page size, 1 through 200 (default 100).
+    #[serde(default = "default_max_results")]
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: u32,
+}
+
 /// Parameters for the `format_document` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1021,6 +1040,28 @@ mod tests {
 
     use super::*;
     use crate::bridge::{MAX_NEW_NAME_LENGTH, MAX_TRIGGER_CHARACTER_BYTES};
+
+    /// Outline pagination uses integer defaults and rejects invalid JSON number shapes.
+    #[test]
+    fn outline_params_defaults_and_numeric_validation() {
+        let params: DocumentOutlineParams =
+            serde_json::from_value(serde_json::json!({"file_path": "/workspace/main.rs"})).unwrap();
+        assert_eq!(params.offset, 0);
+        assert_eq!(params.limit, 100);
+        assert!(params.query.is_none());
+        assert!(params.kind_filter.is_none());
+        for field in ["offset", "limit"] {
+            for value in [
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!("1"),
+            ] {
+                let mut input = serde_json::json!({"file_path": "/workspace/main.rs"});
+                input[field] = value;
+                assert!(serde_json::from_value::<DocumentOutlineParams>(input).is_err());
+            }
+        }
+    }
 
     #[test]
     fn restart_params_accept_servers_or_all() {

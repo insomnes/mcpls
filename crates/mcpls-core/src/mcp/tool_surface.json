@@ -2011,6 +2011,215 @@
     }
   },
   {
+    "name": "get_document_outline",
+    "title": "Document Outline",
+    "description": "Compact symbol page in server order. Restart pagination after edits. Flat positions are approximate. `truncated` means more matches remain; limits do not bound the LSP response. `positions_degraded: \"response\"` (non-UTF-16 servers only) means some returned `character` offsets may be inexact.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "file_path": {
+          "description": "Absolute file path.",
+          "type": "string"
+        },
+        "kind_filter": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "enum": [
+                    "file",
+                    "module",
+                    "namespace",
+                    "package",
+                    "class",
+                    "method",
+                    "property",
+                    "field",
+                    "constructor",
+                    "enum",
+                    "interface",
+                    "function",
+                    "variable",
+                    "constant",
+                    "string",
+                    "number",
+                    "boolean",
+                    "array",
+                    "object",
+                    "key",
+                    "null",
+                    "enummember",
+                    "struct",
+                    "event",
+                    "operator",
+                    "typeparameter"
+                  ]
+                },
+                {
+                  "pattern": "^[0-9]+$"
+                }
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Symbol kind name or numeric LSP kind."
+        },
+        "limit": {
+          "default": 100,
+          "description": "Page size, 1 through 200 (default 100).",
+          "format": "uint32",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "description": "Offset after filtering.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "query": {
+          "description": "Case-sensitive substring of the symbol's own name; at most 1,000 bytes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "OutlineSymbol": {
+          "description": "One compact navigation entry.",
+          "properties": {
+            "kind": {
+              "description": "Numeric LSP symbol kind.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name_path": {
+              "description": "Ancestor names followed by the symbol name.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "position": {
+              "$ref": "#/$defs/Position2D",
+              "description": "Navigation position; approximate for flat responses."
+            }
+          },
+          "required": [
+            "name_path",
+            "kind",
+            "position"
+          ],
+          "type": "object"
+        },
+        "Position2D": {
+          "description": "Position in a document (1-based for MCP).",
+          "properties": {
+            "character": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "line": {
+              "description": "Line number (1-based).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "line",
+            "character"
+          ],
+          "type": "object"
+        },
+        "PositionDegradation": {
+          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
+          "oneOf": [
+            {
+              "const": "response",
+              "type": "string"
+            },
+            {
+              "const": "request",
+              "type": "string"
+            }
+          ]
+        },
+        "SymbolFidelity": {
+          "description": "How much ancestry an [`EnclosingSymbol`] name path carries.",
+          "oneOf": [
+            {
+              "const": "hierarchical",
+              "type": "string"
+            },
+            {
+              "const": "flat",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "fidelity": {
+          "$ref": "#/$defs/SymbolFidelity",
+          "description": "Ancestry supplied by the server."
+        },
+        "next_offset": {
+          "description": "Next offset, or null when complete.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "positions_degraded": {
+          "$ref": "#/$defs/PositionDegradation",
+          "description": "Set when returned character offsets are inexact."
+        },
+        "symbols": {
+          "description": "Matching navigation entries.",
+          "items": {
+            "$ref": "#/$defs/OutlineSymbol"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Further matching entries remain.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "symbols",
+        "fidelity",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Document Outline",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
     "name": "get_document_symbols",
     "title": "Document Symbols",
     "description": "Symbols in a file. Returns hierarchical outline with functions, classes, structs, and locations. `positions_degraded: \"response\"` (non-UTF-16 servers only) means some returned `character` offsets may be inexact.",
