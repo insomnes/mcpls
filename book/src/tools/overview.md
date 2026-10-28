@@ -1,19 +1,19 @@
 # Tools Overview
 
-In this chapter you learn the conventions every mcpls tool shares: how code is addressed, what the advisory flags in results mean, and how to read errors. The next chapters then cover the 32 tools by task. Learn these rules once and every tool becomes predictable.
+In this chapter you learn the conventions every mcpls tool shares: how code is addressed, what the advisory flags in results mean, and how to read errors. The next chapters then cover the 31 tools by task. Learn these rules once and every tool becomes predictable.
 
 ## Prerequisites
 
 - A [connected client](../getting-started/connect-client.md).
 
-## The 32 tools at a glance
+## The 31 tools at a glance
 
 | Task | Tools |
 |------|-------|
 | [Read and navigate code](code-intelligence.md) | `get_hover`, `get_definition`, `get_references`, `get_completions`, `get_document_symbols`, `get_document_outline`, `workspace_symbol_search`, `get_document_highlights`, `get_signature_help`, `get_inlay_hints` |
 | [Diagnostics and formatting](diagnostics.md) | `get_diagnostics`, `get_cached_diagnostics`, `format_document`, `format_range`, `get_folding_ranges`, `get_selection_ranges` |
 | [Refactor](refactoring.md) | `prepare_rename`, `rename_symbol`, `get_code_actions` |
-| [Hierarchies and navigation](hierarchies.md) | `go_to_implementation`, `go_to_type_definition`, `go_to_declaration`, `prepare_call_hierarchy`, `get_incoming_calls`, `get_outgoing_calls`, `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
+| [Hierarchies and navigation](hierarchies.md) | `go_to_implementation`, `go_to_type_definition`, `go_to_declaration`, `get_incoming_calls`, `get_outgoing_calls`, `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
 | [Monitor and control servers](server-control.md) | `get_server_logs`, `get_server_messages`, `get_tool_support`, `restart_server` |
 
 Every tool is read-only except `restart_server`, which stops and starts language server processes. Tools that produce edits (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) return them without applying them.
@@ -33,7 +33,7 @@ Range tools take `start_line`, `start_character`, `end_line` and `end_character`
 
 ### Addressing a symbol by name
 
-`get_hover`, `get_definition`, `get_references`, `go_to_implementation`, `go_to_type_definition`, `prepare_call_hierarchy` and `rename_symbol` accept a symbol name instead of a position:
+`get_hover`, `get_definition`, `get_references`, `go_to_implementation`, `go_to_type_definition`, `get_incoming_calls`, `get_outgoing_calls` and `rename_symbol` accept a symbol name instead of a position:
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -70,7 +70,7 @@ List-returning tools are capped at a fixed maximum. When more exist, the result 
 
 ### Advisory flags
 
-Two flags never block or filter a result; they tell the assistant when to be careful.
+These flags describe locations and position reliability. Direct call queries stop before automatic traversal when preparation reports degraded positions.
 
 - **`out_of_workspace`** is set on each location that falls outside every workspace root, such as the standard library or a dependency. The location is valid; it is simply not under your roots.
 - **`positions_degraded`** appears when a column could not be converted exactly for a server that does not use UTF-16. `"request"` means the position you sent reached the server unconverted, so the result may describe a different symbol and should not be trusted. `"response"` means only returned `character` offsets may be inexact. The flag is omitted when everything converted exactly.

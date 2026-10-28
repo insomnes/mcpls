@@ -220,7 +220,7 @@ Restricts a server to exactly the listed routing values; unset means catch-all, 
 | `format_document` | `format_document` |
 | `format_range` | `format_range` |
 | `code_actions` | `get_code_actions` |
-| `call_hierarchy` | `prepare_call_hierarchy`, `get_incoming_calls`, `get_outgoing_calls` |
+| `call_hierarchy` | `get_incoming_calls`, `get_outgoing_calls` |
 | `type_hierarchy` | `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
 | `document_highlights` | `get_document_highlights` |
 | `inlay_hints` | `get_inlay_hints` |

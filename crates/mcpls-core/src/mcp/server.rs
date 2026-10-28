@@ -187,6 +187,67 @@ struct CachedDiagnosticsResponse {
     signals: RouteSignals,
 }
 
+/// Legacy traversal or a direct target's classified, indexed result.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+enum CallHierarchyCallsResult<T> {
+    Legacy(T),
+    Direct(Indexed<Addressed<DirectCallsResult<T>>>),
+}
+
+/// Direct queries traverse only complete singleton preparation.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+enum DirectCallsResult<T> {
+    /// Traversal succeeded; calls may be empty.
+    Ok {
+        status: CallsStatus,
+        #[serde(flatten)]
+        result: T,
+    },
+    /// Preparation stopped before traversal; candidates remain reusable.
+    Stopped {
+        status: PreparationStatus,
+        #[serde(flatten)]
+        result: CallHierarchyPrepareResult,
+    },
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum CallsStatus {
+    Ok,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum PreparationStatus {
+    /// Complete preparation found no callable item.
+    NoItem,
+    /// Multiple or truncated items require explicit selection.
+    SelectionRequired,
+    /// Inexact preparation positions prevented traversal.
+    PreparationIncomplete,
+}
+
+impl<T: ServerText> ServerText for CallHierarchyCallsResult<T> {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        match self {
+            Self::Legacy(result) => result.redact_server_text(redactions),
+            Self::Direct(result) => result.redact_server_text(redactions),
+        }
+    }
+}
+
+impl<T: ServerText> ServerText for DirectCallsResult<T> {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        match self {
+            Self::Ok { result, .. } => result.redact_server_text(redactions),
+            Self::Stopped { result, .. } => result.redact_server_text(redactions),
+        }
+    }
+}
+
 /// MCP server that exposes LSP capabilities as tools.
 ///
 /// Deliberately not `Clone` (#478): each HTTP session must get its own
@@ -1031,57 +1092,34 @@ impl McplsServer {
         )
     }
 
-    /// Prepare call hierarchy at a position.
-    #[tool(
-        description = concat!("Prepare call hierarchy for a symbol. Returns callable items for incoming/outgoing call analysis, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", name_addressing_note!(), " ", indexing_note!(), " ", positions_note_request!(), " ", out_of_workspace_note!()),
-        title = "Prepare Call Hierarchy"
-    )]
-    async fn prepare_call_hierarchy(
-        &self,
-        Parameters(target): Parameters<SymbolTargetParams>,
-    ) -> Result<Json<Indexed<Addressed<CallHierarchyPrepareResult>>>, McpError> {
-        let translator = &self.context.translator;
-        self.addressed_as(
-            target,
-            AddressableTool::PrepareCallHierarchy,
-            |file_path, position| translator.handle_call_hierarchy_prepare(file_path, position),
-            hoist_indexing,
-        )
-        .await
-    }
-
     /// Get incoming calls (callers).
     #[tool(
-        description = concat!("Functions calling the specified item. Takes call hierarchy item, returns callers, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Functions calling a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. ", out_of_workspace_note!()),
         title = "Incoming Calls"
     )]
     async fn get_incoming_calls(
         &self,
-        Parameters(CallHierarchyCallsParams { item }): Parameters<CallHierarchyCallsParams>,
-    ) -> Result<Json<IncomingCallsResult>, McpError> {
-        self.structured_result(
-            self.context
-                .translator
-                .handle_incoming_calls(parse_hierarchy_item(item)?)
-                .await,
-        )
+        Parameters(params): Parameters<CallHierarchyCallsParams>,
+    ) -> Result<Json<CallHierarchyCallsResult<IncomingCallsResult>>, McpError> {
+        self.call_hierarchy_calls(params, |item| {
+            self.context.translator.handle_incoming_calls(item)
+        })
+        .await
     }
 
     /// Get outgoing calls (callees).
     #[tool(
-        description = concat!("Functions called by the specified item. Takes call hierarchy item, returns callees, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Functions called by a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. ", out_of_workspace_note!()),
         title = "Outgoing Calls"
     )]
     async fn get_outgoing_calls(
         &self,
-        Parameters(CallHierarchyCallsParams { item }): Parameters<CallHierarchyCallsParams>,
-    ) -> Result<Json<OutgoingCallsResult>, McpError> {
-        self.structured_result(
-            self.context
-                .translator
-                .handle_outgoing_calls(parse_hierarchy_item(item)?)
-                .await,
-        )
+        Parameters(params): Parameters<CallHierarchyCallsParams>,
+    ) -> Result<Json<CallHierarchyCallsResult<OutgoingCallsResult>>, McpError> {
+        self.call_hierarchy_calls(params, |item| {
+            self.context.translator.handle_outgoing_calls(item)
+        })
+        .await
     }
 
     /// Prepare type hierarchy at a position.
@@ -1538,6 +1576,83 @@ impl McplsServer {
             .with_resolved_target(file_path, target, tool, call)
             .await;
         self.structured_result(answer.map(finish))
+    }
+
+    /// Compose direct preparation and one traversal before rendering server text.
+    async fn call_hierarchy_calls<T, F, Fut>(
+        &self,
+        params: CallHierarchyCallsParams,
+        walk: F,
+    ) -> Result<Json<CallHierarchyCallsResult<T>>, McpError>
+    where
+        T: Serialize + JsonSchema + ServerText,
+        F: FnOnce(CheckedHierarchyItem) -> Fut,
+        Fut: Future<Output = crate::error::Result<T>>,
+    {
+        let target = match params {
+            CallHierarchyCallsParams::Item { item } => {
+                return self.structured_result(
+                    walk(parse_hierarchy_item(item)?)
+                        .await
+                        .map(CallHierarchyCallsResult::Legacy),
+                );
+            }
+            CallHierarchyCallsParams::Target(target) => target,
+        };
+        if !target.file_path.is_absolute() {
+            return Err(McpError::invalid_params("file_path must be absolute", None));
+        }
+        let (file_path, target) = parse_target(target.file_path, target.target)?;
+        let translator = &self.context.translator;
+        let prepared = translator
+            .with_resolved_target(
+                file_path,
+                target,
+                AddressableTool::PrepareCallHierarchy,
+                |file_path, position| translator.handle_call_hierarchy_prepare(file_path, position),
+            )
+            .await
+            .map_err(|error| self.render_error(error))?;
+        let Indexed {
+            result:
+                Addressed {
+                    result: mut prepared,
+                    resolved_symbol,
+                },
+            indexing,
+        } = hoist_indexing(prepared);
+        let result = if prepared.positions_degraded.is_some() {
+            DirectCallsResult::Stopped {
+                status: PreparationStatus::PreparationIncomplete,
+                result: prepared,
+            }
+        } else if prepared.truncated || prepared.items.len() > 1 {
+            DirectCallsResult::Stopped {
+                status: PreparationStatus::SelectionRequired,
+                result: prepared,
+            }
+        } else if let Some(item) = prepared.items.pop() {
+            // Pass the original item, including opaque data, before any rendering.
+            let calls = walk(parse_hierarchy_item(item)?)
+                .await
+                .map_err(|error| self.render_error(error))?;
+            DirectCallsResult::Ok {
+                status: CallsStatus::Ok,
+                result: calls,
+            }
+        } else {
+            DirectCallsResult::Stopped {
+                status: PreparationStatus::NoItem,
+                result: prepared,
+            }
+        };
+        self.structured_result(Ok(CallHierarchyCallsResult::Direct(Indexed::new(
+            Addressed {
+                result,
+                resolved_symbol,
+            },
+            indexing,
+        ))))
     }
 
     /// [`to_structured_tool_result`] with the secrets of every live server
@@ -2601,7 +2716,15 @@ mod tests {
                     .await
                     .map(|_| ()),
                 server
-                    .prepare_call_hierarchy(at(Parameters(position(line, character))))
+                    .get_incoming_calls(Parameters(CallHierarchyCallsParams::Target(
+                        position(line, character).into(),
+                    )))
+                    .await
+                    .map(|_| ()),
+                server
+                    .get_outgoing_calls(Parameters(CallHierarchyCallsParams::Target(
+                        position(line, character).into(),
+                    )))
                     .await
                     .map(|_| ()),
                 server
@@ -2701,13 +2824,13 @@ mod tests {
         ] {
             let results = [
                 server
-                    .get_incoming_calls(Parameters(CallHierarchyCallsParams {
+                    .get_incoming_calls(Parameters(CallHierarchyCallsParams::Item {
                         item: item_json(range, selection),
                     }))
                     .await
                     .map(|_| ()),
                 server
-                    .get_outgoing_calls(Parameters(CallHierarchyCallsParams {
+                    .get_outgoing_calls(Parameters(CallHierarchyCallsParams::Item {
                         item: item_json(range, selection),
                     }))
                     .await
@@ -2899,7 +3022,7 @@ mod tests {
         };
         let call = |item| async {
             server
-                .get_incoming_calls(Parameters(CallHierarchyCallsParams { item }))
+                .get_incoming_calls(Parameters(CallHierarchyCallsParams::Item { item }))
                 .await
                 .map(|_| ())
         };
@@ -4023,18 +4146,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_call_hierarchy_tool_with_params() {
-        let (server, _temp_dir, test_file) = create_test_server_with_real_file();
-        let params = Parameters(PositionParams {
-            file_path: PathBuf::from(test_file.to_str().unwrap()),
-            line: 10,
-            character: 5,
-        });
-        let result = server.prepare_call_hierarchy(at(params)).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
     async fn test_incoming_calls_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let uri = url::Url::from_file_path(&test_file).unwrap().to_string();
@@ -4051,7 +4162,7 @@ mod tests {
                 "end": {"line": 1, "character": 10}
             }
         });
-        let params = Parameters(CallHierarchyCallsParams {
+        let params = Parameters(CallHierarchyCallsParams::Item {
             item: serde_json::from_value(item).unwrap(),
         });
         let result = server.get_incoming_calls(params).await;
@@ -4075,7 +4186,7 @@ mod tests {
                 "end": {"line": 1, "character": 10}
             }
         });
-        let params = Parameters(CallHierarchyCallsParams {
+        let params = Parameters(CallHierarchyCallsParams::Item {
             item: serde_json::from_value(item).unwrap(),
         });
         let result = server.get_outgoing_calls(params).await;
@@ -5303,7 +5414,6 @@ sleep 0.3
             ("format_document", true, false, true),
             ("workspace_symbol_search", true, false, true),
             ("get_code_actions", true, false, true),
-            ("prepare_call_hierarchy", true, false, true),
             ("get_incoming_calls", true, false, true),
             ("get_outgoing_calls", true, false, true),
             ("prepare_type_hierarchy", true, false, true),
@@ -5869,6 +5979,360 @@ sleep 0.3
         .unwrap_or_else(|_| panic!("no response to {method}"));
         serving.abort();
         response
+    }
+
+    /// Direct queries must distinguish no callable from a callable with no calls,
+    /// and must not traverse ambiguous or degraded preparation.
+    #[tokio::test]
+    async fn test_direct_calls_classify_preparation_over_mcp() {
+        // The existing public preparation limit is 10,000 items.
+        const MAX_NORMALIZED_LOCATIONS: usize = 10_000;
+
+        for tool in ["get_incoming_calls", "get_outgoing_calls"] {
+            for (count, degraded, expected) in [
+                (0, false, "no_item"),
+                (1, false, "ok"),
+                (2, false, "selection_required"),
+                (MAX_NORMALIZED_LOCATIONS + 1, false, "selection_required"),
+                (0, true, "preparation_incomplete"),
+                (1, true, "preparation_incomplete"),
+                (2, true, "preparation_incomplete"),
+            ] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let items = serde_json::Value::Array(vec![item; count]);
+                let (result, requests) = hierarchy_wire_call(
+                    fixture,
+                    tool,
+                    |file| {
+                        serde_json::json!({
+                            "file_path": file, "line": 1,
+                            "character": if degraded { 15 } else { 4 },
+                        })
+                    },
+                    items,
+                    serde_json::json!([]),
+                    degraded,
+                )
+                .await;
+                assert_eq!(result["status"], expected, "{tool}: {result}");
+                assert_eq!(result["indexing_in_progress"], false);
+                let walks = requests
+                    .iter()
+                    .filter(|request| {
+                        request["method"]
+                            .as_str()
+                            .is_some_and(|method| method.starts_with("callHierarchy/"))
+                    })
+                    .count();
+                if expected == "ok" {
+                    assert_eq!(result["calls"], serde_json::json!([]));
+                    assert_eq!(walks, 1);
+                } else {
+                    assert!(result.get("calls").is_none());
+                    assert_eq!(
+                        result["items"].as_array().unwrap().len(),
+                        count.min(MAX_NORMALIZED_LOCATIONS)
+                    );
+                    assert_eq!(walks, 0, "unsafe preparation must not traverse");
+                }
+                assert_eq!(
+                    result.get("truncated").is_some(),
+                    count > MAX_NORMALIZED_LOCATIONS
+                );
+                if degraded {
+                    assert_eq!(result["positions_degraded"], "request");
+                }
+            }
+        }
+    }
+
+    /// Both direct addressing forms return real relationships and forward opaque
+    /// JSON unchanged. Legacy reuse retains the old result shape.
+    #[tokio::test]
+    async fn test_direct_calls_and_item_reuse_over_mcp() {
+        for tool in ["get_incoming_calls", "get_outgoing_calls"] {
+            let field = if tool == "get_incoming_calls" {
+                "from"
+            } else {
+                "to"
+            };
+            for by_name in [false, true] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let opaque = item["data"].clone();
+                let calls = serde_json::json!([{
+                    field: item, "fromRanges": [{
+                        "start": {"line": 0, "character": 3},
+                        "end": {"line": 0, "character": 4},
+                    }],
+                }]);
+                let (result, requests) = hierarchy_wire_call(
+                    fixture, tool,
+                    |file| if by_name {
+                        serde_json::json!({"file_path": file, "symbol_name": "f", "symbol_kind": "function"})
+                    } else {
+                        serde_json::json!({"file_path": file, "line": 1, "character": 4})
+                    },
+                    serde_json::json!([item]), calls.clone(), false,
+                ).await;
+                assert_eq!(result["status"], "ok", "{result}");
+                assert_eq!(result["calls"][0][field]["name"], "f");
+                assert_eq!(result["calls"][0][field]["data"], opaque);
+                assert_eq!(result.get("resolved_symbol").is_some(), by_name);
+                let walk = requests
+                    .iter()
+                    .find(|request| {
+                        request["method"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("callHierarchy/")
+                    })
+                    .unwrap();
+                assert_eq!(walk["params"]["item"]["data"], opaque);
+            }
+        }
+    }
+
+    /// Both forms and statuses are discoverable through the public list endpoint.
+    #[tokio::test]
+    async fn test_direct_call_schemas_over_mcp() {
+        let (listed, _) =
+            request_over_the_wire(create_test_server(), "tools/list", serde_json::json!({})).await;
+        for name in ["get_incoming_calls", "get_outgoing_calls"] {
+            let tool = listed["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            for field in [
+                "item",
+                "file_path",
+                "line",
+                "character",
+                "symbol_name",
+                "symbol_kind",
+                "container",
+            ] {
+                assert!(
+                    tool["inputSchema"]["properties"].get(field).is_some(),
+                    "{name}: {field}"
+                );
+            }
+            let output = tool["outputSchema"].to_string();
+            for status in [
+                "ok",
+                "no_item",
+                "selection_required",
+                "preparation_incomplete",
+            ] {
+                assert!(output.contains(status), "{name}: {status}");
+            }
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
+    }
+
+    /// Direct queries replace standalone MCP preparation in both inventories.
+    #[tokio::test]
+    async fn test_removed_call_preparation_over_mcp() {
+        for prefix in [None, Some("optics")] {
+            let config = McpConfig {
+                tool_prefix: prefix.map(|value| value.parse().unwrap()),
+                ..Default::default()
+            };
+            let server =
+                create_test_server_with_mcp_config(ProjectConfigStatus::NotIgnored, config);
+            let name = |tool: &str| {
+                prefix.map_or_else(|| tool.to_owned(), |prefix| format!("{prefix}_{tool}"))
+            };
+            let (listed, _) = request_over_the_wire(
+                server.for_new_session(),
+                "tools/list",
+                serde_json::json!({}),
+            )
+            .await;
+            let tools = listed["result"]["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 31);
+            assert!(
+                !tools
+                    .iter()
+                    .any(|tool| tool["name"] == name("prepare_call_hierarchy"))
+            );
+            let supported = tools_call_over_the_wire(
+                server.for_new_session(),
+                serde_json::json!({"name": name("get_tool_support"), "arguments": {}}),
+            )
+            .await;
+            let tools = supported["result"]["structuredContent"]["tools"]
+                .as_array()
+                .unwrap();
+            assert_eq!(tools.len(), 31);
+            assert!(
+                !tools
+                    .iter()
+                    .any(|tool| tool["name"] == name("prepare_call_hierarchy"))
+            );
+            let removed = tools_call_over_the_wire(server.for_new_session(), serde_json::json!({"name": name("prepare_call_hierarchy"), "arguments": {"file_path": "/a.rs", "line": 1, "character": 4}})).await;
+            let unknown = tools_call_over_the_wire(
+                server.for_new_session(),
+                serde_json::json!({"name": name("unknown_tool"), "arguments": {}}),
+            )
+            .await;
+            assert!(removed.get("error").is_some(), "{removed}");
+            assert_eq!(removed["error"]["code"], unknown["error"]["code"]);
+            assert_eq!(
+                removed["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .replace(&name("prepare_call_hierarchy"), "unknown_tool"),
+                unknown["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .replace(&name("unknown_tool"), "unknown_tool")
+            );
+        }
+    }
+
+    /// Invalid direct forms fail before any language-server operation.
+    #[tokio::test]
+    async fn test_direct_calls_reject_invalid_forms_over_mcp() {
+        for tool in ["get_incoming_calls", "get_outgoing_calls"] {
+            for arguments in [
+                serde_json::json!({}),
+                serde_json::json!({"file_path": "/a.rs"}),
+                serde_json::json!({"file_path": "/a.rs", "line": 1}),
+                serde_json::json!({"file_path": "/a.rs", "character": 1}),
+                serde_json::json!({"file_path": "/a.rs", "symbol_kind": "function"}),
+                serde_json::json!({"file_path": "/a.rs", "container": "C"}),
+                serde_json::json!({"file_path": "/a.rs", "line": 1, "character": 1, "symbol_name": "f"}),
+                serde_json::json!({"file_path": "/a.rs", "symbol_name": "f", "unknown": 1}),
+                serde_json::json!({"file_path": "relative.rs", "line": 1, "character": 1}),
+                serde_json::json!({"file_path": "/a.rs", "line": 0, "character": 1}),
+            ] {
+                let result = tools_call_over_the_wire(
+                    create_test_server(),
+                    serde_json::json!({"name": tool, "arguments": arguments}),
+                )
+                .await;
+                assert!(
+                    result["error"]["code"] == -32602 || result["result"]["isError"] == true,
+                    "{tool}: {result}"
+                );
+            }
+            let fixture = hierarchy_wire_fixture();
+            let item = hierarchy_lsp_item(&fixture.file);
+            let result = tools_call_over_the_wire(create_test_server(), serde_json::json!({"name": tool, "arguments": {"item": item, "file_path": "/a.rs", "symbol_name": "f"}})).await;
+            assert_eq!(result["result"]["isError"], true);
+        }
+    }
+
+    fn hierarchy_wire_fixture() -> SupportFixture {
+        support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        )
+    }
+
+    fn hierarchy_lsp_item(file: &Path) -> serde_json::Value {
+        let range = serde_json::json!({"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 4}});
+        serde_json::json!({
+            "name": "f", "kind": 12,
+            "uri": url::Url::from_file_path(file).unwrap().as_str(),
+            "range": range, "selectionRange": range,
+            "data": {"nested": [null, {"selectionRange": "opaque", "token": "unchanged"}]},
+        })
+    }
+
+    async fn hierarchy_wire_call(
+        mut fixture: SupportFixture,
+        tool: &str,
+        arguments: impl FnOnce(&Path) -> serde_json::Value,
+        prepared: serde_json::Value,
+        calls: serde_json::Value,
+        utf8: bool,
+    ) -> (serde_json::Value, Vec<serde_json::Value>) {
+        use crate::test_lsp::{read_framed_message, write_response};
+        std::fs::write(&fixture.file, "fn f() {} // 😀\n").unwrap();
+        if utf8 {
+            fixture.server.context.translator.register_server(
+                crate::config::ServerId::from_static("rust"),
+                crate::lsp::LspServer::new_for_test_with_encoding(
+                    lsp_types::ServerCapabilities {
+                        call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                        ..Default::default()
+                    },
+                    lsp_types::PositionEncodingKind::UTF8,
+                ),
+            );
+        }
+        let arguments = arguments(&fixture.file);
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                seen.lock().await.push(request.clone());
+                let response = match request["method"].as_str().unwrap() {
+                    "textDocument/prepareCallHierarchy" => prepared.clone(),
+                    "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls" => calls.clone(),
+                    "textDocument/documentSymbol" => serde_json::json!([{
+                        "name": "f", "kind": 12,
+                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 9}},
+                        "selectionRange": {"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 4}},
+                    }]),
+                    _ if request.get("id").is_none() => continue,
+                    method => panic!("unexpected LSP request: {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], response).await;
+            }
+        });
+        let result = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({"name": tool, "arguments": arguments}),
+        )
+        .await;
+        let field = if tool == "get_incoming_calls" {
+            "from"
+        } else {
+            "to"
+        };
+        let direct = &result["result"]["structuredContent"];
+        if direct["status"] == "ok"
+            && direct["calls"]
+                .as_array()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            let item = &direct["calls"][0][field];
+            let reused = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name": tool, "arguments": {"item": item},
+                }),
+            )
+            .await;
+            let legacy = &reused["result"]["structuredContent"];
+            assert!(legacy.get("status").is_none(), "{reused}");
+            assert!(legacy.get("indexing_in_progress").is_none());
+            assert_eq!(legacy["calls"], direct["calls"]);
+        }
+        responder.abort();
+        let requests = requests.lock().await.clone();
+        assert!(
+            result.get("error").is_none() && result["result"]["isError"] != true,
+            "{result}"
+        );
+        (result["result"]["structuredContent"].clone(), requests)
     }
 
     /// Sends one `initialize` per entry of `versions` over a fresh in-memory
@@ -6903,7 +7367,7 @@ sleep 0.3
         server: McplsServer,
         dir: tempfile::TempDir,
         file: PathBuf,
-        _fake_servers: Vec<crate::test_lsp::FakeServer>,
+        fake_servers: Vec<crate::test_lsp::FakeServer>,
     }
 
     /// One live (registered, non-dead) catch-all server per `(id, language,
@@ -6969,7 +7433,7 @@ sleep 0.3
             server,
             dir,
             file,
-            _fake_servers: fake_servers,
+            fake_servers,
         }
     }
 
@@ -6999,7 +7463,7 @@ sleep 0.3
                 "start": {"line": 1, "character": 1},
                 "end": {"line": 1, "character": 10}
             });
-            CallHierarchyCallsParams {
+            CallHierarchyCallsParams::Item {
                 item: serde_json::from_value(serde_json::json!({
                     "name": "f", "kind": 12, "uri": uri,
                     "range": range, "selectionRange": range
@@ -7105,10 +7569,6 @@ sleep 0.3
                     range: range(),
                     kind_filter: None,
                 }))
-                .await
-                .map(|_| ()),
-            McpTool::PrepareCallHierarchy => server
-                .prepare_call_hierarchy(Parameters(position().into()))
                 .await
                 .map(|_| ()),
             McpTool::GetIncomingCalls => server
@@ -7320,7 +7780,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 32);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 31);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

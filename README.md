@@ -9,7 +9,7 @@
 
 **Give your AI coding agent a compiler's understanding of your code.**
 
-mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 32 MCP tools, so an AI client reasons about code the way an IDE does.
+mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 31 MCP tools, so an AI client reasons about code the way an IDE does.
 
 ```mermaid
 flowchart LR
@@ -25,7 +25,7 @@ The full documentation is the mcpls book: **<https://bug-ops.github.io/mcpls/>**
 | Install and first run | [Installation](https://bug-ops.github.io/mcpls/getting-started/installation.html) |
 | Connect Claude Code or another client | [Connect an AI Client](https://bug-ops.github.io/mcpls/getting-started/connect-client.html) |
 | Configure language servers | [Configuration](https://bug-ops.github.io/mcpls/guide/configuration.html) |
-| All 32 tools | [Tools Overview](https://bug-ops.github.io/mcpls/tools/overview.html) |
+| All 31 tools | [Tools Overview](https://bug-ops.github.io/mcpls/tools/overview.html) |
 | Something does not work | [Troubleshooting](https://bug-ops.github.io/mcpls/guide/troubleshooting.html) |
 | HTTP transport and allowlists | [Transports](https://bug-ops.github.io/mcpls/advanced/transports.html) |
 | Security model and untrusted workspaces | [Security and Trust](https://bug-ops.github.io/mcpls/advanced/security.html) |

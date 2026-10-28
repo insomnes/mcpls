@@ -793,54 +793,28 @@ fn sc_get_code_actions(client: &mut McpClient, workspace: &Path) -> Result<(), S
 // Call hierarchy helpers
 // ---------------------------------------------------------------------------
 
-/// Tool 11: `prepare_call_hierarchy` — on `add`.
-///
-/// Returns the prepared item for use by sub-cases 12 and 13.
-///
-/// Since `HierarchyItem` now serializes `selectionRange` in camelCase,
-/// the item round-trips correctly without any field renaming.
-fn prepare_call_hierarchy_item(client: &mut McpClient, workspace: &Path) -> Result<Value, String> {
-    let lib = workspace.join("src/lib.rs");
-    let add_line = find_line(&lib, "pub fn add(");
-    let resp = client
+/// Obtain the returned `add` callee to follow it through item traversal.
+fn returned_call_hierarchy_item(client: &mut McpClient, workspace: &Path) -> Result<Value, String> {
+    let response = client
         .call_tool(
-            "prepare_call_hierarchy",
+            "get_outgoing_calls",
             &json!({
-                "file_path": lib.to_string_lossy(),
-                "line": add_line,
-                "character": 8,
+                "file_path": workspace.join("src/lib.rs"), "symbol_name": "caller",
             }),
         )
-        .map_err(|e| format!("call failed: {e}"))?;
-
-    let text = assertions::assert_tool_ok(&resp);
-    let inner: Value = serde_json::from_str(&text).map_err(|e| format!("bad JSON: {e}"))?;
-
-    let items = inner["items"]
+        .map_err(|error| format!("call failed: {error}"))?;
+    let result: Value = serde_json::from_str(&assertions::assert_tool_ok(&response))
+        .map_err(|error| format!("bad JSON: {error}"))?;
+    result["calls"]
         .as_array()
-        .or_else(|| inner.as_array())
-        .ok_or_else(|| format!("expected items array, got {inner}"))?;
-
-    if items.is_empty() {
-        return Err("prepare_call_hierarchy returned no items".to_owned());
-    }
-
-    let name = items[0]["name"].as_str().unwrap_or("");
-    if !name.contains("add") {
-        return Err(format!(
-            "expected call hierarchy item for 'add', got '{name}'"
-        ));
-    }
-    Ok(items[0].clone())
-}
-
-fn sc_prepare_call_hierarchy(client: &mut McpClient, workspace: &Path) -> Result<(), String> {
-    prepare_call_hierarchy_item(client, workspace).map(|_| ())
+        .and_then(|calls| calls.iter().find(|call| call["to"]["name"] == "add"))
+        .map(|call| call["to"].clone())
+        .ok_or_else(|| format!("expected returned add item, got {result}"))
 }
 
 /// Tool 12: `get_incoming_calls` — `caller` must appear as incoming caller to `add`.
 fn sc_get_incoming_calls(client: &mut McpClient, workspace: &Path) -> Result<(), String> {
-    let item = prepare_call_hierarchy_item(client, workspace)?;
+    let item = returned_call_hierarchy_item(client, workspace)?;
     // Retry: callHierarchy/incomingCalls may return empty on first query while
     // rust-analyzer resolves cross-function relationships.
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -885,7 +859,7 @@ fn sc_get_incoming_calls(client: &mut McpClient, workspace: &Path) -> Result<(),
 
 /// Tool 13: `get_outgoing_calls` — `add` calls nothing user-defined.
 fn sc_get_outgoing_calls(client: &mut McpClient, workspace: &Path) -> Result<(), String> {
-    let item = prepare_call_hierarchy_item(client, workspace)?;
+    let item = returned_call_hierarchy_item(client, workspace)?;
     let resp = client
         .call_tool("get_outgoing_calls", &json!({ "item": item }))
         .map_err(|e| format!("call failed: {e}"))?;
@@ -916,6 +890,57 @@ fn sc_get_outgoing_calls(client: &mut McpClient, workspace: &Path) -> Result<(),
                 "unexpected user-defined outgoing call from 'add': '{name}'"
             ));
         }
+    }
+    Ok(())
+}
+
+/// A direct incoming position query must expose the known `caller` -> `add` edge.
+fn sc_direct_incoming_calls(client: &mut McpClient, workspace: &Path) -> Result<(), String> {
+    let lib = workspace.join("src/lib.rs");
+    let response = client
+        .call_tool(
+            "get_incoming_calls",
+            &json!({
+                "file_path": lib, "line": find_line(&lib, "pub fn add("), "character": 8,
+            }),
+        )
+        .map_err(|error| format!("call failed: {error}"))?;
+    let result: Value = serde_json::from_str(&assertions::assert_tool_ok(&response))
+        .map_err(|error| format!("bad JSON: {error}"))?;
+    if result["status"] != "ok"
+        || !result["calls"]
+            .as_array()
+            .is_some_and(|calls| calls.iter().any(|call| call["from"]["name"] == "caller"))
+    {
+        return Err(format!(
+            "expected direct incoming caller -> add edge, got {result}"
+        ));
+    }
+    Ok(())
+}
+
+/// A direct outgoing name query must expose the known `caller` -> `add` edge.
+fn sc_direct_outgoing_calls(client: &mut McpClient, workspace: &Path) -> Result<(), String> {
+    let response = client
+        .call_tool(
+            "get_outgoing_calls",
+            &json!({
+                "file_path": workspace.join("src/lib.rs"), "symbol_name": "caller",
+                "symbol_kind": "function",
+            }),
+        )
+        .map_err(|error| format!("call failed: {error}"))?;
+    let result: Value = serde_json::from_str(&assertions::assert_tool_ok(&response))
+        .map_err(|error| format!("bad JSON: {error}"))?;
+    if result["status"] != "ok"
+        || result["resolved_symbol"]["name"] != "caller"
+        || !result["calls"]
+            .as_array()
+            .is_some_and(|calls| calls.iter().any(|call| call["to"]["name"] == "add"))
+    {
+        return Err(format!(
+            "expected direct outgoing caller -> add edge, got {result}"
+        ));
     }
     Ok(())
 }
@@ -1578,9 +1603,10 @@ fn sub_cases() -> Vec<SubCase> {
         sub_case!(sc_format_document),
         sub_case!(sc_workspace_symbol_search),
         sub_case!(sc_get_code_actions),
-        sub_case!(sc_prepare_call_hierarchy),
         sub_case!(sc_get_incoming_calls),
         sub_case!(sc_get_outgoing_calls),
+        sub_case!(sc_direct_incoming_calls),
+        sub_case!(sc_direct_outgoing_calls),
         sub_case!(sc_get_cached_diagnostics),
         sub_case!(sc_get_server_logs),
         sub_case!(sc_get_server_messages),

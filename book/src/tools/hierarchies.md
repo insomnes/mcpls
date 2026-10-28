@@ -24,16 +24,36 @@ An empty result is valid. Lists are capped (`truncated: true`).
 
 ## Call hierarchy
 
-Call hierarchy is a two-step conversation. First ask for an item, then walk from it.
-
-1. `prepare_call_hierarchy` takes a position or `symbol_name` and returns callable items.
-2. `get_incoming_calls` returns the callers of an item. `get_outgoing_calls` returns the functions it calls.
+`get_incoming_calls` finds callers. `get_outgoing_calls` finds callees. Both accept a direct file target, so no separate preparation request is needed:
 
 ```json
-{ "file_path": "/work/app/src/data.rs", "symbol_name": "initialize" }
+{ "file_path": "/work/app/src/data.rs", "line": 12, "character": 8 }
 ```
 
-Pass the `item` object to the next tool exactly as `prepare_call_hierarchy` returned it, unchanged: `{ "item": <the returned object> }`. An item is only meaningful to the server that produced it, so all three tools are routed together.
+Positions are 1-based; `character` counts UTF-16 code units. You can also use a symbol name with optional `symbol_kind` and `container` qualifiers:
+
+```json
+{ "file_path": "/work/app/src/data.rs", "symbol_name": "Store::initialize", "symbol_kind": "method" }
+```
+
+A name must resolve unambiguously before preparation. Name ambiguity and missing names keep the usual structured [addressing errors](overview.md#addressing-a-symbol-by-name).
+
+Direct queries resolve the target, prepare callable items, and traverse one level only when preparation returns exactly one item with complete, reliable positions.
+
+| `status` | Meaning |
+|----------|---------|
+| `ok` | Traversal succeeded. `calls` contains callers (`from`) or callees (`to`), with `from_ranges`. Empty `calls` is valid. |
+| `no_item` | Complete preparation returned no callable item. The result has `items: []` and no `calls`. |
+| `selection_required` | Preparation returned multiple items or was truncated. Choose a returned `items` entry explicitly; no traversal occurred. |
+| `preparation_incomplete` | Preparation reported `positions_degraded`, even if empty, multiple or truncated. The result contains `items` and no `calls`; no traversal occurred. |
+
+All direct results include `indexing_in_progress`. When true, empty or partial results may reflect an incomplete index; `no_item` does not prove absence. Name queries include `resolved_symbol`. Lists remain bounded and report `truncated: true` when results were omitted. Degraded preparation takes precedence over selection or absence. Traversal warnings remain visible on successful queries.
+
+To choose a candidate from `selection_required`, pass one `items` entry unchanged to either call tool: `{ "item": <the selected object> }`. To follow another level, pass a returned `from` or `to` item the same way. Preserve every item field, including opaque nested `data`.
+
+Give either `item` or a direct target, never both. Item requests return `calls` without direct-query `status` or `indexing_in_progress`. Items are meaningful only to the server that produced them; both tools share the `call_hierarchy` route. These are separate operations, not an atomic snapshot. An external result marked `out_of_workspace` does not permit a later request outside the configured workspace.
+
+**Migration:** the standalone MCP `prepare_call_hierarchy` tool was removed intentionally. Replace `prepare_call_hierarchy(target)` followed by a call tool with `get_incoming_calls(target)` or `get_outgoing_calls(target)`. Direct queries prepare internally. Use the item form to choose candidates or follow returned relationships. Internal LSP preparation remains available to bridge clients.
 
 ## Type hierarchy
 

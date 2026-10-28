@@ -790,14 +790,21 @@ impl From<HierarchyItemInput> for HierarchyItem {
 /// Wire form of [`CallHierarchyCallsParams`].
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(
-    description = "Parameters for getting incoming or outgoing calls for a call hierarchy item."
-)]
 struct CallHierarchyCallsWire {
-    #[schemars(
-        description = "The call hierarchy item, exactly as a prepare, incoming or outgoing call result gave it."
-    )]
-    item: HierarchyItemInput,
+    /// Reuse an item unchanged, instead of a file target.
+    item: Option<HierarchyItemInput>,
+    /// Absolute path, instead of `item`.
+    file_path: Option<PathBuf>,
+    /// Line number (1-based), with `character`.
+    line: Option<u32>,
+    /// UTF-16 column (1-based), with `line`.
+    character: Option<u32>,
+    /// Symbol name, instead of a position.
+    symbol_name: Option<String>,
+    /// Optional symbol kind, with `symbol_name`.
+    symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
+    /// Optional immediate container, with `symbol_name`.
+    container: Option<String>,
 }
 
 /// Wire form of [`TypeHierarchyWalkParams`].
@@ -815,18 +822,49 @@ struct TypeHierarchyWalkWire {
 
 /// Parameters for the `get_incoming_calls` and `get_outgoing_calls` tools.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(from = "CallHierarchyCallsWire")]
+#[serde(try_from = "CallHierarchyCallsWire")]
 #[schemars(with = "CallHierarchyCallsWire")]
-pub struct CallHierarchyCallsParams {
-    /// The call hierarchy item to get calls for (from prepare response).
-    pub item: HierarchyItem,
+pub enum CallHierarchyCallsParams {
+    /// Traverse an unchanged item from a hierarchy result.
+    Item {
+        /// The reusable hierarchy item.
+        item: HierarchyItem,
+    },
+    /// Resolve and prepare a file target before traversal.
+    Target(SymbolTargetParams),
 }
 
-impl From<CallHierarchyCallsWire> for CallHierarchyCallsParams {
-    fn from(wire: CallHierarchyCallsWire) -> Self {
-        Self {
-            item: wire.item.into(),
+impl TryFrom<CallHierarchyCallsWire> for CallHierarchyCallsParams {
+    type Error = String;
+
+    fn try_from(wire: CallHierarchyCallsWire) -> Result<Self, Self::Error> {
+        if let Some(item) = wire.item {
+            if wire.file_path.is_some()
+                || wire.line.is_some()
+                || wire.character.is_some()
+                || wire.symbol_name.is_some()
+                || wire.symbol_kind.is_some()
+                || wire.container.is_some()
+            {
+                return Err("give either `item` or a file target, not both".to_owned());
+            }
+            return Ok(Self::Item { item: item.into() });
         }
+        let file_path = wire
+            .file_path
+            .ok_or("give `item` or an absolute `file_path` with a target")?;
+        SymbolTargetParams::from_parts(
+            file_path,
+            PositionFields {
+                line: wire.line,
+                character: wire.character,
+            },
+            wire.symbol_name,
+            wire.symbol_kind,
+            wire.container,
+        )
+        .map(Self::Target)
+        .map_err(|error| error.to_string())
     }
 }
 

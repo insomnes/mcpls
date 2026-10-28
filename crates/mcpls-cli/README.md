@@ -5,7 +5,7 @@
 
 **Give your AI agent a compiler's eye.**
 
-The mcpls command-line tool bridges the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project and exposes their type information, references, diagnostics and refactoring to an AI client as 32 MCP tools. One binary, any language, no runtime dependencies.
+The mcpls command-line tool bridges the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project and exposes their type information, references, diagnostics and refactoring to an AI client as 31 MCP tools. One binary, any language, no runtime dependencies.
 
 Documentation: <https://bug-ops.github.io/mcpls/>
 
@@ -37,7 +37,7 @@ Rust projects work with no configuration. For other languages, see [Minimal Conf
 
 ## Features
 
-- 32 tools: hover, definition, references, diagnostics, rename, code actions, call and type hierarchies, selection and folding ranges, and more
+- 31 tools: hover, definition, references, diagnostics, rename, code actions, call and type hierarchies, selection and folding ranges, and more
 - Symbol-name addressing, `get_tool_support` discovery and `restart_server`
 - Several language servers at once, started concurrently and stopped with mcpls, with graceful degradation
 - stdio transport by default; optional HTTP transport behind the `transport-http` feature

@@ -76,7 +76,7 @@ a few map many-to-one:
 | `selection_range` | `get_selection_ranges` |
 | `folding_range` | `get_folding_ranges` |
 | `code_actions` | `get_code_actions` |
-| `call_hierarchy` | `prepare_call_hierarchy`, `get_incoming_calls`, `get_outgoing_calls`, sharing one route: an incoming/outgoing-calls lookup only makes sense against the server that produced the originating call-hierarchy item |
+| `call_hierarchy` | `get_incoming_calls`, `get_outgoing_calls`, sharing one route: direct caller/callee queries prepare internally; selected candidates and returned call items must be followed on the server that produced them |
 | `inlay_hints` | `get_inlay_hints` |
 | `type_hierarchy` | `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes`, sharing one route like call hierarchy |
 | `document_highlights` | `get_document_highlights` |
