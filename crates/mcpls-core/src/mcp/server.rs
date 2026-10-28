@@ -190,6 +190,7 @@ struct CachedDiagnosticsResponse {
 /// Legacy traversal or a direct target's classified, indexed result.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(untagged)]
+#[schemars(extend("type" = "object"))]
 enum CallHierarchyCallsResult<T> {
     Legacy(T),
     Direct(Indexed<Addressed<DirectCallsResult<T>>>),
@@ -6120,6 +6121,10 @@ sleep 0.3
                     "{name}: {field}"
                 );
             }
+            assert_eq!(
+                tool["outputSchema"]["type"], "object",
+                "{name}: MCP Tool.outputSchema requires an object root"
+            );
             let output = tool["outputSchema"].to_string();
             for status in [
                 "ok",

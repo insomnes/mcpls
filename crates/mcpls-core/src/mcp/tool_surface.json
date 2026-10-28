@@ -3255,7 +3255,8 @@
         {
           "$ref": "#/$defs/Indexed"
         }
-      ]
+      ],
+      "type": "object"
     },
     "annotations": {
       "title": "Incoming Calls",
@@ -3942,7 +3943,8 @@
         {
           "$ref": "#/$defs/Indexed"
         }
-      ]
+      ],
+      "type": "object"
     },
     "annotations": {
       "title": "Outgoing Calls",
