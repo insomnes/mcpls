@@ -947,6 +947,9 @@ impl McplsServer {
             limit,
         }): Parameters<DocumentOutlineParams>,
     ) -> Result<Json<DocumentOutlineResult>, McpError> {
+        if !file_path.is_absolute() {
+            return Err(McpError::invalid_params("file_path must be absolute", None));
+        }
         let file_path = parse_client_path(file_path)?;
         let kind_filter = parse_kind_filter(kind_filter, KindFilterField::KindFilter)?;
         self.structured_result(
@@ -3943,6 +3946,27 @@ mod tests {
 
         let result = server.get_completions(params).await;
         assert!(result.is_err());
+    }
+
+    /// Relative outline paths are rejected at the MCP boundary before routing.
+    #[tokio::test]
+    async fn test_document_outline_rejects_relative_path_over_the_wire() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(workspace.path().join("file.rs"), "fn main() {}\n").unwrap();
+        let server = server_over(workspace.path());
+        let response = tools_call_over_the_wire(
+            server,
+            serde_json::json!({
+                "name": "get_document_outline",
+                "arguments": {"file_path": "file.rs"}
+            }),
+        )
+        .await;
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+        assert_eq!(
+            response["error"]["message"], "file_path must be absolute",
+            "{response}"
+        );
     }
 
     #[tokio::test]
