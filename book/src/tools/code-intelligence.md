@@ -55,22 +55,65 @@ A symbol with several definitions returns several locations; an unknown symbol r
 
 ## get_references
 
-Finds every usage of a symbol in the workspace.
+Returns references reported by the language server, in server order, including duplicates.
 
-Arguments: addressing as above, plus `include_declaration` (default `false`) and optional `context`.
+Arguments: addressing as above, `include_declaration` (default `false`), optional `context`,
+`limit` (default 100, integer 1 through 10000), optional absolute `path_filter`,
+and `include_source` (default `true`). Relative filters are rejected.
 
 ```json
 {
   "file_path": "/work/app/src/errors.rs",
   "symbol_name": "Timeout",
   "container": "ApiError",
+  "limit": 20,
+  "path_filter": "/work/app/src/handlers",
   "context": "enclosing_symbol"
 }
 ```
 
-Each location has `uri`, `range`, `out_of_workspace` and, with `context`, the `enclosing_symbol`. Searching a very common symbol can be slow, and the list is capped (`truncated: true`).
+The filter selects that exact file or descendants by lexical path components.
+It decodes file URIs and collapses `.` and `..` without resolving symlinks.
+It supports no globs. Non-file URIs do not match a filter.
+Filtering scans the complete received response before applying the limit.
+`matched_count` counts matching locations in that response, independently of `limit`.
+`truncated: true` means matching locations were omitted. Neither field guarantees workspace-wide coverage.
 
-An empty result carries `index_coverage`: `synced_documents` is how many documents are currently synced to the server process (eviction of old documents lowers it), and `server_restarted` is `true` after a restart or respawn and stays `true` for the rest of the session. Some servers index only documents opened in the session, so the empty answer covers only what the server has indexed and is not proof that the symbol is unused. `get_definition` can still resolve such a symbol; touching the files of interest widens the answer.
+Each location preserves `uri`, `range`, advisory `out_of_workspace`, and optional `enclosing_symbol`.
+With source enabled, `source` has one of these shapes:
+
+```json
+{"status":"text","text":"fn usage() {\n    call();\n}\n","start_line":10,"origin":"disk","shortened":false}
+```
+
+```json
+{"status":"unavailable","reason":"access_denied"}
+```
+
+Text includes the reference's starting line and up to two lines on either side.
+`start_line` is 1-based. Unicode and LF, CRLF, and CR line endings are preserved.
+`origin` is `tracked` for text last synchronized to the server, or `disk` for a contained file read.
+These snapshots are not atomic with the server's locations.
+External paths and symlink escapes disclose no source, regardless of `out_of_workspace`.
+Source enrichment does not open LSP documents or use a persistent cache.
+`include_source: false` omits `source` and source excerpt reads and copies.
+
+Fixed source limits per request are 100 candidate locations, 16 distinct files,
+1 MiB per file, 4 MiB total read/copy allowance, 2 KiB per excerpt, and 64 KiB total excerpt text.
+Each selected file is read or copied once, including duplicate references.
+Failed reads and lookahead consume the allowance. A two-second best-effort deadline
+stops further enrichment; an uninterruptible OS call can exceed it.
+When a full window exceeds the remaining text allowance, the reference line alone
+is returned with `shortened: true`. An oversized reference line is unavailable.
+Failures and exhausted limits preserve locations with explicit reasons:
+`candidate_limit`, `file_limit`, `source_budget`, `text_budget`, `deadline`,
+`access_denied`, `read_failed`, `file_too_large`, `invalid_utf8`, or `line_unavailable`.
+
+Only an originally empty server response carries `index_coverage`.
+A filter-empty result from a nonempty response does not carry this note.
+`synced_documents` counts documents currently synced to the server process;
+`server_restarted` stays true after a restart or respawn.
+Servers can index only opened documents, so an empty answer is not proof that a symbol is unused.
 
 ## get_document_symbols
 

@@ -38,6 +38,8 @@ In this chapter you find every boundary mcpls enforces or cannot cross, in one p
 | Concurrent `subscriptions/listen` streams | 100 |
 | Enclosing-symbol enrichment | 16 files (or `max_documents / 4` when `max_documents` is below 64), 30 s |
 | Per-response disk read for position conversion | 4 times `max_file_size`, at most 256 MiB |
+| Reference selection | Default 100; `limit` 1 through 10000; absolute lexical `path_filter` |
+| Reference source context | 100 candidates; 16 files; 1 MiB/file; 4 MiB read/copy; 2 KiB/excerpt; 64 KiB excerpt text; 2 s best-effort deadline |
 | Result lists | Capped per tool; `truncated: true` marks a cut |
 
 ## Behavioral constraints

@@ -3956,7 +3956,7 @@
   {
     "name": "get_references",
     "title": "Find References",
-    "description": "References to a symbol, across workspace. Capped at a fixed maximum for an extremely common symbol; `truncated: true` on the result means more references exist than are returned. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory). On an empty result, `index_coverage` gives `synced_documents` (documents currently synced) and `server_restarted` (once true, stays true); the server may not index other files, so not proof of absence.",
+    "description": "References in server order, including duplicates. `limit` defaults to 100 (1..10000). `path_filter` selects an absolute file or directory lexically before normalization. `matched_count` counts server-response matches; `truncated` means matching locations were omitted, not workspace-wide completeness. Source defaults on: `source.status` is `text` (text/start_line/origin/shortened) or `unavailable` (reason). `include_source: false` omits source work. Excerpts use tracked or contained disk text, up to two lines each side; 100 candidates, 16 files, 1 MiB/file, 4 MiB read/copy, 2 KiB/excerpt, 64 KiB text, two-second best-effort deadline. Source can differ from LSP locations. External source is withheld. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory). Only an originally empty server response carries `index_coverage` (synced_documents and server_restarted); a filter-empty answer does not. Server indexing can be incomplete.",
     "inputSchema": {
       "$defs": {
         "ResultContext": {
@@ -4008,6 +4008,19 @@
           "description": "Whether to include the declaration in the results.",
           "type": "boolean"
         },
+        "include_source": {
+          "default": true,
+          "description": "Attach bounded source excerpts or explicit unavailable reasons; default true.",
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 100,
+          "description": "Maximum matching references, 1 through 10000; default 100.",
+          "format": "uint",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
         "line": {
           "default": null,
           "description": "Line number (1-based). Give with `character`, instead of `symbol_name`.",
@@ -4015,6 +4028,14 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "path_filter": {
+          "default": null,
+          "description": "Absolute file or directory path. Lexical component matching, no glob or symlink resolution.",
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -4081,29 +4102,6 @@
     },
     "outputSchema": {
       "$defs": {
-        "ContextualLocation": {
-          "description": "An item optionally carrying its enclosing symbol.",
-          "properties": {
-            "enclosing_symbol": {
-              "$ref": "#/$defs/EnclosingSymbolOutcome"
-            },
-            "out_of_workspace": {
-              "type": "boolean"
-            },
-            "range": {
-              "$ref": "#/$defs/Range"
-            },
-            "uri": {
-              "description": "URI of the document.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "uri",
-            "range"
-          ],
-          "type": "object"
-        },
         "EnclosingSymbol": {
           "description": "The innermost symbol containing an item.",
           "properties": {
@@ -4325,6 +4323,101 @@
           ],
           "type": "object"
         },
+        "ReferenceLocation": {
+          "description": "A reference location with optional source context.",
+          "properties": {
+            "enclosing_symbol": {
+              "$ref": "#/$defs/EnclosingSymbolOutcome",
+              "description": "Present only when `context: \"enclosing_symbol\"` was requested."
+            },
+            "out_of_workspace": {
+              "description": "Whether this location is not provably inside a configured workspace root (stdlib, a dependency).",
+              "type": "boolean"
+            },
+            "range": {
+              "$ref": "#/$defs/Range",
+              "description": "Range within the document."
+            },
+            "source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReferenceSource"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present whenever source was requested, including failures."
+            },
+            "uri": {
+              "description": "URI of the document.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "uri",
+            "range"
+          ],
+          "type": "object"
+        },
+        "ReferenceSource": {
+          "description": "Source excerpt for one reference. Failure never removes its location.",
+          "oneOf": [
+            {
+              "description": "Text centered on the reference's starting line.",
+              "properties": {
+                "origin": {
+                  "$ref": "#/$defs/SourceOrigin",
+                  "description": "Whether text came from a tracked snapshot or disk."
+                },
+                "shortened": {
+                  "description": "The full window did not fit; only the reference line is included.",
+                  "type": "boolean"
+                },
+                "start_line": {
+                  "description": "First excerpt line, 1-based.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "text",
+                  "type": "string"
+                },
+                "text": {
+                  "description": "Source text, preserving its line endings.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "text",
+                "start_line",
+                "origin",
+                "shortened"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "No text is available under this request's access and resource limits.",
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/SourceUnavailableReason",
+                  "description": "Stable reason identifying the failed or skipped source lookup."
+                },
+                "status": {
+                  "const": "unavailable",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "ResolvedSymbol": {
           "properties": {
             "container": {
@@ -4355,6 +4448,76 @@
             "position_source"
           ],
           "type": "object"
+        },
+        "SourceOrigin": {
+          "description": "Where reference source text was obtained.",
+          "oneOf": [
+            {
+              "const": "tracked",
+              "description": "The text last synchronized to the server.",
+              "type": "string"
+            },
+            {
+              "const": "disk",
+              "description": "A contained file read from disk.",
+              "type": "string"
+            }
+          ]
+        },
+        "SourceUnavailableReason": {
+          "description": "Why a reference has no source text.",
+          "oneOf": [
+            {
+              "const": "candidate_limit",
+              "description": "More than 100 locations requested source.",
+              "type": "string"
+            },
+            {
+              "const": "file_limit",
+              "description": "More than 16 distinct files requested source.",
+              "type": "string"
+            },
+            {
+              "const": "source_budget",
+              "description": "Source read/copy allowance exhausted.",
+              "type": "string"
+            },
+            {
+              "const": "text_budget",
+              "description": "Excerpt output allowance exhausted or reference line is too long.",
+              "type": "string"
+            },
+            {
+              "const": "deadline",
+              "description": "Two-second best-effort deadline expired.",
+              "type": "string"
+            },
+            {
+              "const": "access_denied",
+              "description": "File URI is invalid or workspace access is denied.",
+              "type": "string"
+            },
+            {
+              "const": "read_failed",
+              "description": "The file could not be read.",
+              "type": "string"
+            },
+            {
+              "const": "file_too_large",
+              "description": "Source is larger than the per-file allowance.",
+              "type": "string"
+            },
+            {
+              "const": "invalid_utf8",
+              "description": "Source is not UTF-8.",
+              "type": "string"
+            },
+            {
+              "const": "line_unavailable",
+              "description": "The reference starts past the end of the source.",
+              "type": "string"
+            }
+          ]
         },
         "SymbolFidelity": {
           "description": "How much ancestry an [`EnclosingSymbol`] name path carries.",
@@ -4390,23 +4553,43 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "enrichment": {
-          "$ref": "#/$defs/EnrichmentSummary",
-          "description": "Set only with `context: \"enclosing_symbol\"`: how many files were enriched or skipped."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnrichmentSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional enclosing-symbol lookup summary."
         },
         "index_coverage": {
           "$ref": "#/$defs/IndexCoverage",
-          "description": "Set only when `locations` is empty: what the routed server's answer covers."
+          "description": "Set only when the original server response is empty: what the routed server's answer covers."
         },
         "locations": {
-          "description": "Locations found.",
+          "description": "Matching locations in server order, including duplicates.",
           "items": {
-            "$ref": "#/$defs/ContextualLocation"
+            "$ref": "#/$defs/ReferenceLocation"
           },
           "type": "array"
         },
+        "matched_count": {
+          "description": "Number of matching locations in the complete server response.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "positions_degraded": {
-          "$ref": "#/$defs/PositionDegradation",
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositionDegradation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Position conversion warning."
         },
         "resolved_symbol": {
           "anyOf": [
@@ -4420,12 +4603,13 @@
           "description": "Set only for a name-addressed call."
         },
         "truncated": {
-          "description": "Whether `locations` was capped below the server's full response.",
+          "description": "Matching locations were omitted by the requested limit.",
           "type": "boolean"
         }
       },
       "required": [
-        "locations"
+        "locations",
+        "matched_count"
       ],
       "type": "object"
     },

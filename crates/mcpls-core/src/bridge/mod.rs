@@ -59,12 +59,13 @@ pub use translator::{
     MAX_RESTART_SERVER_IDS, MAX_SELECTION_CHAIN, MAX_SERVER_ID_BYTES, MAX_SYMBOL_NAME_BYTES,
     MAX_TAB_SIZE, MAX_TRIGGER_CHARACTER_BYTES, NewName, NotComputedReason, OutlineSymbol, Position,
     Position2D, PositionDegradation, PositionRange, PositionSource, PrepareRenameOutcome,
-    PrepareRenameResult, Range, ReferencesResult, RejectedKindFilter, Rejection, RenameOutcome,
-    RenamePreparation, RenameResult, ResolvedSymbol, ResolvedTarget, RestartFailure,
-    RestartOutcome, RestartServerResult, RestartTarget, ResultContext, RouteSupport,
-    SelectionRangesResult, ServerIds, ServerIdsError, ServerRestartEntry, Symbol, SymbolFidelity,
-    SymbolKindFilter, SymbolName, SymbolQuery, SymbolTarget, TabSize, TextEdit, TextField,
-    Translator, TypeHierarchyResult, UnavailableReason,
+    PrepareRenameResult, Range, ReferenceLocation, ReferenceLocationsResult, ReferenceSource,
+    ReferencesResult, RejectedKindFilter, Rejection, RenameOutcome, RenamePreparation,
+    RenameResult, ResolvedSymbol, ResolvedTarget, RestartFailure, RestartOutcome,
+    RestartServerResult, RestartTarget, ResultContext, RouteSupport, SelectionRangesResult,
+    ServerIds, ServerIdsError, ServerRestartEntry, SourceOrigin, SourceUnavailableReason, Symbol,
+    SymbolFidelity, SymbolKindFilter, SymbolName, SymbolQuery, SymbolTarget, TabSize, TextEdit,
+    TextField, Translator, TypeHierarchyResult, UnavailableReason,
 };
 pub(crate) use translator::{
     CallHierarchyPrepareResult, CodeActionsResult, DiagnosticsRole, IncomingCallsResult,
@@ -77,3 +78,5 @@ pub(crate) use translator::{
 pub(crate) use workspace_roots::{CanonicalizeFn, ProcessCwd};
 pub use workspace_roots::{WorkspacePath, WorkspaceRoots};
 pub(crate) use workspace_roots::{join_relative_root, lexically_normalize, probe_root};
+
+pub use translator::ReferenceOptions;

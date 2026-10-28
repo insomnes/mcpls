@@ -1075,6 +1075,98 @@ pub struct IndexCoverage {
     pub server_restarted: bool,
 }
 
+/// Source excerpt for one reference. Failure never removes its location.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReferenceSource {
+    /// Text centered on the reference's starting line.
+    Text {
+        /// Source text, preserving its line endings.
+        text: String,
+        /// First excerpt line, 1-based.
+        start_line: u32,
+        /// Whether text came from a tracked snapshot or disk.
+        origin: SourceOrigin,
+        /// The full window did not fit; only the reference line is included.
+        shortened: bool,
+    },
+    /// No text is available under this request's access and resource limits.
+    Unavailable {
+        /// Stable reason identifying the failed or skipped source lookup.
+        reason: SourceUnavailableReason,
+    },
+}
+
+/// Where reference source text was obtained.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOrigin {
+    /// The text last synchronized to the server.
+    Tracked,
+    /// A contained file read from disk.
+    Disk,
+}
+
+/// Why a reference has no source text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceUnavailableReason {
+    /// More than 100 locations requested source.
+    CandidateLimit,
+    /// More than 16 distinct files requested source.
+    FileLimit,
+    /// Source read/copy allowance exhausted.
+    SourceBudget,
+    /// Excerpt output allowance exhausted or reference line is too long.
+    TextBudget,
+    /// Two-second best-effort deadline expired.
+    Deadline,
+    /// File URI is invalid or workspace access is denied.
+    AccessDenied,
+    /// The file could not be read.
+    ReadFailed,
+    /// Source is larger than the per-file allowance.
+    FileTooLarge,
+    /// Source is not UTF-8.
+    InvalidUtf8,
+    /// The reference starts past the end of the source.
+    LineUnavailable,
+}
+
+/// A reference location with optional source context.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceLocation {
+    /// Location and optional enclosing-symbol context.
+    #[serde(flatten)]
+    pub location: ContextualLocation,
+    /// Present whenever source was requested, including failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ReferenceSource>,
+}
+
+impl std::ops::Deref for ReferenceLocation {
+    type Target = ContextualLocation;
+    fn deref(&self) -> &Self::Target {
+        &self.location
+    }
+}
+
+/// Reference-specific locations, preserving navigation warnings.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceLocationsResult {
+    /// Matching locations in server order, including duplicates.
+    pub locations: Vec<ReferenceLocation>,
+    /// Matching locations were omitted by the requested limit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    /// Position conversion warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions_degraded: Option<PositionDegradation>,
+    /// Optional enclosing-symbol lookup summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrichment: Option<EnrichmentSummary>,
+}
+
 /// Result of a references request: the locations plus an optional index-coverage note.
 ///
 /// A separate type from [`LocationsResult`] so the note's schema is paid for by one tool only.
@@ -1082,8 +1174,10 @@ pub struct IndexCoverage {
 pub struct ReferencesResult {
     /// The locations found.
     #[serde(flatten)]
-    pub result: LocationsResult,
-    /// Set only when `locations` is empty: what the routed server's answer covers.
+    pub result: ReferenceLocationsResult,
+    /// Number of matching locations in the complete server response.
+    pub matched_count: usize,
+    /// Set only when the original server response is empty: what the routed server's answer covers.
     ///
     /// Omitted for a non-empty result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1588,8 +1682,14 @@ impl ServerText for ReferencesResult {
         let Self {
             result,
             index_coverage: _,
+            matched_count: _,
         } = self;
-        result.redact_server_text(redactions);
+        for item in &mut result.locations {
+            item.location.redact_server_text(redactions);
+            if let Some(ReferenceSource::Text { text, .. }) = &mut item.source {
+                redactions.redact_in_place(text);
+            }
+        }
     }
 }
 

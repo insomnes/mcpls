@@ -577,6 +577,38 @@ impl Translator {
         include_declaration: bool,
         context: ResultContext,
     ) -> Result<ReferencesResult> {
+        self.handle_references_with_options(
+            file_path,
+            position,
+            include_declaration,
+            context,
+            super::ReferenceOptions::default(),
+        )
+        .await
+    }
+
+    /// Find references with bounded selection and optional source excerpts.
+    ///
+    /// # Errors
+    /// Returns an error for invalid options or when reference dispatch fails.
+    pub async fn handle_references_with_options(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        include_declaration: bool,
+        context: ResultContext,
+        mut options: super::ReferenceOptions,
+    ) -> Result<ReferencesResult> {
+        if !(1..=10_000).contains(&options.limit) {
+            return Err(Error::InvalidToolParams(
+                "limit must be between 1 and 10000".into(),
+            ));
+        }
+        if let Some(path) = &options.path_filter {
+            options.path_filter = Some(super::references::lexical_path(path).ok_or_else(|| {
+                Error::InvalidToolParams("path_filter must be an absolute path".into())
+            })?);
+        }
         let Positioned {
             result: response,
             ctx,
@@ -592,14 +624,45 @@ impl Translator {
             )
             .await?;
 
-        let normalized = lsp_locations_to_mcp(response.unwrap_or_default(), &ctx).await;
-        let result = self.contextualize_into(normalized, context).await;
-        let index_coverage = result
-            .locations
+        let response = response.unwrap_or_default();
+        let index_coverage = response
             .is_empty()
             .then(|| self.index_coverage(doc.server_id()));
+        let mut retained = Vec::with_capacity(options.limit.min(response.len()));
+        let mut matched_count: usize = 0;
+        for location in response {
+            if options.matches(&location.uri) {
+                matched_count = matched_count.saturating_add(1);
+                if retained.len() < options.limit {
+                    retained.push(location);
+                }
+            }
+        }
+        #[cfg(test)]
+        {
+            crate::util::lock_std(&self.reference_work).normalized = retained.len();
+        }
+        let normalized = lsp_locations_to_mcp(retained, &ctx).await;
+        let result = self.contextualize_into(normalized, context).await;
+        let mut locations: Vec<_> = result
+            .locations
+            .into_iter()
+            .map(|location| super::dto::ReferenceLocation {
+                location,
+                source: None,
+            })
+            .collect();
+        if options.include_source {
+            self.reference_sources(&mut locations).await;
+        }
         Ok(ReferencesResult {
-            result,
+            result: super::dto::ReferenceLocationsResult {
+                truncated: matched_count > locations.len(),
+                locations,
+                positions_degraded: result.positions_degraded,
+                enrichment: result.enrichment,
+            },
+            matched_count,
             index_coverage,
         })
     }
@@ -1690,7 +1753,7 @@ mod tests {
             .unwrap()
             .result;
 
-        assert_eq!(result.locations.len(), MAX_NORMALIZED_LOCATIONS);
+        assert_eq!(result.locations.len(), 100);
         assert!(
             result.truncated,
             "a references response past MAX_NORMALIZED_LOCATIONS must set truncated: true"

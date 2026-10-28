@@ -133,6 +133,9 @@ macro_rules! target_wire {
 /// Why the addressing fields of a tool call do not name exactly one symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TargetAddressError {
+    /// Invalid reference selection options.
+    #[error("{0}")]
+    ReferenceOptions(&'static str),
     /// `symbol_kind` or `container` was given without `symbol_name`.
     #[error("`symbol_kind` and `container` apply only with `symbol_name`")]
     QualifierWithoutName,
@@ -347,6 +350,15 @@ target_wire! {
     /// Wire form of [`ReferencesParams`].
     #[schemars(description = "Parameters for finding all references to a symbol.")]
     ReferencesWire {
+        #[schemars(description = "Maximum matching references, 1 through 10000; default 100.", range(min = 1, max = 10000))]
+        #[serde(default = "reference_limit")]
+        limit: usize,
+        #[schemars(description = "Absolute file or directory path. Lexical component matching, no glob or symlink resolution.")]
+        #[serde(default)]
+        path_filter: Option<PathBuf>,
+        #[schemars(description = "Attach bounded source excerpts or explicit unavailable reasons; default true.")]
+        #[serde(default = "source_default")]
+        include_source: bool,
         #[schemars(description = "Whether to include the declaration in the results.")]
         #[serde(default)]
         include_declaration: bool,
@@ -356,6 +368,13 @@ target_wire! {
     }
 }
 
+const fn reference_limit() -> usize {
+    100
+}
+const fn source_default() -> bool {
+    true
+}
+
 /// Parameters for the `get_references` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(try_from = "ReferencesWire")]
@@ -363,6 +382,8 @@ target_wire! {
 pub struct ReferencesParams {
     /// The symbol to find references to.
     pub target: SymbolTargetParams,
+    /// Selection and source options.
+    pub options: crate::bridge::ReferenceOptions,
     /// Whether to include the declaration in the results.
     pub include_declaration: bool,
     /// Optional extra context for each returned item.
@@ -373,7 +394,24 @@ impl TryFrom<ReferencesWire> for ReferencesParams {
     type Error = TargetAddressError;
 
     fn try_from(mut wire: ReferencesWire) -> Result<Self, Self::Error> {
+        if !(1..=10000).contains(&wire.limit) {
+            return Err(TargetAddressError::ReferenceOptions(
+                "limit must be between 1 and 10000",
+            ));
+        }
+        if let Some(path) = &wire.path_filter {
+            crate::bridge::ClientPath::try_from(path.clone()).map_err(|_| {
+                TargetAddressError::ReferenceOptions(
+                    "path_filter must be an absolute path without NUL bytes",
+                )
+            })?;
+        }
         Ok(Self {
+            options: crate::bridge::ReferenceOptions {
+                limit: wire.limit,
+                path_filter: wire.path_filter.clone(),
+                include_source: wire.include_source,
+            },
             target: wire.take_target()?,
             include_declaration: wire.include_declaration,
             context: wire.context,

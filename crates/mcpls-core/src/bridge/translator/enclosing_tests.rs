@@ -208,7 +208,7 @@ async fn run_references(
     context: ResultContext,
     references: Value,
     symbol_answers: Vec<(&str, Option<Value>)>,
-) -> crate::bridge::LocationsResult {
+) -> super::dto::ReferenceLocationsResult {
     let handle = {
         let translator = Arc::clone(&fx.translator);
         let path = main.to_string_lossy().into_owned();
@@ -259,8 +259,11 @@ async fn run_references(
         .result
 }
 
-fn outcome(result: &crate::bridge::LocationsResult, index: usize) -> EnclosingSymbolOutcome {
-    result.locations[index].enclosing_symbol.clone().unwrap()
+fn outcome(result: &impl serde::Serialize, index: usize) -> EnclosingSymbolOutcome {
+    serde_json::from_value(
+        serde_json::to_value(result).unwrap()["locations"][index]["enclosing_symbol"].clone(),
+    )
+    .unwrap()
 }
 
 #[tokio::test]

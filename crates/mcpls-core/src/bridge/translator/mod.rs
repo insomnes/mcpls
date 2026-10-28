@@ -51,6 +51,8 @@ mod positioned;
 #[cfg(test)]
 mod prepare_range_tests;
 mod pull_support;
+mod references;
+pub use references::ReferenceOptions;
 mod respawn;
 mod restart;
 mod routing;
@@ -130,6 +132,10 @@ pub struct Translator {
     /// Allowed workspace roots for path validation. Read-only after `serve()`
     /// setup, so no lock is needed.
     workspace_roots: WorkspaceRoots,
+    #[cfg(test)]
+    reference_work: StdMutex<references::ReferenceWork>,
+    #[cfg(test)]
+    reference_read_hook: Option<fn(&Path, bool)>,
     /// File extension and name to language ID mappings. Read-only after
     /// `serve()` setup, so no lock is needed.
     language_map: Arc<LanguageMap>,
@@ -196,6 +202,10 @@ impl Translator {
             )),
             resource_limits: ResourceLimits::default(),
             workspace_roots: WorkspaceRoots::default(),
+            #[cfg(test)]
+            reference_work: StdMutex::new(references::ReferenceWork::default()),
+            #[cfg(test)]
+            reference_read_hook: None,
             language_map: Arc::default(),
             file_patterns: Arc::default(),
             router: Arc::new(StdMutex::new(Arc::new(ToolRouter::default()))),

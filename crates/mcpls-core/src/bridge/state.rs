@@ -899,6 +899,24 @@ impl DocumentTracker {
             .map(|state| state.text.as_str().to_owned())
     }
 
+    /// Copies tracked content only when it fits the caller's byte allowance.
+    /// An oversized tracked document never falls back to disk.
+    pub(crate) fn bounded_text(
+        &self,
+        path: &Path,
+        max: usize,
+    ) -> Option<std::result::Result<String, ()>> {
+        let documents = lock_std(&self.documents);
+        let text = documents.get(path)?.text.as_str();
+        let result = if text.len() <= max {
+            Ok(text.to_owned())
+        } else {
+            Err(())
+        };
+        drop(documents);
+        Some(result)
+    }
+
     /// Whether `path`'s tracked content has a 0-based `line`'th line.
     ///
     /// Checked under the documents lock without copying any text.

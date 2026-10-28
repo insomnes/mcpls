@@ -16,7 +16,7 @@ The assistant calls `get_document_symbols` for the structure of the file, then `
 
 > Where is `calculate_total` called, and which functions call it?
 
-1. `get_references` lists every usage across the workspace.
+1. `get_references` returns up to 100 usages with source context by default. Use `path_filter` to narrow a directory and `limit` to change the cap.
 2. `get_incoming_calls` with a position or symbol name shows the calling functions, grouped by caller.
 
 Add "and tell me which function each usage is inside" and the assistant passes `context: "enclosing_symbol"`, so every location comes with the function or type that contains it.

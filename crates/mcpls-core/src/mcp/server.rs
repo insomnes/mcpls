@@ -850,7 +850,7 @@ impl McplsServer {
 
     /// Find all references to a symbol.
     #[tool(
-        description = concat!("References to a symbol, across workspace. Capped at a fixed maximum for an extremely common symbol; `truncated: true` on the result means more references exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!(), " ", index_coverage_note!()),
+        description = concat!("References in server order, including duplicates. `limit` defaults to 100 (1..10000). `path_filter` selects an absolute file or directory lexically before normalization. `matched_count` counts server-response matches; `truncated` means matching locations were omitted, not workspace-wide completeness. Source defaults on: `source.status` is `text` (text/start_line/origin/shortened) or `unavailable` (reason). `include_source: false` omits source work. Excerpts use tracked or contained disk text, up to two lines each side; 100 candidates, 16 files, 1 MiB/file, 4 MiB read/copy, 2 KiB/excerpt, 64 KiB text, two-second best-effort deadline. Source can differ from LSP locations. External source is withheld. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!(), " ", "Only an originally empty server response carries `index_coverage` (synced_documents and server_restarted); a filter-empty answer does not. Server indexing can be incomplete."),
         title = "Find References"
     )]
     async fn get_references(
@@ -859,6 +859,7 @@ impl McplsServer {
             target,
             include_declaration,
             context,
+            options,
         }): Parameters<ReferencesParams>,
     ) -> Result<Json<Addressed<ReferencesResult>>, McpError> {
         let translator = &self.context.translator;
@@ -866,7 +867,13 @@ impl McplsServer {
             target,
             AddressableTool::References,
             |file_path, position| {
-                translator.handle_references(file_path, position, include_declaration, context)
+                translator.handle_references_with_options(
+                    file_path,
+                    position,
+                    include_declaration,
+                    context,
+                    options,
+                )
             },
         )
         .await
@@ -3049,6 +3056,7 @@ mod tests {
                     .map(|_| ()),
                 server
                     .get_references(Parameters(ReferencesParams {
+                        options: crate::bridge::ReferenceOptions::default(),
                         target: position(line, character).into(),
                         include_declaration: false,
                         context: crate::bridge::ResultContext::None,
@@ -3361,6 +3369,7 @@ mod tests {
     async fn test_references_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(ReferencesParams {
+            options: crate::bridge::ReferenceOptions::default(),
             target: PositionParams {
                 file_path: PathBuf::from(test_file.to_str().unwrap()),
                 line: 10,
@@ -7527,6 +7536,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::GetReferences => server
                 .get_references(Parameters(ReferencesParams {
+                    options: crate::bridge::ReferenceOptions::default(),
                     target: position().into(),
                     include_declaration: false,
                     context: ResultContext::None,
