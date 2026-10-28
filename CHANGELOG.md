@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Accept diagnostic full reports with an empty `kind` discriminator, including stock gopls v0.24.0 responses. Required diagnostic items remain validated.
+
 ## [0.8.0] - 2026-10-20
 
 ### Added

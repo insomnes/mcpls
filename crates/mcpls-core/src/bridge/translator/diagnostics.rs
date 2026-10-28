@@ -53,7 +53,7 @@ mod sweep_tests;
 /// a deserialization error where today it degrades to an empty diagnostics
 /// list. This preserves the union gluon's `DocumentDiagnosticReportResult`
 /// used to provide, via the untyped `LspClient::request`.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize)]
 #[serde(untagged)]
 enum DocumentDiagnosticReportResult {
     Report(lsp_types::DocumentDiagnosticReport),
@@ -68,6 +68,28 @@ enum DocumentDiagnosticReportResult {
         )]
         lsp_types::DocumentDiagnosticReportPartialResult,
     ),
+}
+
+impl<'de> serde::Deserialize<'de> for DocumentDiagnosticReportResult {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(kind) = value.get_mut("kind") {
+            // Stock gopls v0.24.0 emits an empty discriminator for full reports.
+            // Decode through the full-report type so items remain required and validated.
+            if kind.as_str() == Some("") {
+                *kind = serde_json::Value::String("full".to_owned());
+            }
+            serde_json::from_value(value)
+                .map(Self::Report)
+                .map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(Self::Partial)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 /// `textDocument/diagnostic` with [`DocumentDiagnosticReportResult`] as its
@@ -1281,8 +1303,13 @@ mod tests {
 
     /// #583: pulled diagnostics are redacted like pushed ones, before they are
     /// merged, so a pulled item and its already-redacted cached twin dedupe.
+    #[rstest::rstest]
+    #[case("full")]
+    #[case("")]
     #[tokio::test]
-    async fn test_handle_diagnostics_redacts_pull_items_before_merging_with_the_cache() {
+    async fn test_handle_diagnostics_redacts_pull_items_before_merging_with_the_cache(
+        #[case] kind: &str,
+    ) {
         let dir = TempDir::new().unwrap();
         let mut translator = Translator::new()
             .with_extensions(crate::test_lsp::test_extensions())
@@ -1345,7 +1372,7 @@ mod tests {
             &mut server.read_half_stdin,
             &request["id"],
             serde_json::json!({
-                "kind": "full",
+                "kind": kind,
                 "items": [
                     {"range": range, "severity": 2, "message": "leaked SuperSecretValue123"},
                     {
@@ -1369,6 +1396,104 @@ mod tests {
         assert!(!shown.contains("SuperSecretValue123"), "{shown}");
         assert_eq!(result.diagnostics.len(), 2, "{shown}");
         assert!(shown.contains("leaked [redacted:API_TOKEN]"), "{shown}");
+    }
+
+    /// Full reports publish and clear the cache; unchanged and partial reports retain it.
+    #[tokio::test]
+    async fn test_diagnostic_compatibility_reports_through_translator() {
+        let range = serde_json::json!({
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 1}
+        });
+        let item = serde_json::json!({"range": range, "message": "broken", "severity": 1});
+        let malformed = [
+            serde_json::json!({"kind": "mystery", "items": [item]}),
+            serde_json::json!({"items": [item]}),
+            serde_json::json!({"kind": ""}),
+            serde_json::json!({"kind": "", "items": null}),
+            serde_json::json!({"kind": "", "items": {}}),
+            serde_json::json!({"kind": "", "items": [{"message": "no range"}]}),
+            serde_json::json!({"kind": "mystery", "relatedDocuments": {}}),
+            serde_json::json!({"kind": "", "items": [null], "relatedDocuments": {}}),
+        ];
+        for first_kind in ["full", ""] {
+            let dir = TempDir::new().unwrap();
+            let mut translator = Translator::new()
+                .with_extensions(crate::test_lsp::test_extensions())
+                .with_router(ToolRouter::catch_all([(
+                    ServerId::from_static("rust"),
+                    LanguageId::from_static("rust"),
+                )]));
+            translator.set_workspace_roots(
+                WorkspaceRoots::from_paths(&[dir.path().to_path_buf()]).unwrap(),
+            );
+            let (client, mut server) = fake_lsp_client();
+            translator.register_client(ServerId::from_static("rust"), client);
+            let path = dir.path().join("lib.rs");
+            fs::write(&path, "fn main() {}").unwrap();
+            let uri = path_to_uri(&path.canonicalize().unwrap()).unwrap();
+            let cache = Mutex::new(NotificationCache::new());
+            cache
+                .lock()
+                .await
+                .attach_documents(Arc::clone(translator.document_tracker()));
+            let mut wire = BufReader::new(&mut server.write_stdout);
+            let cases = malformed.iter().cloned().map(|v| (v, None)).chain([
+                (
+                    serde_json::json!({"kind": first_kind, "items": [item]}),
+                    Some(1),
+                ),
+                (
+                    serde_json::json!({"kind": "unchanged", "resultId": "1"}),
+                    Some(1),
+                ),
+                (serde_json::json!({"relatedDocuments": {}}), Some(1)),
+                (serde_json::json!({"kind": "", "items": []}), Some(0)),
+            ]);
+            for (index, (payload, expected)) in cases.enumerate() {
+                let request =
+                    translator.handle_diagnostics(client_path(&path), ResultContext::None, &cache);
+                let reply = async {
+                    if index == 0 {
+                        assert_eq!(
+                            read_framed_message(&mut wire).await["method"],
+                            "textDocument/didOpen"
+                        );
+                    }
+                    let request = read_framed_message(&mut wire).await;
+                    assert_eq!(request["method"], "textDocument/diagnostic");
+                    write_response(&mut server.read_half_stdin, &request["id"], payload.clone())
+                        .await;
+                };
+                let (result, ()) = Box::pin(timeout(Duration::from_secs(2), async {
+                    tokio::join!(request, reply)
+                }))
+                .await
+                .unwrap();
+                if let Some(count) = expected {
+                    assert_eq!(result.unwrap().diagnostics.len(), count, "{payload}");
+                    let info = cache.lock().await.diagnostic_sources(&uri).merge();
+                    let cached = Translator::diagnostics_from_cache_entry(
+                        info.as_ref(),
+                        PositionEncoding::Utf16,
+                        &test_tracker(),
+                    )
+                    .await;
+                    assert_eq!(cached.diagnostics.len(), count, "{payload}");
+                } else {
+                    assert!(result.is_err(), "malformed report accepted: {payload}");
+                    assert!(
+                        cache
+                            .lock()
+                            .await
+                            .diagnostic_sources(&uri)
+                            .merge()
+                            .is_none(),
+                        "malformed report published: {payload}"
+                    );
+                }
+            }
+        }
     }
 
     /// S1 regression (#244): a push-only server (or one that times out)
