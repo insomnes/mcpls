@@ -6853,169 +6853,6 @@
     }
   },
   {
-    "name": "prepare_rename",
-    "title": "Prepare Rename",
-    "description": "Whether the symbol at position can be renamed, before proposing a rename. `status` is `renameable` (with the identifier `range` and, when the server gives it, `placeholder`), `default_behavior` (rename is accepted but the server gives no range) or `not_renameable` (optionally with the server's `server_message`). Unsupported servers are refused with a capability error instead. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact.",
-    "inputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
-      "properties": {
-        "character": {
-          "description": "Character/column number (1-based).",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "file_path": {
-          "description": "Absolute path to the file.",
-          "type": "string"
-        },
-        "line": {
-          "description": "Line number (1-based).",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "file_path",
-        "line",
-        "character"
-      ],
-      "type": "object"
-    },
-    "outputSchema": {
-      "$defs": {
-        "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
-          "properties": {
-            "character": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "line": {
-              "description": "Line number (1-based).",
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "line",
-            "character"
-          ],
-          "type": "object"
-        },
-        "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
-          "oneOf": [
-            {
-              "const": "response",
-              "type": "string"
-            },
-            {
-              "const": "request",
-              "type": "string"
-            }
-          ]
-        },
-        "Range": {
-          "description": "Range in a document (1-based for MCP).",
-          "properties": {
-            "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
-            },
-            "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
-            }
-          },
-          "required": [
-            "start",
-            "end"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "oneOf": [
-        {
-          "description": "The identifier can be renamed.",
-          "properties": {
-            "placeholder": {
-              "description": "Current name of the identifier, when the server supplies it.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the identifier that a rename would replace."
-            },
-            "status": {
-              "const": "renameable",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "range"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "The server accepts a rename here but leaves the identifier range to the client.",
-          "properties": {
-            "status": {
-              "const": "default_behavior",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "The position cannot be renamed.",
-          "properties": {
-            "server_message": {
-              "description": "The server's own explanation, when it reported one as an error.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "status": {
-              "const": "not_renameable",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status"
-          ],
-          "type": "object"
-        }
-      ],
-      "properties": {
-        "positions_degraded": {
-          "$ref": "#/$defs/PositionDegradation",
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
-        }
-      },
-      "type": "object"
-    },
-    "annotations": {
-      "title": "Prepare Rename",
-      "readOnlyHint": true,
-      "destructiveHint": false,
-      "idempotentHint": true
-    }
-  },
-  {
     "name": "prepare_type_hierarchy",
     "title": "Prepare Type Hierarchy",
     "description": "Prepare type hierarchy at position. Returns type items (classes, interfaces, structs) to pass to get_supertypes / get_subtypes, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
@@ -7183,7 +7020,7 @@
   {
     "name": "rename_symbol",
     "title": "Rename Symbol",
-    "description": "Rename symbol across workspace. Returns text edits for all files where symbol is used. A non-empty `dropped` field means some edits were withheld (e.g. out-of-workspace files, or `exceeds_item_cap` when a file's edits exceed the fixed maximum) -- the rename is then incomplete even though `changes` is non-empty. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. An ambiguous name never produces an edit. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Resolve a target and propose a workspace rename in one call. Runs preparation on the rename server when advertised; explicit unsupported preparation permits rename directly. Returns `status: proposed` with queried `position`, `preparation` (`renameable` with range and optional placeholder, `default_behavior` without range, or `unsupported`) and `changes`, or `status: not_renameable` with position and optional server_message, without edits. Inspect the proposal before applying through the client. A non-empty `dropped` field means some edits were withheld (e.g. out-of-workspace files, or `exceeds_item_cap` when a file's edits exceed the fixed maximum) -- the rename is then incomplete even though `changes` is non-empty. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. An ambiguous name never produces an edit. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7404,6 +7241,62 @@
           ],
           "type": "object"
         },
+        "RenamePreparation": {
+          "description": "Preparation that permitted the rename request.",
+          "oneOf": [
+            {
+              "description": "The server supplied the identifier range.",
+              "properties": {
+                "placeholder": {
+                  "description": "Current name, when supplied by the server.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "range": {
+                  "$ref": "#/$defs/Range",
+                  "description": "Identifier range (1-based UTF-16)."
+                },
+                "status": {
+                  "const": "renameable",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "range"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The server permits rename without supplying an identifier range.",
+              "properties": {
+                "status": {
+                  "const": "default_behavior",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The server explicitly does not advertise preparation support.",
+              "properties": {
+                "status": {
+                  "const": "unsupported",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "ResolvedSymbol": {
           "properties": {
             "container": {
@@ -7455,17 +7348,62 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "changes": {
-          "description": "Changes to apply across documents.",
-          "items": {
-            "$ref": "#/$defs/DocumentChanges"
+      "oneOf": [
+        {
+          "description": "The server returned a proposal; an empty edit set is still a proposal.",
+          "properties": {
+            "changes": {
+              "description": "Proposed per-document edits. mcpls does not apply them.",
+              "items": {
+                "$ref": "#/$defs/DocumentChanges"
+              },
+              "type": "array"
+            },
+            "dropped": {
+              "$ref": "#/$defs/DroppedEdits",
+              "description": "Withheld edits. A non-empty value means the proposal is incomplete."
+            },
+            "preparation": {
+              "$ref": "#/$defs/RenamePreparation",
+              "description": "Preparation performed before requesting edits."
+            },
+            "status": {
+              "const": "proposed",
+              "type": "string"
+            }
           },
-          "type": "array"
+          "required": [
+            "status",
+            "preparation",
+            "changes"
+          ],
+          "type": "object"
         },
-        "dropped": {
-          "$ref": "#/$defs/DroppedEdits",
-          "description": "Entries withheld from `changes` -- see [`DroppedEdits`]."
+        {
+          "description": "Preparation rejected this position. No rename request was sent.",
+          "properties": {
+            "server_message": {
+              "description": "Redacted explanation supplied by the language server, if any.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "const": "not_renameable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "position": {
+          "$ref": "#/$defs/Position2D",
+          "description": "Queried client position (1-based UTF-16)."
         },
         "positions_degraded": {
           "anyOf": [
@@ -7476,7 +7414,7 @@
               "type": "null"
             }
           ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          "description": "Worst position-conversion warning across this request."
         },
         "resolved_symbol": {
           "anyOf": [
@@ -7491,7 +7429,7 @@
         }
       },
       "required": [
-        "changes"
+        "position"
       ],
       "type": "object"
     },

@@ -614,18 +614,54 @@ pub struct DocumentChanges {
 /// Result of a rename request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RenameResult {
-    /// Changes to apply across documents.
-    pub changes: Vec<DocumentChanges>,
-    /// Entries withheld from `changes` -- see [`DroppedEdits`]. A non-empty
-    /// value means the rename is incomplete even if `changes` is non-empty,
-    /// and callers must not treat this result as the full rename otherwise.
-    #[serde(default, skip_serializing_if = "DroppedEdits::is_empty")]
-    pub dropped: DroppedEdits,
-    /// Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise.
-    ///
-    /// Tells whether the queried position or only the returned offsets are affected.
+    /// Queried client position (1-based UTF-16).
+    pub position: Position2D,
+    /// Proposal or rejection, with fields specific to that outcome.
+    #[serde(flatten)]
+    pub outcome: RenameOutcome,
+    /// Worst position-conversion warning across this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub positions_degraded: Option<PositionDegradation>,
+}
+
+/// A rename proposal or a preparation rejection.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RenameOutcome {
+    /// The server returned a proposal; an empty edit set is still a proposal.
+    Proposed {
+        /// Preparation performed before requesting edits.
+        preparation: RenamePreparation,
+        /// Proposed per-document edits. mcpls does not apply them.
+        changes: Vec<DocumentChanges>,
+        /// Withheld edits. A non-empty value means the proposal is incomplete.
+        #[serde(default, skip_serializing_if = "DroppedEdits::is_empty")]
+        dropped: DroppedEdits,
+    },
+    /// Preparation rejected this position. No rename request was sent.
+    NotRenameable {
+        /// Redacted explanation supplied by the language server, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_message: Option<String>,
+    },
+}
+
+/// Preparation that permitted the rename request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RenamePreparation {
+    /// The server supplied the identifier range.
+    Renameable {
+        /// Identifier range (1-based UTF-16).
+        range: Range,
+        /// Current name, when supplied by the server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+    },
+    /// The server permits rename without supplying an identifier range.
+    DefaultBehavior,
+    /// The server explicitly does not advertise preparation support.
+    Unsupported,
 }
 
 /// Counts of `WorkspaceEdit` entries withheld during conversion to MCP DTOs,
@@ -1609,12 +1645,27 @@ impl ServerText for DocumentChanges {
 
 impl ServerText for RenameResult {
     fn redact_server_text(&mut self, redactions: &Redactions) {
-        let Self {
-            changes,
-            dropped: _,
-            positions_degraded: _,
-        } = self;
-        changes.redact_server_text(redactions);
+        match &mut self.outcome {
+            RenameOutcome::Proposed {
+                preparation,
+                changes,
+                ..
+            } => {
+                if let RenamePreparation::Renameable {
+                    placeholder: Some(placeholder),
+                    ..
+                } = preparation
+                {
+                    redactions.redact_in_place(placeholder);
+                }
+                changes.redact_server_text(redactions);
+            }
+            RenameOutcome::NotRenameable { server_message } => {
+                if let Some(message) = server_message {
+                    redactions.redact_in_place(message);
+                }
+            }
+        }
     }
 }
 

@@ -9,13 +9,13 @@ use super::Translator;
 use super::diagnostics::diagnostic_to_mcp;
 use super::dto::{
     BoundedRange, CodeAction, CodeActionsResult, CommandDescription, DocumentChanges, DroppedEdits,
-    FormatDocumentResult, NewName, Position, PrepareRenameOutcome, PrepareRenameResult,
-    RenameResult, TabSize, TextEdit, WorkspaceEditDescription,
+    FormatDocumentResult, NewName, Position, Position2D, PrepareRenameOutcome, PrepareRenameResult,
+    RenameOutcome, RenamePreparation, RenameResult, TabSize, TextEdit, WorkspaceEditDescription,
 };
 use super::encoding_ctx::EncodingCtx;
 use super::kind_filter::CodeActionKindFilter;
 use super::navigation::ItemBudget;
-use super::positioned::{Positioned, budgeted, document_request};
+use super::positioned::{Positioned, budgeted, budgeted_classified, document_request};
 use super::routing::{Capability, FileLocalCapability, IndexingGate};
 use crate::bridge::{ClientPath, WorkspaceRoots};
 use crate::config::ServerId;
@@ -506,18 +506,66 @@ impl Translator {
         position: Position,
         new_name: NewName,
     ) -> Result<RenameResult> {
-        let Positioned {
-            result: response,
-            ctx,
-            doc: _doc,
-        } = self
-            .position_request::<lsp_types::RenameRequest>(
+        let doc = self
+            .prepare_positioned_document(
                 &file_path,
-                position,
                 IndexingGate::Required(Capability::Rename),
-                new_name.into_string(),
+                &[position],
             )
             .await?;
+        // Build once: both LSP requests use this connection, URI, converted
+        // position and conversion budget while the document guard remains alive.
+        let ctx = self.encoding_ctx(doc.server_id());
+        let target = lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: doc.uri().clone(),
+            },
+            position: ctx.to_lsp(doc.uri(), position).await,
+        };
+        let queried_position = Position2D {
+            line: position.line().get(),
+            character: position.character().get(),
+        };
+        let preparation = match self.require_capability(doc.server_id(), Capability::PrepareRename)
+        {
+            Err(crate::Error::CapabilityNotSupported { .. }) => RenamePreparation::Unsupported,
+            Err(err) => return Err(err),
+            Ok(()) => {
+                let response = budgeted_classified::<lsp_types::PrepareRenameRequest>(
+                    doc.client(),
+                    lsp_types::PrepareRenameParams {
+                        text_document_position_params: target.clone(),
+                        work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+                    },
+                )
+                .await;
+                let outcome = self
+                    .prepare_rename_outcome(response, &ctx, doc.uri())
+                    .await?;
+                match outcome {
+                    PrepareRenameOutcome::Renameable { range, placeholder } => {
+                        RenamePreparation::Renameable { range, placeholder }
+                    }
+                    PrepareRenameOutcome::DefaultBehavior => RenamePreparation::DefaultBehavior,
+                    PrepareRenameOutcome::NotRenameable { server_message } => {
+                        return Ok(RenameResult {
+                            position: queried_position,
+                            outcome: RenameOutcome::NotRenameable { server_message },
+                            positions_degraded: ctx.positions_degraded(),
+                        });
+                    }
+                }
+            }
+        };
+        let response = budgeted::<lsp_types::RenameRequest>(
+            doc.client(),
+            lsp_types::RenameParams {
+                text_document_position_params: target,
+                new_name: new_name.into_string(),
+                work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            },
+        )
+        .await?;
 
         let (changes, dropped) = if let Some(edit) = response {
             convert_workspace_edit(
@@ -533,8 +581,12 @@ impl Translator {
         };
 
         Ok(RenameResult {
-            changes,
-            dropped,
+            position: queried_position,
+            outcome: RenameOutcome::Proposed {
+                preparation,
+                changes,
+                dropped,
+            },
             positions_degraded: ctx.positions_degraded(),
         })
     }
@@ -575,7 +627,23 @@ impl Translator {
             .send_classified()
             .await;
         let response_uri = doc.uri();
-        let outcome = match response {
+        let outcome = self
+            .prepare_rename_outcome(response, &ctx, response_uri)
+            .await?;
+
+        Ok(PrepareRenameResult {
+            outcome,
+            positions_degraded: ctx.positions_degraded(),
+        })
+    }
+
+    async fn prepare_rename_outcome(
+        &self,
+        response: std::result::Result<Option<lsp_types::PrepareRenameResult>, UnclassifiedError>,
+        ctx: &EncodingCtx,
+        response_uri: &lsp_types::Uri,
+    ) -> Result<PrepareRenameOutcome> {
+        Ok(match response {
             Ok(Some(lsp_types::PrepareRenameResult::Range(range))) => {
                 PrepareRenameOutcome::Renameable {
                     range: ctx.normalize_range(response_uri, range).await,
@@ -599,11 +667,6 @@ impl Translator {
                 }
             }
             Err(err) => prepare_rename_rejection(err, &self.server_text_redactions())?,
-        };
-
-        Ok(PrepareRenameResult {
-            outcome,
-            positions_degraded: ctx.positions_degraded(),
         })
     }
 
@@ -877,26 +940,32 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(result.changes.len(), 1);
+        let RenameOutcome::Proposed {
+            changes, dropped, ..
+        } = result.outcome
+        else {
+            panic!("expected proposal")
+        };
+        assert_eq!(changes.len(), 1);
         assert_eq!(
-            result.changes[0].edits.len(),
+            changes[0].edits.len(),
             1,
             "the snippet edit must be dropped, not converted to literal text"
         );
-        assert_eq!(result.changes[0].edits[0].new_text, "new_name");
+        assert_eq!(changes[0].edits[0].new_text, "new_name");
         assert!(
-            !result.changes[0]
+            !changes[0]
                 .edits
                 .iter()
                 .any(|e| e.new_text.contains("${1:comment}")),
             "snippet placeholder syntax must never appear as literal replacement text"
         );
         assert_eq!(
-            result.dropped.unsupported_snippet_edit, 1,
+            dropped.unsupported_snippet_edit, 1,
             "the dropped snippet edit must be tallied so callers can tell the rename is incomplete"
         );
-        assert_eq!(result.dropped.out_of_workspace, 0);
-        assert_eq!(result.dropped.unsupported_file_operation, 0);
+        assert_eq!(dropped.out_of_workspace, 0);
+        assert_eq!(dropped.unsupported_file_operation, 0);
     }
 
     /// #415: a `documentChanges` entry whose URI falls outside every
@@ -989,18 +1058,24 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        let RenameOutcome::Proposed {
+            changes, dropped, ..
+        } = result.outcome
+        else {
+            panic!("expected proposal")
+        };
         assert_eq!(
-            result.changes.len(),
+            changes.len(),
             1,
             "the out-of-workspace entry must be dropped, not forwarded"
         );
-        assert_eq!(result.changes[0].uri, inside_uri);
+        assert_eq!(changes[0].uri, inside_uri);
         assert_eq!(
-            result.dropped.out_of_workspace, 1,
+            dropped.out_of_workspace, 1,
             "the dropped out-of-workspace entry must be tallied so callers can tell the rename is incomplete"
         );
-        assert_eq!(result.dropped.unsupported_file_operation, 0);
-        assert_eq!(result.dropped.unsupported_snippet_edit, 0);
+        assert_eq!(dropped.unsupported_file_operation, 0);
+        assert_eq!(dropped.unsupported_snippet_edit, 0);
     }
 
     #[tokio::test]
@@ -2146,8 +2221,15 @@ mod tests {
     #[test]
     fn test_rename_result_dropped_field_serde_presence() {
         let clean = RenameResult {
-            changes: vec![],
-            dropped: DroppedEdits::default(),
+            position: Position2D {
+                line: 1,
+                character: 1,
+            },
+            outcome: RenameOutcome::Proposed {
+                preparation: RenamePreparation::Unsupported,
+                changes: vec![],
+                dropped: DroppedEdits::default(),
+            },
             positions_degraded: None,
         };
         let clean_json = serde_json::to_value(&clean).unwrap();
@@ -2157,12 +2239,18 @@ mod tests {
         );
 
         let incomplete = RenameResult {
-            changes: vec![],
-            dropped: DroppedEdits {
-                out_of_workspace: 1,
-                unsupported_file_operation: 2,
-                unsupported_snippet_edit: 0,
-                ..DroppedEdits::default()
+            position: Position2D {
+                line: 1,
+                character: 1,
+            },
+            outcome: RenameOutcome::Proposed {
+                preparation: RenamePreparation::Unsupported,
+                changes: vec![],
+                dropped: DroppedEdits {
+                    out_of_workspace: 1,
+                    unsupported_file_operation: 2,
+                    ..DroppedEdits::default()
+                },
             },
             positions_degraded: None,
         };
@@ -2899,7 +2987,9 @@ mod tests {
         .await;
 
         let result = handle.await.unwrap().unwrap();
-        assert!(result.changes.is_empty());
+        assert!(
+            matches!(result.outcome, RenameOutcome::Proposed { changes, .. } if changes.is_empty())
+        );
     }
 
     fn file_uri(dir: &tempfile::TempDir, name: &str) -> String {

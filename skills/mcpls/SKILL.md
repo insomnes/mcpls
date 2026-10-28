@@ -23,8 +23,7 @@ metadata:
 mcpls is a single Rust binary that bridges the Model Context Protocol (MCP) to the
 Language Server Protocol (LSP). It spawns and speaks LSP to real language servers
 (rust-analyzer, pyright, gopls, clangd, …) and exposes their capabilities to an AI
-agent as 31 MCP tools — hover, go-to-definition, references, diagnostics, rename (with
-`prepare_rename`), completions, symbols, formatting (document and range), call and type
+agent as 30 MCP tools — hover, go-to-definition, references, diagnostics, rename with internal preparation, completions, symbols, formatting (document and range), call and type
 hierarchy, document highlights, a `get_tool_support` report of which tools work for which
 languages, and more.
 
@@ -34,10 +33,16 @@ identifiers and command arguments are returned unmodified.
 
 This skill covers operating the **binary**: installing it, choosing CLI flags and
 environment variables, registering it with an MCP client, and writing `mcpls.toml`.
-It does not enumerate the 31 MCP tools themselves or their parameters — for that, see
+It does not enumerate the 30 MCP tools themselves or their parameters — for that, see
 [Tools Reference](https://bug-ops.github.io/mcpls/tools/overview.html).
 If the bridge is configured with `mcp.tool_prefix`, every tool name listed there gains
 that prefix (`{tool_prefix}_{tool}`).
+
+`rename_symbol` resolves a name or position and prepares on the rename server when supported.
+Its `proposed` result includes the queried `position`, `preparation`, and `changes`.
+A `not_renameable` result has no edits. The standalone MCP `prepare_rename` tool was removed.
+Request a proposal, inspect it, then apply complete edits through the client.
+Do not apply proposals with non-empty `dropped` or unreliable positions.
 
 ## Prerequisites
 

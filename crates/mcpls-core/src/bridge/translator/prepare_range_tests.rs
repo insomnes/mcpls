@@ -881,3 +881,147 @@ async fn format_range_without_capability_is_rejected() {
         .unwrap_err();
     assert_matches!(err, Error::CapabilityNotSupported { .. });
 }
+
+/// A single public translator call must prepare before rename, retain the queried
+/// position, distinguish rejection from empty edits, and leave source unchanged.
+async fn composed_rename_with(answer: Answer, permits_rename: bool) -> Result<serde_json::Value> {
+    let dir = TempDir::new().unwrap();
+    let (translator, mut server) =
+        translator_with_capabilities(&dir, &ServerId::from_static("rust"), prepare_caps());
+    let path = dir.path().join("a.rs");
+    let source = "fn old_name() {}";
+    fs::write(&path, source).unwrap();
+    let request_path = path.clone();
+    let task = tokio::spawn(async move {
+        translator
+            .handle_rename(
+                client_path(request_path),
+                pos(1, 5),
+                super::dto::NewName::new("new_name").unwrap(),
+            )
+            .await
+    });
+    let mut wire = BufReader::new(&mut server.write_stdout);
+    assert_eq!(
+        read_framed_message(&mut wire).await["method"],
+        "textDocument/didOpen"
+    );
+    let prepare = read_framed_message(&mut wire).await;
+    assert_eq!(prepare["method"], "textDocument/prepareRename");
+    match answer {
+        Answer::Result(value) => {
+            write_response(&mut server.read_half_stdin, &prepare["id"], value).await;
+        }
+        Answer::Error(code, message) => {
+            write_error_response(
+                &mut server.read_half_stdin,
+                &prepare["id"],
+                i64::from(code),
+                message,
+            )
+            .await;
+        }
+    }
+    if permits_rename {
+        let rename = read_framed_message(&mut wire).await;
+        assert_eq!(rename["method"], "textDocument/rename");
+        assert_eq!(rename["params"]["position"], prepare["params"]["position"]);
+        assert_eq!(
+            rename["params"]["textDocument"],
+            prepare["params"]["textDocument"]
+        );
+        assert_eq!(rename["params"]["newName"], "new_name");
+        write_response(
+            &mut server.read_half_stdin,
+            &rename["id"],
+            serde_json::Value::Null,
+        )
+        .await;
+    }
+    // A forbidden rename would wait for an unanswered response and fail this watchdog.
+    let result = timeout(Duration::from_secs(2), task)
+        .await
+        .expect("rename must finish without an unpermitted request")
+        .unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+    result.map(|result| serde_json::to_value(result).unwrap())
+}
+
+#[tokio::test]
+async fn composed_rename_preparation_success_variants() {
+    let cases = [
+        (range_json(), "renameable", false),
+        (
+            serde_json::json!({"range": range_json(), "placeholder": "old_name"}),
+            "renameable",
+            true,
+        ),
+        (
+            serde_json::json!({"defaultBehavior": true}),
+            "default_behavior",
+            false,
+        ),
+    ];
+    for (answer, status, placeholder) in cases {
+        let result = composed_rename_with(Answer::Result(answer), true)
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "proposed");
+        assert_eq!(
+            result["position"],
+            serde_json::json!({"line": 1, "character": 5})
+        );
+        assert_eq!(result["changes"], serde_json::json!([]));
+        assert_eq!(result["preparation"]["status"], status);
+        assert_eq!(
+            result["preparation"].get("placeholder").is_some(),
+            placeholder
+        );
+        assert_eq!(
+            result["preparation"].get("range").is_some(),
+            status == "renameable"
+        );
+    }
+}
+
+#[tokio::test]
+async fn composed_rename_rejections_never_request_edits() {
+    for answer in [
+        Answer::Result(serde_json::Value::Null),
+        Answer::Result(serde_json::json!({"defaultBehavior": false})),
+        Answer::Error(-32602, "cannot rename keyword"),
+        Answer::Error(-32001, "no symbol"),
+    ] {
+        let result = composed_rename_with(answer, false).await.unwrap();
+        assert_eq!(result["status"], "not_renameable");
+        assert_eq!(
+            result["position"],
+            serde_json::json!({"line": 1, "character": 5})
+        );
+        for forbidden in ["changes", "dropped", "preparation"] {
+            assert!(result.get(forbidden).is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn composed_rename_operational_failures_never_request_edits() {
+    for code in [-32601, -32800, -32803, -32603] {
+        assert!(
+            composed_rename_with(Answer::Error(code, "request failed"), false)
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        composed_rename_with(
+            Answer::Error(
+                -32602,
+                "Invalid offset LineCol { line: 9, col: 0 } (line index length: 16)"
+            ),
+            false
+        )
+        .await
+        .is_err()
+    );
+}

@@ -25,8 +25,8 @@ Add "and tell me which function each usage is inside" and the assistant passes `
 
 > Rename `process_data` to `handle_data` everywhere and show me the plan.
 
-1. `prepare_rename` checks that the symbol can be renamed.
-2. `rename_symbol` returns the edits for every file.
+1. Call `rename_symbol` once with the target and new name. It checks preparation when the rename server supports it.
+2. Inspect the `proposed` result before applying its edits through the client. A `not_renameable` result contains no edits.
 
 mcpls returns the edits; it does not write them. The assistant applies them with its own file tools, after you approve. If the result contains a `dropped` field, some edits were withheld (for example files outside the workspace) and the rename is incomplete, so the assistant should say so before applying anything.
 

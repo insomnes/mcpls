@@ -54,9 +54,9 @@ use crate::bridge::{
     FoldingRangesResult, FormatDocumentResult, HierarchyItem, HoverResult, IncomingCallsResult,
     Indexed, InlayHintsResult, KindFilter, KindFilterField, KindFilterInput, LocationsResult,
     NotificationCache, OutgoingCallsResult, Position, PositionEncoding, PositionRange,
-    PrepareRenameResult, ReferencesResult, RenameResult, RestartServerResult, RouteSignals,
-    SelectionRangesResult, ServerLogsResult, ServerMessagesResult, SignatureHelpResult,
-    SymbolTarget, Translator, TypeHierarchyResult, WorkspaceRoots, WorkspaceSymbolResult,
+    ReferencesResult, RenameResult, RestartServerResult, RouteSignals, SelectionRangesResult,
+    ServerLogsResult, ServerMessagesResult, SignatureHelpResult, SymbolTarget, Translator,
+    TypeHierarchyResult, WorkspaceRoots, WorkspaceSymbolResult,
 };
 use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix};
 use crate::redaction::{Redactions, ServerText};
@@ -936,7 +936,7 @@ impl McplsServer {
     // read-only: returns a proposed WorkspaceEdit, does not apply it -- mcpls
     // has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Rename symbol across workspace. Returns text edits for all files where symbol is used. A non-empty `dropped` field means some edits were withheld (e.g. out-of-workspace files, or `exceeds_item_cap` when a file's edits exceed the fixed maximum) -- the rename is then incomplete even though `changes` is non-empty. ", name_addressing_note!(), " An ambiguous name never produces an edit. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Resolve a target and propose a workspace rename in one call. Runs preparation on the rename server when advertised; explicit unsupported preparation permits rename directly. Returns `status: proposed` with queried `position`, `preparation` (`renameable` with range and optional placeholder, `default_behavior` without range, or `unsupported`) and `changes`, or `status: not_renameable` with position and optional server_message, without edits. Inspect the proposal before applying through the client. A non-empty `dropped` field means some edits were withheld (e.g. out-of-workspace files, or `exceeds_item_cap` when a file's edits exceed the fixed maximum) -- the rename is then incomplete even though `changes` is non-empty. ", name_addressing_note!(), " An ambiguous name never produces an edit. ", positions_note_request!(), " ", out_of_workspace_note!()),
         title = "Rename Symbol"
     )]
     async fn rename_symbol(
@@ -944,10 +944,22 @@ impl McplsServer {
         Parameters(RenameParams { target, new_name }): Parameters<RenameParams>,
     ) -> Result<Json<Addressed<RenameResult>>, McpError> {
         let translator = &self.context.translator;
-        self.addressed(target, AddressableTool::Rename, |file_path, position| {
-            translator.handle_rename(file_path, position, new_name)
-        })
-        .await
+        let (file_path, target) = parse_target(target.file_path, target.target)?;
+        let answer = async {
+            let resolved = translator
+                .resolve_symbol_target(&file_path, target, AddressableTool::Rename)
+                .await?;
+            let mut result = translator
+                .handle_rename(file_path, resolved.position, new_name)
+                .await?;
+            result.positions_degraded = result.positions_degraded.max(resolved.positions_degraded);
+            Ok(Addressed {
+                result,
+                resolved_symbol: resolved.resolved,
+            })
+        }
+        .await;
+        self.structured_result(answer)
     }
 
     /// Get code completion suggestions.
@@ -1175,28 +1187,6 @@ impl McplsServer {
             self.context
                 .translator
                 .handle_subtypes(parse_hierarchy_item(item)?)
-                .await,
-        )
-    }
-
-    /// Check whether the symbol at a position can be renamed.
-    #[tool(
-        description = concat!("Whether the symbol at position can be renamed, before proposing a rename. `status` is `renameable` (with the identifier `range` and, when the server gives it, `placeholder`), `default_behavior` (rename is accepted but the server gives no range) or `not_renameable` (optionally with the server's `server_message`). Unsupported servers are refused with a capability error instead. ", positions_note_request!()),
-        title = "Prepare Rename"
-    )]
-    async fn prepare_rename(
-        &self,
-        Parameters(PositionParams {
-            file_path,
-            line,
-            character,
-        }): Parameters<PositionParams>,
-    ) -> Result<Json<PrepareRenameResult>, McpError> {
-        let file_path = parse_client_path(file_path)?;
-        self.structured_result(
-            self.context
-                .translator
-                .handle_prepare_rename(file_path, parse_position(line, character)?)
                 .await,
         )
     }
@@ -2730,10 +2720,6 @@ mod tests {
                     .map(|_| ()),
                 server
                     .prepare_type_hierarchy(Parameters(position(line, character)))
-                    .await
-                    .map(|_| ()),
-                server
-                    .prepare_rename(Parameters(position(line, character)))
                     .await
                     .map(|_| ()),
                 server
@@ -5420,7 +5406,6 @@ sleep 0.3
             ("prepare_type_hierarchy", true, false, true),
             ("get_supertypes", true, false, true),
             ("get_subtypes", true, false, true),
-            ("prepare_rename", true, false, true),
             ("get_document_highlights", true, false, true),
             ("format_range", true, false, true),
             ("get_selection_ranges", true, false, true),
@@ -6158,7 +6143,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 31);
+            assert_eq!(tools.len(), 30);
             assert!(
                 !tools
                     .iter()
@@ -6172,7 +6157,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 31);
+            assert_eq!(tools.len(), 30);
             assert!(
                 !tools
                     .iter()
@@ -7328,6 +7313,39 @@ sleep 0.3
         }
     }
 
+    /// The composed result variants and tool removal are visible over MCP.
+    #[tokio::test]
+    async fn test_rename_proposal_surface_over_mcp() {
+        let (listed, _) =
+            request_over_the_wire(create_test_server(), "tools/list", serde_json::json!({})).await;
+        let tools = listed["result"]["tools"].as_array().unwrap();
+        assert!(!tools.iter().any(|tool| tool["name"] == "prepare_rename"));
+        let rename = tools
+            .iter()
+            .find(|tool| tool["name"] == "rename_symbol")
+            .unwrap();
+        assert_eq!(rename["outputSchema"]["type"], "object");
+        let output = rename["outputSchema"].to_string();
+        for field in [
+            "proposed",
+            "not_renameable",
+            "preparation",
+            "position",
+            "unsupported",
+            "default_behavior",
+        ] {
+            assert!(
+                output.contains(field),
+                "missing rename schema field {field}"
+            );
+        }
+        let (removed, _) = request_over_the_wire(create_test_server(), "tools/call", serde_json::json!({"name": "prepare_rename", "arguments": {"file_path": "/ws/a.rs", "line": 1, "character": 1}})).await;
+        assert!(
+            removed.get("error").is_some(),
+            "removed tool must return an unknown-tool error: {removed}"
+        );
+    }
+
     // ------------------------------------------------------------------
     // get_tool_support tests
     // ------------------------------------------------------------------
@@ -7596,10 +7614,6 @@ sleep 0.3
                 .get_subtypes(Parameters(type_item()))
                 .await
                 .map(|_| ()),
-            McpTool::PrepareRename => server
-                .prepare_rename(Parameters(position()))
-                .await
-                .map(|_| ()),
             McpTool::GetDocumentHighlights => server
                 .get_document_highlights(Parameters(position()))
                 .await
@@ -7785,7 +7799,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 31);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 30);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

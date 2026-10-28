@@ -59,11 +59,12 @@ pub use translator::{
     MAX_RESTART_SERVER_IDS, MAX_SELECTION_CHAIN, MAX_SERVER_ID_BYTES, MAX_SYMBOL_NAME_BYTES,
     MAX_TAB_SIZE, MAX_TRIGGER_CHARACTER_BYTES, NewName, NotComputedReason, OutlineSymbol, Position,
     Position2D, PositionDegradation, PositionRange, PositionSource, PrepareRenameOutcome,
-    PrepareRenameResult, Range, ReferencesResult, RejectedKindFilter, Rejection, RenameResult,
-    ResolvedSymbol, ResolvedTarget, RestartFailure, RestartOutcome, RestartServerResult,
-    RestartTarget, ResultContext, RouteSupport, SelectionRangesResult, ServerIds, ServerIdsError,
-    ServerRestartEntry, Symbol, SymbolFidelity, SymbolKindFilter, SymbolName, SymbolQuery,
-    SymbolTarget, TabSize, TextEdit, TextField, Translator, TypeHierarchyResult, UnavailableReason,
+    PrepareRenameResult, Range, ReferencesResult, RejectedKindFilter, Rejection, RenameOutcome,
+    RenamePreparation, RenameResult, ResolvedSymbol, ResolvedTarget, RestartFailure,
+    RestartOutcome, RestartServerResult, RestartTarget, ResultContext, RouteSupport,
+    SelectionRangesResult, ServerIds, ServerIdsError, ServerRestartEntry, Symbol, SymbolFidelity,
+    SymbolKindFilter, SymbolName, SymbolQuery, SymbolTarget, TabSize, TextEdit, TextField,
+    Translator, TypeHierarchyResult, UnavailableReason,
 };
 pub(crate) use translator::{
     CallHierarchyPrepareResult, CodeActionsResult, DiagnosticsRole, IncomingCallsResult,

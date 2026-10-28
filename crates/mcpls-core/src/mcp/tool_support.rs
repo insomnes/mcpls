@@ -53,7 +53,6 @@ pub(super) enum McpTool {
     PrepareTypeHierarchy,
     GetSupertypes,
     GetSubtypes,
-    PrepareRename,
     GetDocumentHighlights,
     FormatRange,
     GetSelectionRanges,
@@ -72,7 +71,7 @@ pub(super) enum McpTool {
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 31] = [
+    pub(super) const ALL: [Self; 30] = [
         Self::GetHover,
         Self::GetDefinition,
         Self::GetReferences,
@@ -89,7 +88,6 @@ impl McpTool {
         Self::PrepareTypeHierarchy,
         Self::GetSupertypes,
         Self::GetSubtypes,
-        Self::PrepareRename,
         Self::GetDocumentHighlights,
         Self::FormatRange,
         Self::GetSelectionRanges,
@@ -153,7 +151,6 @@ impl McpTool {
             }
             Self::GetSupertypes => ("get_supertypes", Document(ToolKind::TypeHierarchy)),
             Self::GetSubtypes => ("get_subtypes", Document(ToolKind::TypeHierarchy)),
-            Self::PrepareRename => ("prepare_rename", Document(ToolKind::Rename)),
             Self::GetDocumentHighlights => (
                 "get_document_highlights",
                 Document(ToolKind::DocumentHighlights),
@@ -187,18 +184,13 @@ impl McpTool {
     }
 
     /// The capability this tool's call is gated on, or `None` when it is
-    /// ungated or answered locally. A tool sharing another tool's route can
-    /// need a different capability (`prepare_rename` on the `Rename` route),
-    /// so this is per tool, not per [`ToolKind`].
+    /// ungated or answered locally.
     pub(super) const fn capability(self) -> Option<Capability> {
-        match self {
-            Self::PrepareRename => Some(Capability::PrepareRename),
-            _ => match self.spec().backend {
-                ToolBackend::Document(kind) | ToolBackend::Workspace(kind) => {
-                    Capability::for_tool(kind)
-                }
-                ToolBackend::Local => None,
-            },
+        match self.spec().backend {
+            ToolBackend::Document(kind) | ToolBackend::Workspace(kind) => {
+                Capability::for_tool(kind)
+            }
+            ToolBackend::Local => None,
         }
     }
 }

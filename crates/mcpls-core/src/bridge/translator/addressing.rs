@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::Translator;
-use super::dto::{Position, Position2D};
+use super::dto::{Position, Position2D, PositionDegradation};
 use super::encoding_ctx::EncodingCtx;
 use super::routing::Capability;
 use crate::bridge::ClientPath;
@@ -169,6 +169,8 @@ pub struct ResolvedTarget {
     pub position: Position,
     /// The resolved symbol; `None` when the caller gave the position.
     pub resolved: Option<ResolvedSymbol>,
+    /// Worst conversion warning produced while resolving the name.
+    pub positions_degraded: Option<PositionDegradation>,
 }
 
 /// One symbol of a document-symbol answer, flattened.
@@ -558,6 +560,7 @@ impl Translator {
                 return Ok(ResolvedTarget {
                     position,
                     resolved: None,
+                    positions_degraded: None,
                 });
             }
             SymbolTarget::Name(query) => query,
@@ -577,6 +580,7 @@ impl Translator {
                 match located {
                     IdentifierPosition::Verified(position, source) => Ok(ResolvedTarget {
                         position: Position::from_server_output(&position),
+                        positions_degraded: fetched.ctx.positions_degraded(),
                         resolved: Some(ResolvedSymbol {
                             name: entry.name.clone(),
                             kind: u32::from(entry.kind),

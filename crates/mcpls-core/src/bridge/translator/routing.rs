@@ -3870,6 +3870,10 @@ mod tests {
             result.is_ok(),
             "fake server answered, expected Ok: {result:?}"
         );
+        let result = serde_json::to_value(result.unwrap()).unwrap();
+        assert_eq!(result["status"], "proposed");
+        assert_eq!(result["preparation"]["status"], "unsupported");
+        assert_eq!(result["changes"], serde_json::json!([]));
     }
 
     /// `forms` are the provider forms that advertise the capability.

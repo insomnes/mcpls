@@ -1,18 +1,18 @@
 # Tools Overview
 
-In this chapter you learn the conventions every mcpls tool shares: how code is addressed, what the advisory flags in results mean, and how to read errors. The next chapters then cover the 31 tools by task. Learn these rules once and every tool becomes predictable.
+In this chapter you learn the conventions every mcpls tool shares: how code is addressed, what the advisory flags in results mean, and how to read errors. The next chapters then cover the 30 tools by task. Learn these rules once and every tool becomes predictable.
 
 ## Prerequisites
 
 - A [connected client](../getting-started/connect-client.md).
 
-## The 31 tools at a glance
+## The 30 tools at a glance
 
 | Task | Tools |
 |------|-------|
 | [Read and navigate code](code-intelligence.md) | `get_hover`, `get_definition`, `get_references`, `get_completions`, `get_document_symbols`, `get_document_outline`, `workspace_symbol_search`, `get_document_highlights`, `get_signature_help`, `get_inlay_hints` |
 | [Diagnostics and formatting](diagnostics.md) | `get_diagnostics`, `get_cached_diagnostics`, `format_document`, `format_range`, `get_folding_ranges`, `get_selection_ranges` |
-| [Refactor](refactoring.md) | `prepare_rename`, `rename_symbol`, `get_code_actions` |
+| [Refactor](refactoring.md) | `rename_symbol`, `get_code_actions` |
 | [Hierarchies and navigation](hierarchies.md) | `go_to_implementation`, `go_to_type_definition`, `go_to_declaration`, `get_incoming_calls`, `get_outgoing_calls`, `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
 | [Monitor and control servers](server-control.md) | `get_server_logs`, `get_server_messages`, `get_tool_support`, `restart_server` |
 

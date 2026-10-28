@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking change: remove the standalone MCP `prepare_rename` tool. Call `rename_symbol` once to resolve, prepare when advertised, and propose edits. Results now distinguish `proposed` (with queried `position`, `preparation`, and `changes`) from `not_renameable` (without edits). Inspect complete proposals before applying them through the client; mcpls does not modify source files. The MCP inventory now contains 30 tools.
+
 ### Added
 
 - **Breaking:** remove standalone MCP `prepare_call_hierarchy`. Replace prepare-then-traverse requests with `get_incoming_calls(target)` or `get_outgoing_calls(target)`. Preparation remains internal to the LSP bridge; use returned items for selection and further traversal. The MCP inventory now contains 31 tools.

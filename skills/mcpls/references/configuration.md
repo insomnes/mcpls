@@ -66,7 +66,7 @@ a few map many-to-one:
 | `implementation` | `go_to_implementation` |
 | `references` | `get_references` |
 | `diagnostics` | `get_diagnostics` (pull) **and** `get_cached_diagnostics` (same route serves both) |
-| `rename` | `rename_symbol`, `prepare_rename` |
+| `rename` | `rename_symbol` |
 | `completions` | `get_completions` |
 | `signature_help` | `get_signature_help` |
 | `document_symbols` | `get_document_symbols` |
