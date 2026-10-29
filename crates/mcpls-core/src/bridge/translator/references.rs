@@ -103,10 +103,12 @@ impl Translator {
                 let (key, validated) = if sources.contains_key(&path) {
                     (path, None)
                 } else if let Ok(client) = ClientPath::try_from(path.clone()) {
-                    match self.workspace_roots.validate(&client).await {
-                        Ok(validated) => (validated.as_path().to_path_buf(), Some(validated)),
-                        Err(_) => (path, None),
-                    }
+                    self.workspace_roots
+                        .validate(&client)
+                        .await
+                        .map_or((path, None), |validated| {
+                            (validated.as_path().to_path_buf(), Some(validated))
+                        })
                 } else {
                     (path, None)
                 };
@@ -223,6 +225,9 @@ impl Translator {
             let mut file = file.take(read_cap as u64);
             let mut chunk = [0; 8192];
             loop {
+                if clock.now() >= deadline {
+                    return Err(Missing::Deadline);
+                }
                 #[cfg(test)]
                 if fail_after.is_some_and(|limit| bytes.len() >= limit) {
                     return Err(Missing::ReadFailed);
@@ -257,7 +262,7 @@ impl Translator {
                     charge,
                 )
             }
-            Ok(Err(Missing::Deadline)) => (Err(Missing::Deadline), 1),
+            Ok(Err(Missing::Deadline)) => (Err(Missing::Deadline), read_cap),
             Ok(Err(Missing::FileTooLarge)) => (Err(Missing::FileTooLarge), 1),
             Ok(Err(reason)) => (Err(reason), read_cap),
             Err(_) => (Err(Missing::ReadFailed), read_cap),
@@ -968,6 +973,52 @@ mod tests {
         for item in value["locations"].as_array().unwrap() {
             assert_eq!(item["source"]["text"], "reference\n");
             assert_eq!(item["source"]["origin"], "disk");
+        }
+    }
+    #[derive(Debug)]
+    struct AfterReadClock {
+        work: Arc<std::sync::Mutex<ReferenceWork>>,
+        start: std::time::Instant,
+    }
+    impl super::super::clock::Clock for AfterReadClock {
+        fn now(&self) -> std::time::Instant {
+            if crate::util::lock_std(&self.work).read_bytes == 0 {
+                self.start
+            } else {
+                self.start + Duration::from_secs(3)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reference_deadline_after_read_stops_further_chunks_and_charges_attempt() {
+        fn setup(translator: &mut Translator, _: &TempDir) {
+            translator.clock = Arc::new(AfterReadClock {
+                work: translator.reference_work.clone(),
+                start: std::time::Instant::now(),
+            });
+        }
+        let dir = TempDir::new().unwrap();
+        let mut response = Vec::new();
+        for index in 0..2 {
+            let path = canonical_dir(&dir).join(format!("deadline{index}.rs"));
+            std::fs::write(&path, vec![b'x'; FILE_BYTES]).unwrap();
+            response.push(location(&path, 0));
+        }
+        let (result, work) = request_with_setup(
+            &dir,
+            response,
+            ReferenceOptions::default(),
+            None,
+            Some(setup),
+        )
+        .await;
+        assert_eq!(work.read_bytes, 8192);
+        assert_eq!(work.source_bytes, FILE_BYTES + 1);
+        assert_eq!(work.files, 1);
+        let value = serde_json::to_value(result).unwrap();
+        for item in value["locations"].as_array().unwrap() {
+            assert_eq!(item["source"]["reason"], "deadline");
         }
     }
 }
