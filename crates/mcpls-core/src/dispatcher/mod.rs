@@ -1039,14 +1039,7 @@ impl Resident {
         language: Option<&crate::config::LanguageId>,
         tool: Option<crate::config::ToolKind>,
     ) -> Option<crate::config::ServerId> {
-        let router = runtime.translator.router_snapshot();
-        tool.and_then(|tool| {
-            language.as_ref().map_or_else(
-                || router.resolve_any(tool).ok(),
-                |language| router.resolve(language.as_ref(), tool),
-            )
-        })
-        .cloned()
+        tool.and_then(|tool| runtime.translator.dispatcher_demand_route(language, tool))
     }
     async fn demand_language(
         runtime: &WorkspaceRuntime,

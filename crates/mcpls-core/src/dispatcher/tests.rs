@@ -1047,3 +1047,62 @@ async fn diagnostic_resources_use_approved_canonical_alias() {
     client.cancel().await.unwrap();
     task.await.unwrap();
 }
+
+/// A failed provider with no healthy fallback is retried only on eligible demand.
+#[tokio::test]
+async fn lost_route_keeps_demand_only_backoff_and_recovery() {
+    let fixture = Fixture::new(4);
+    let failure = fixture.main.join(".fail-start");
+    std::fs::write(&failure, "").unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    error_code(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap_err(),
+        "workspace_unavailable",
+    );
+    error_code(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap_err(),
+        "workspace_unavailable",
+    );
+    assert_eq!(
+        fixture
+            .events()
+            .iter()
+            .filter(|event| event["event"] == "start")
+            .count(),
+        1
+    );
+    std::fs::remove_file(&failure).unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match call(&client, "get_hover", hover(&fixture.main)).await {
+                Ok(value) => break value,
+                Err(rmcp::ServiceError::McpError(error)) => {
+                    let data = error.data.unwrap();
+                    assert_eq!(data["code"], "workspace_unavailable");
+                    let retry = data["retry_after_ms"].as_u64().unwrap();
+                    tokio::time::sleep(Duration::from_millis(retry.min(1000) + 1)).await;
+                }
+                Err(other) => panic!("unexpected recovery error: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(recovered.to_string().contains("AUTHORED MAIN"));
+    assert_eq!(
+        fixture
+            .events()
+            .iter()
+            .filter(|event| event["event"] == "start")
+            .count(),
+        2
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}

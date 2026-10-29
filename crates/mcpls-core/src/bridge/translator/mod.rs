@@ -461,6 +461,24 @@ impl Translator {
         Arc::clone(&lock_std(&self.router))
     }
 
+    /// Uses the settled route first; a lost route can still demand its
+    /// applicable configured provider through dispatcher retry/backoff.
+    pub(crate) fn dispatcher_demand_route(
+        &self,
+        language: Option<&LanguageId>,
+        tool: ToolKind,
+    ) -> Option<ServerId> {
+        let resolve = |router: &ToolRouter| {
+            language
+                .map_or_else(
+                    || router.resolve_any(tool).ok(),
+                    |language| router.resolve(language.as_ref(), tool),
+                )
+                .cloned()
+        };
+        resolve(&self.router_snapshot()).or_else(|| resolve(&self.configured_router))
+    }
+
     /// Registers the server in one step, then re-derives routes.
     pub(crate) fn settle_started(&self, server: LspServer) -> (ServerId, LanguageId) {
         let id = server.init_config().server_config().id();

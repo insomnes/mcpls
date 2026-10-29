@@ -52,6 +52,9 @@ while True:
     if method == "initialize":
         event("initialize", params=params)
         wait_for_release(root / ".hold-start")
+        if (root / ".fail-start").exists():
+            send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32603, "message": "authored initialize failure"}})
+            continue
         result = {"capabilities": {"hoverProvider": True, "definitionProvider": True, "documentSymbolProvider": True,
                                    "workspaceSymbolProvider": True, "callHierarchyProvider": True}}
     elif method == "textDocument/hover":
