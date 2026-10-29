@@ -133,9 +133,11 @@ pub struct Translator {
     /// setup, so no lock is needed.
     workspace_roots: WorkspaceRoots,
     #[cfg(test)]
-    reference_work: StdMutex<references::ReferenceWork>,
+    reference_work: Arc<StdMutex<references::ReferenceWork>>,
     #[cfg(test)]
     reference_read_hook: Option<fn(&Path, bool)>,
+    #[cfg(test)]
+    reference_io_failure_after: Option<usize>,
     /// File extension and name to language ID mappings. Read-only after
     /// `serve()` setup, so no lock is needed.
     language_map: Arc<LanguageMap>,
@@ -203,9 +205,11 @@ impl Translator {
             resource_limits: ResourceLimits::default(),
             workspace_roots: WorkspaceRoots::default(),
             #[cfg(test)]
-            reference_work: StdMutex::new(references::ReferenceWork::default()),
+            reference_work: Arc::new(StdMutex::new(references::ReferenceWork::default())),
             #[cfg(test)]
             reference_read_hook: None,
+            #[cfg(test)]
+            reference_io_failure_after: None,
             language_map: Arc::default(),
             file_patterns: Arc::default(),
             router: Arc::new(StdMutex::new(Arc::new(ToolRouter::default()))),

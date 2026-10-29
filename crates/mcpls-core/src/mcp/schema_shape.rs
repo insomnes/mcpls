@@ -8,6 +8,8 @@
 //! first paragraph up to a byte cap (whole sentences, or nothing), and a
 //! definition that several tools carry keeps only a one-line form. It changes `description` annotations only, so
 //! property names, types, `required` lists and `$ref`s are untouched.
+//! References omit output descriptions to keep their source-outcome schema
+//! within the tool-size budget; their tool description explains the fields.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -190,6 +192,16 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
         shape_schema(Arc::make_mut(&mut tool.input_schema), &usage);
         if let Some(output) = tool.output_schema.as_mut() {
             shape_schema(Arc::make_mut(output), &usage);
+            if tool.name == "get_references" {
+                // References add source outcomes to an already rich navigation schema.
+                // Keep its structural contract; field meanings are in the tool description.
+                let mut schema = Schema::from(std::mem::take(Arc::make_mut(output)));
+                RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
+                    .transform(&mut schema);
+                if let Value::Object(shaped) = Value::from(schema) {
+                    *Arc::make_mut(output) = shaped;
+                }
+            }
         }
     }
 }
@@ -719,7 +731,12 @@ mod tests {
         };
         let mut lost = Vec::new();
         for (before, after) in unshaped.iter().zip(&shaped) {
-            for (old, new) in schemas_of(before).zip(schemas_of(after)) {
+            for (schema_index, (old, new)) in schemas_of(before).zip(schemas_of(after)).enumerate()
+            {
+                // References output uses the explicit dropping policy, not truncation.
+                if before.name == "get_references" && schema_index == 1 {
+                    continue;
+                }
                 let mut kept = BTreeSet::new();
                 for_each_description(&Value::Object(new.clone()), "", &mut |path, _| {
                     kept.insert(path.to_owned());

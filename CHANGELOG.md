@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Breaking change: `get_references` now defaults to 100 ordered matches with bounded source excerpts. Use `limit` (1 through 10000), absolute lexical `path_filter`, and `include_source` to control selection and context. `matched_count` and `truncated` describe the server response. Source outcomes identify tracked or contained disk text, shortened context, and unavailable reasons under fixed byte, file, and time limits.
+
 - Breaking change: remove the standalone MCP `prepare_rename` tool. Call `rename_symbol` once to resolve, prepare when advertised, and propose edits. Results now distinguish `proposed` (with queried `position`, `preparation`, and `changes`) from `not_renameable` (without edits). Inspect complete proposals before applying them through the client; mcpls does not modify source files. The MCP inventory now contains 30 tools.
 
 ### Added
-
-- `get_references` now defaults to 100 ordered matches with bounded source excerpts. Use `limit` (1 through 10000), absolute lexical `path_filter`, and `include_source` to control selection and context. `matched_count` and `truncated` describe the server response. Source outcomes identify tracked or contained disk text, shortened context, and unavailable reasons under fixed byte, file, and time limits.
 
 - **Breaking:** remove standalone MCP `prepare_call_hierarchy`. Replace prepare-then-traverse requests with `get_incoming_calls(target)` or `get_outgoing_calls(target)`. Preparation remains internal to the LSP bridge; use returned items for selection and further traversal. The MCP inventory now contains 31 tools.
 - `get_incoming_calls` and `get_outgoing_calls` accept direct position or symbol-name targets. Direct results distinguish successful traversal, no callable item, required selection and degraded preparation; item traversal follows selected candidates and returned call items.

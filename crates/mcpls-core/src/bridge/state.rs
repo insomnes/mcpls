@@ -715,6 +715,8 @@ pub enum DocumentOpenState {
 /// See [`Self::ensure_open`] for the concurrency contract this maintains.
 #[derive(Debug)]
 pub struct DocumentTracker {
+    #[cfg(test)]
+    pub(crate) snapshot_copied_bytes: std::sync::atomic::AtomicUsize,
     /// Open documents by file path. Locked only for the short, synchronous
     /// section that touches it — never held across an `await`.
     documents: StdMutex<HashMap<PathBuf, DocumentState>>,
@@ -759,6 +761,8 @@ impl DocumentTracker {
     #[must_use]
     pub fn new(limits: ResourceLimits, language_map: impl Into<LanguageMap>) -> Self {
         Self {
+            #[cfg(test)]
+            snapshot_copied_bytes: std::sync::atomic::AtomicUsize::new(0),
             documents: StdMutex::new(HashMap::new()),
             path_locks: StdMutex::new(HashMap::new()),
             in_flight: Arc::default(),
@@ -909,7 +913,13 @@ impl DocumentTracker {
         let documents = lock_std(&self.documents);
         let text = documents.get(path)?.text.as_str();
         let result = if text.len() <= max {
-            Ok(text.to_owned())
+            let copied = text.to_owned();
+            #[cfg(test)]
+            {
+                self.snapshot_copied_bytes
+                    .fetch_add(copied.len(), std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(copied)
         } else {
             Err(())
         };

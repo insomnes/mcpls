@@ -9,7 +9,8 @@ use super::Translator;
 use super::dto::{
     ReferenceLocation, ReferenceSource, SourceOrigin, SourceUnavailableReason as Missing,
 };
-use crate::bridge::ClientPath;
+use crate::bridge::{ClientPath, WorkspacePath};
+use crate::redaction::Redactions;
 
 const FILE_BYTES: usize = 1024 * 1024;
 const SOURCE_BYTES: usize = 4 * FILE_BYTES;
@@ -69,6 +70,8 @@ impl ReferenceOptions {
 #[cfg(test)]
 pub(super) struct ReferenceWork {
     pub normalized: usize,
+    pub read_bytes: usize,
+    pub tracked_bytes: usize,
     pub source_bytes: usize,
     pub files: usize,
     pub output_bytes: usize,
@@ -85,6 +88,7 @@ impl Translator {
         let mut sources: HashMap<PathBuf, Result<(String, SourceOrigin), Missing>> = HashMap::new();
         let mut source_left = SOURCE_BYTES;
         let mut output_left = OUTPUT_BYTES;
+        let redactions = self.server_text_redactions();
         for (index, location) in locations.iter_mut().enumerate() {
             let outcome = if index >= 100 {
                 unavailable(Missing::CandidateLimit)
@@ -94,14 +98,31 @@ impl Translator {
                 .ok()
                 .and_then(|uri| uri.to_file_path().ok())
             {
-                if !sources.contains_key(&path) {
+                // Share snapshots by the existing canonical access identity.
+                // Filter matching above remains entirely lexical.
+                let (key, validated) = if sources.contains_key(&path) {
+                    (path, None)
+                } else if let Ok(client) = ClientPath::try_from(path.clone()) {
+                    match self.workspace_roots.validate(&client).await {
+                        Ok(validated) => (validated.as_path().to_path_buf(), Some(validated)),
+                        Err(_) => (path, None),
+                    }
+                } else {
+                    (path, None)
+                };
+                if !sources.contains_key(&key) {
                     if sources.len() >= 16 {
                         location.source = Some(unavailable(Missing::FileLimit));
                         continue;
                     }
-                    let (source, charge) = self
-                        .reference_source_file(&path, source_left, deadline)
-                        .await;
+                    let (source, charge) = if let Some(validated) = validated {
+                        self.reference_source_file(validated, source_left, deadline)
+                            .await
+                    } else if source_left == 0 {
+                        (Err(Missing::SourceBudget), 0)
+                    } else {
+                        (Err(Missing::AccessDenied), 1)
+                    };
                     source_left = source_left.saturating_sub(charge);
                     #[cfg(test)]
                     {
@@ -109,15 +130,19 @@ impl Translator {
                         work.source_bytes += charge;
                         work.files += 1;
                     }
-                    sources.insert(path.clone(), source);
+                    sources.insert(key.clone(), source);
                 }
                 if self.clock.now() >= deadline {
                     unavailable(Missing::Deadline)
                 } else {
-                    match sources.get(&path) {
-                        Some(Ok((text, origin))) => {
-                            excerpt(text, location.range.start.line, *origin, &mut output_left)
-                        }
+                    match sources.get(&key) {
+                        Some(Ok((text, origin))) => excerpt(
+                            text,
+                            location.range.start.line,
+                            *origin,
+                            &mut output_left,
+                            &redactions,
+                        ),
                         Some(Err(reason)) => unavailable(*reason),
                         None => unavailable(Missing::ReadFailed),
                     }
@@ -135,20 +160,13 @@ impl Translator {
 
     async fn reference_source_file(
         &self,
-        path: &Path,
+        validated: WorkspacePath,
         remaining: usize,
         deadline: std::time::Instant,
     ) -> (Result<(String, SourceOrigin), Missing>, usize) {
         if remaining == 0 {
             return (Err(Missing::SourceBudget), 0);
         }
-        // Authorization is independent of the advisory out_of_workspace flag.
-        let Ok(client) = ClientPath::try_from(path.to_path_buf()) else {
-            return (Err(Missing::AccessDenied), 1);
-        };
-        let Ok(validated) = self.workspace_roots.validate(&client).await else {
-            return (Err(Missing::AccessDenied), 1);
-        };
         if self.clock.now() >= deadline {
             return (Err(Missing::Deadline), 1);
         }
@@ -175,6 +193,10 @@ impl Translator {
         let read_cap = remaining.min(FILE_BYTES + 1);
         #[cfg(test)]
         let hook = self.reference_read_hook;
+        #[cfg(test)]
+        let work = self.reference_work.clone();
+        #[cfg(test)]
+        let fail_after = self.reference_io_failure_after;
         let result = tokio::task::spawn_blocking(move || {
             if clock.now() >= deadline {
                 return Err(Missing::Deadline);
@@ -198,11 +220,24 @@ impl Translator {
                 return Err(Missing::Deadline);
             }
             let mut bytes = Vec::new();
-            match file.take(read_cap as u64).read_to_end(&mut bytes) {
-                Ok(_) => Ok(bytes),
-                // Charge the entire attempted slice when an OS error hides partial progress.
-                Err(_) => Err(Missing::ReadFailed),
+            let mut file = file.take(read_cap as u64);
+            let mut chunk = [0; 8192];
+            loop {
+                #[cfg(test)]
+                if fail_after.is_some_and(|limit| bytes.len() >= limit) {
+                    return Err(Missing::ReadFailed);
+                }
+                let read = file.read(&mut chunk).map_err(|_| Missing::ReadFailed)?;
+                if read == 0 {
+                    break;
+                }
+                #[cfg(test)]
+                {
+                    crate::util::lock_std(&work).read_bytes += read;
+                }
+                bytes.extend_from_slice(chunk.get(..read).unwrap_or_default());
             }
+            Ok(bytes)
         })
         .await;
         match result {
@@ -231,7 +266,13 @@ impl Translator {
 }
 
 /// Slice lines without changing LF, CRLF or standalone CR bytes.
-fn excerpt(text: &str, line: u32, origin: SourceOrigin, remaining: &mut usize) -> ReferenceSource {
+fn excerpt(
+    text: &str,
+    line: u32,
+    origin: SourceOrigin,
+    remaining: &mut usize,
+    redactions: &Redactions,
+) -> ReferenceSource {
     let target = line.saturating_sub(1) as usize;
     let bytes = text.as_bytes();
     let mut starts = vec![0];
@@ -262,34 +303,91 @@ fn excerpt(text: &str, line: u32, origin: SourceOrigin, remaining: &mut usize) -
         return unavailable(Missing::LineUnavailable);
     };
     let allowance = EXCERPT_BYTES.min(*remaining);
-    let shortened = window.len() > allowance;
-    let (selected, start_line) = if shortened {
-        (
-            text.get(
-                starts.get(target).copied().unwrap_or(text.len())
-                    ..starts
-                        .get(target.saturating_add(1))
-                        .copied()
-                        .unwrap_or(text.len()),
-            )
-            .unwrap_or_default(),
-            line,
+    let reference_line = text
+        .get(
+            starts.get(target).copied().unwrap_or(text.len())
+                ..starts
+                    .get(target.saturating_add(1))
+                    .copied()
+                    .unwrap_or(text.len()),
         )
-    } else {
-        (
-            window,
-            u32::try_from(start.saturating_add(1)).unwrap_or(u32::MAX),
-        )
-    };
+        .unwrap_or_default();
+    let mut shortened = window.len() > allowance;
+    // Bound the raw copy before redaction; then account the returned text.
+    let selected = if shortened { reference_line } else { window };
+    if selected.len() > allowance {
+        return unavailable(Missing::TextBudget);
+    }
+    let mut selected = selected.to_owned();
+    redactions.redact_in_place(&mut selected);
+    if selected.len() > allowance && !shortened {
+        if reference_line.len() > allowance {
+            return unavailable(Missing::TextBudget);
+        }
+        reference_line.clone_into(&mut selected);
+        redactions.redact_in_place(&mut selected);
+        shortened = true;
+    }
     if selected.len() > allowance {
         return unavailable(Missing::TextBudget);
     }
     *remaining = remaining.saturating_sub(selected.len());
     ReferenceSource::Text {
-        text: selected.to_owned(),
-        start_line,
+        text: selected,
+        start_line: if shortened {
+            line
+        } else {
+            u32::try_from(start.saturating_add(1)).unwrap_or(u32::MAX)
+        },
         origin,
         shortened,
+    }
+}
+
+/// Recheck final emitted source against the current redaction union and budgets.
+pub(super) fn redact_sources(locations: &mut [ReferenceLocation], redactions: &Redactions) {
+    let mut remaining = OUTPUT_BYTES;
+    for item in locations {
+        let Some(ReferenceSource::Text { .. }) = &item.source else {
+            continue;
+        };
+        if let Some(ReferenceSource::Text {
+            text,
+            start_line,
+            origin,
+            shortened,
+        }) = item.source.take()
+        {
+            let mut final_text = text.clone();
+            redactions.redact_in_place(&mut final_text);
+            if final_text.len() <= EXCERPT_BYTES.min(remaining) {
+                remaining = remaining.saturating_sub(final_text.len());
+                item.source = Some(ReferenceSource::Text {
+                    text: final_text,
+                    start_line,
+                    origin,
+                    shortened,
+                });
+                continue;
+            }
+            let relative_line = item
+                .range
+                .start
+                .line
+                .saturating_sub(start_line)
+                .saturating_add(1);
+            let mut source = excerpt(&text, relative_line, origin, &mut remaining, redactions);
+            if let ReferenceSource::Text {
+                start_line: first,
+                shortened: short,
+                ..
+            } = &mut source
+            {
+                *first = first.saturating_add(start_line.saturating_sub(1));
+                *short |= shortened;
+            }
+            item.source = Some(source);
+        }
     }
 }
 
@@ -368,7 +466,11 @@ mod tests {
         )
         .await;
         let result = handle.await.unwrap();
-        let work = crate::util::lock_std(&translator.reference_work).clone();
+        let mut work = crate::util::lock_std(&translator.reference_work).clone();
+        work.tracked_bytes = translator
+            .document_tracker
+            .snapshot_copied_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
         (result, work)
     }
 
@@ -427,6 +529,8 @@ mod tests {
         .await;
         assert_eq!(work.files, 1);
         assert_eq!(work.source_bytes, text.len());
+        assert_eq!(work.read_bytes, text.len());
+        assert_eq!(work.tracked_bytes, 0);
         assert_eq!(work.output_bytes, 100 * text.len());
         let value = serde_json::to_value(result).unwrap();
         assert_eq!(value["locations"][0]["source"]["text"], text);
@@ -617,6 +721,7 @@ mod tests {
         )
         .await;
         assert_eq!(work.source_bytes, FILE_BYTES + 1);
+        assert_eq!(work.read_bytes, FILE_BYTES + 1);
         assert_eq!(
             serde_json::to_value(result).unwrap()["locations"][0]["source"]["reason"],
             "file_too_large"
@@ -646,6 +751,8 @@ mod tests {
         )
         .await;
         assert_eq!(work.source_bytes, 1);
+        assert_eq!(work.tracked_bytes, 0);
+        assert_eq!(work.read_bytes, 0);
         let value = serde_json::to_value(result).unwrap();
         assert_eq!(value["locations"][0]["source"]["reason"], "file_too_large");
         assert!(!value.to_string().contains("must not fall back"));
@@ -681,5 +788,186 @@ mod tests {
         let value = serde_json::to_value(result).unwrap();
         assert_eq!(value["locations"][0]["source"]["reason"], "read_failed");
         assert!(!value.to_string().contains("secret source"));
+    }
+    #[tokio::test]
+    async fn reference_partial_read_failures_observe_real_bytes_and_charge_attempts() {
+        fn setup(translator: &mut Translator, _: &TempDir) {
+            translator.reference_io_failure_after = Some(8192);
+        }
+        let dir = TempDir::new().unwrap();
+        let mut response = Vec::new();
+        for index in 0..5 {
+            let path = canonical_dir(&dir).join(format!("partial{index}.rs"));
+            std::fs::write(&path, vec![b'x'; FILE_BYTES]).unwrap();
+            response.push(location(&path, 0));
+        }
+        let (result, work) = request_with_setup(
+            &dir,
+            response,
+            ReferenceOptions::default(),
+            None,
+            Some(setup),
+        )
+        .await;
+        assert_eq!(work.read_bytes, 4 * 8192);
+        assert_eq!(work.source_bytes, SOURCE_BYTES);
+        assert_eq!(work.tracked_bytes, 0);
+        let value = serde_json::to_value(result).unwrap();
+        for index in 0..4 {
+            assert_eq!(value["locations"][index]["source"]["reason"], "read_failed");
+        }
+        assert_eq!(value["locations"][4]["source"]["reason"], "source_budget");
+    }
+
+    #[tokio::test]
+    async fn reference_tracked_budget_measures_copies_and_prefers_tracked_text() {
+        fn setup(translator: &mut Translator, dir: &TempDir) {
+            for index in 0..5 {
+                translator
+                    .document_tracker
+                    .open(
+                        canonical_dir(dir).join(format!("tracked{index}.rs")),
+                        format!("tracked\n{}", "x".repeat(FILE_BYTES - 8)),
+                    )
+                    .unwrap();
+            }
+        }
+        let dir = TempDir::new().unwrap();
+        let mut response = Vec::new();
+        for index in 0..5 {
+            let path = canonical_dir(&dir).join(format!("tracked{index}.rs"));
+            std::fs::write(&path, "disk text must not appear").unwrap();
+            response.extend(vec![location(&path, 0); 2]);
+        }
+        let (result, work) = request_with_setup(
+            &dir,
+            response,
+            ReferenceOptions::default(),
+            None,
+            Some(setup),
+        )
+        .await;
+        assert_eq!(work.tracked_bytes, SOURCE_BYTES);
+        assert_eq!(work.source_bytes, SOURCE_BYTES);
+        assert_eq!(work.read_bytes, 0);
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["locations"][0]["source"]["text"], "tracked\n");
+        assert_eq!(value["locations"][0]["source"]["origin"], "tracked");
+        assert_eq!(value["locations"][8]["source"]["reason"], "source_budget");
+        assert!(!value.to_string().contains("disk text must not appear"));
+    }
+
+    #[derive(Debug)]
+    struct AfterSourceClock {
+        work: Arc<std::sync::Mutex<ReferenceWork>>,
+        start: std::time::Instant,
+    }
+    impl super::super::clock::Clock for AfterSourceClock {
+        fn now(&self) -> std::time::Instant {
+            if crate::util::lock_std(&self.work).files == 0 {
+                self.start
+            } else {
+                self.start + Duration::from_secs(3)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reference_deadline_after_disk_failure_success_or_snapshot_stops_new_work() {
+        fn clock(translator: &mut Translator, _: &TempDir) {
+            translator.clock = Arc::new(AfterSourceClock {
+                work: translator.reference_work.clone(),
+                start: std::time::Instant::now(),
+            });
+        }
+        for first in ["disk.rs", "missing.rs", "query.rs"] {
+            let dir = TempDir::new().unwrap();
+            let path = canonical_dir(&dir).join(first);
+            if first == "disk.rs" {
+                std::fs::write(&path, "disk").unwrap();
+            }
+            let second = canonical_dir(&dir).join("second.rs");
+            std::fs::write(&second, "must not read").unwrap();
+            let (result, work) = request_with_setup(
+                &dir,
+                vec![location(&path, 0), location(&second, 0)],
+                ReferenceOptions::default(),
+                None,
+                Some(clock),
+            )
+            .await;
+            assert_eq!(work.files, 1, "{first}");
+            assert_eq!(work.read_bytes, if first == "disk.rs" { 4 } else { 0 });
+            assert_eq!(work.tracked_bytes, if first == "query.rs" { 14 } else { 0 });
+            let value = serde_json::to_value(result).unwrap();
+            assert_eq!(value["locations"][1]["source"]["reason"], "deadline");
+        }
+    }
+
+    #[tokio::test]
+    async fn reference_redaction_expansion_obeys_excerpt_and_total_budgets() {
+        fn setup(translator: &mut Translator, _: &TempDir) {
+            translator.startup_redactions =
+                Arc::new(Redactions::new([("API_TOKEN".into(), "abcdefgh".into())]));
+        }
+        let dir = TempDir::new().unwrap();
+        let oversized = canonical_dir(&dir).join("expanded.rs");
+        std::fs::write(&oversized, "abcdefgh".repeat(256)).unwrap();
+        let (result, work) = request_with_setup(
+            &dir,
+            vec![location(&oversized, 0); 32],
+            ReferenceOptions::default(),
+            None,
+            Some(setup),
+        )
+        .await;
+        assert_eq!(work.output_bytes, 0);
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["locations"][0]["source"]["reason"], "text_budget");
+        assert!(!value.to_string().contains("abcdefgh"));
+        let short = canonical_dir(&dir).join("aggregate.rs");
+        std::fs::write(&short, "abcdefgh".repeat(100)).unwrap();
+        let (result, work) = request_with_setup(
+            &dir,
+            vec![location(&short, 0); 100],
+            ReferenceOptions::default(),
+            None,
+            Some(setup),
+        )
+        .await;
+        assert!(work.output_bytes <= OUTPUT_BYTES);
+        let value = serde_json::to_value(result).unwrap();
+        let texts: Vec<&str> = value["locations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["source"]["text"].as_str())
+            .collect();
+        assert_eq!(texts.len(), 32);
+        assert!(texts.iter().all(|text| text.len() <= EXCERPT_BYTES));
+        assert!(texts.iter().map(|text| text.len()).sum::<usize>() <= OUTPUT_BYTES);
+        assert!(!value.to_string().contains("abcdefgh"));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reference_symlink_aliases_share_one_canonical_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let path = canonical_dir(&dir).join("canonical.rs");
+        std::fs::write(&path, format!("reference\n{}", "x".repeat(FILE_BYTES - 10))).unwrap();
+        let mut response = Vec::new();
+        for index in 0..5 {
+            let alias = canonical_dir(&dir).join(format!("alias{index}.rs"));
+            std::os::unix::fs::symlink(&path, &alias).unwrap();
+            response.push(location(&alias, 0));
+        }
+        let (result, work) = request(&dir, response, ReferenceOptions::default(), None).await;
+        assert_eq!(work.read_bytes, FILE_BYTES);
+        assert_eq!(work.source_bytes, FILE_BYTES);
+        assert_eq!(work.files, 1);
+        let value = serde_json::to_value(result).unwrap();
+        for item in value["locations"].as_array().unwrap() {
+            assert_eq!(item["source"]["text"], "reference\n");
+            assert_eq!(item["source"]["origin"], "disk");
+        }
     }
 }

@@ -316,7 +316,7 @@ async fn test_references_enclosing_symbol_one_request_per_file() {
 }
 
 #[tokio::test]
-async fn test_references_default_output_is_unchanged_and_issues_no_symbol_request() {
+async fn test_references_default_source_issues_no_symbol_request() {
     let mut fx = fixture(full_caps(), None);
     let main = fx.write("main.rs", "fn main() {}\n");
     let uri = file_uri(&main);
@@ -335,6 +335,7 @@ async fn test_references_default_output_is_unchanged_and_issues_no_symbol_reques
         json!({
             "locations": [{
                 "uri": uri,
+                "source": {"status":"text", "text":"fn main() {}\n", "start_line":1, "origin":"tracked", "shortened":false},
                 "range": {
                     "start": {"line": 1, "character": 3},
                     "end": {"line": 1, "character": 5},

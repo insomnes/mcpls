@@ -1686,10 +1686,8 @@ impl ServerText for ReferencesResult {
         } = self;
         for item in &mut result.locations {
             item.location.redact_server_text(redactions);
-            if let Some(ReferenceSource::Text { text, .. }) = &mut item.source {
-                redactions.redact_in_place(text);
-            }
         }
+        super::references::redact_sources(&mut result.locations, redactions);
     }
 }
 

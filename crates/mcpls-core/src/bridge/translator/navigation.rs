@@ -638,11 +638,24 @@ impl Translator {
                 }
             }
         }
-        #[cfg(test)]
-        {
-            crate::util::lock_std(&self.reference_work).normalized = retained.len();
+        let mut locations = Vec::with_capacity(retained.len());
+        for location in retained {
+            let range = ctx.normalize_range(&location.uri, location.range).await;
+            #[cfg(test)]
+            {
+                crate::util::lock_std(&self.reference_work).normalized += 1;
+            }
+            locations.push(Location {
+                out_of_workspace: ctx.is_out_of_workspace(&location.uri),
+                uri: location.uri.to_string(),
+                range,
+            });
         }
-        let normalized = lsp_locations_to_mcp(retained, &ctx).await;
+        let normalized = NormalizedLocations {
+            locations,
+            truncated: false,
+            positions_degraded: ctx.positions_degraded(),
+        };
         let result = self.contextualize_into(normalized, context).await;
         let mut locations: Vec<_> = result
             .locations

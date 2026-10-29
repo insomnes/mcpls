@@ -3956,7 +3956,7 @@
   {
     "name": "get_references",
     "title": "Find References",
-    "description": "References in server order, including duplicates. `limit` defaults to 100 (1..10000). `path_filter` selects an absolute file or directory lexically before normalization. `matched_count` counts server-response matches; `truncated` means matching locations were omitted, not workspace-wide completeness. Source defaults on: `source.status` is `text` (text/start_line/origin/shortened) or `unavailable` (reason). `include_source: false` omits source work. Excerpts use tracked or contained disk text, up to two lines each side; 100 candidates, 16 files, 1 MiB/file, 4 MiB read/copy, 2 KiB/excerpt, 64 KiB text, two-second best-effort deadline. Source can differ from LSP locations. External source is withheld. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory). Only an originally empty server response carries `index_coverage` (synced_documents and server_restarted); a filter-empty answer does not. Server indexing can be incomplete.",
+    "description": "References in server order, including duplicates. Address with line/character or symbol_name (optional symbol_kind/container). limit: 100 by default, 1..10000. Absolute lexical path_filter selects a file or descendants before normalization. matched_count counts server-response matches; truncated means matches omitted, not complete workspace coverage. Source defaults on; include_source:false omits source work. source.status=text has text,start_line (1-based),origin (tracked/disk),shortened; unavailable has reason. Excerpts center on the starting line with up to two lines each side. Limits: 100 candidates,16 files,1 MiB/file,4 MiB read/copy,2 KiB/excerpt,64 KiB text,2 s best-effort deadline. External source is withheld. Snapshots are not atomic with LSP locations. positions_degraded=request means the queried symbol may differ; response means returned columns may be inexact. context:enclosing_symbol retains optional enclosing-symbol outcomes. out_of_workspace is lexical and advisory. Only an originally empty server response carries index_coverage.",
     "inputSchema": {
       "$defs": {
         "ResultContext": {
@@ -4103,7 +4103,6 @@
     "outputSchema": {
       "$defs": {
         "EnclosingSymbol": {
-          "description": "The innermost symbol containing an item.",
           "properties": {
             "fidelity": {
               "$ref": "#/$defs/SymbolFidelity"
@@ -4132,7 +4131,6 @@
           "type": "object"
         },
         "EnclosingSymbolOutcome": {
-          "description": "What is known about the enclosing symbol of one item.",
           "oneOf": [
             {
               "$ref": "#/$defs/EnclosingSymbol",
@@ -4160,11 +4158,9 @@
               "type": "object"
             },
             {
-              "description": "The lookup was skipped.",
               "properties": {
                 "reason": {
-                  "$ref": "#/$defs/NotComputedReason",
-                  "description": "Why it was skipped."
+                  "$ref": "#/$defs/NotComputedReason"
                 },
                 "status": {
                   "const": "not_computed",
@@ -4180,8 +4176,7 @@
             {
               "properties": {
                 "reason": {
-                  "$ref": "#/$defs/UnavailableReason",
-                  "description": "Why it failed."
+                  "$ref": "#/$defs/UnavailableReason"
                 },
                 "status": {
                   "const": "unavailable",
@@ -4197,7 +4192,6 @@
           ]
         },
         "EnrichmentSummary": {
-          "description": "Result-level statement about how complete the enrichment is.",
           "properties": {
             "cut_short": {
               "type": "boolean"
@@ -4221,7 +4215,6 @@
           "type": "object"
         },
         "IndexCoverage": {
-          "description": "What an empty references or workspace-symbol answer covers.",
           "properties": {
             "server_restarted": {
               "type": "boolean"
@@ -4238,7 +4231,6 @@
           "type": "object"
         },
         "NotComputedReason": {
-          "description": "Why an item's enclosing symbol was not looked up.",
           "oneOf": [
             {
               "const": "file_cap",
@@ -4259,7 +4251,6 @@
           ]
         },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -4267,7 +4258,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -4280,7 +4270,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -4293,7 +4282,6 @@
           ]
         },
         "PositionSource": {
-          "description": "Where the queried position of a name-addressed call came from.",
           "oneOf": [
             {
               "const": "selection_range",
@@ -4306,15 +4294,12 @@
           ]
         },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -4324,19 +4309,15 @@
           "type": "object"
         },
         "ReferenceLocation": {
-          "description": "A reference location with optional source context.",
           "properties": {
             "enclosing_symbol": {
-              "$ref": "#/$defs/EnclosingSymbolOutcome",
-              "description": "Present only when `context: \"enclosing_symbol\"` was requested."
+              "$ref": "#/$defs/EnclosingSymbolOutcome"
             },
             "out_of_workspace": {
-              "description": "Whether this location is not provably inside a configured workspace root (stdlib, a dependency).",
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range within the document."
+              "$ref": "#/$defs/Range"
             },
             "source": {
               "anyOf": [
@@ -4346,11 +4327,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Present whenever source was requested, including failures."
+              ]
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -4361,21 +4340,16 @@
           "type": "object"
         },
         "ReferenceSource": {
-          "description": "Source excerpt for one reference. Failure never removes its location.",
           "oneOf": [
             {
-              "description": "Text centered on the reference's starting line.",
               "properties": {
                 "origin": {
-                  "$ref": "#/$defs/SourceOrigin",
-                  "description": "Whether text came from a tracked snapshot or disk."
+                  "$ref": "#/$defs/SourceOrigin"
                 },
                 "shortened": {
-                  "description": "The full window did not fit; only the reference line is included.",
                   "type": "boolean"
                 },
                 "start_line": {
-                  "description": "First excerpt line, 1-based.",
                   "format": "uint32",
                   "minimum": 0,
                   "type": "integer"
@@ -4385,7 +4359,6 @@
                   "type": "string"
                 },
                 "text": {
-                  "description": "Source text, preserving its line endings.",
                   "type": "string"
                 }
               },
@@ -4399,11 +4372,9 @@
               "type": "object"
             },
             {
-              "description": "No text is available under this request's access and resource limits.",
               "properties": {
                 "reason": {
-                  "$ref": "#/$defs/SourceUnavailableReason",
-                  "description": "Stable reason identifying the failed or skipped source lookup."
+                  "$ref": "#/$defs/SourceUnavailableReason"
                 },
                 "status": {
                   "const": "unavailable",
@@ -4450,77 +4421,62 @@
           "type": "object"
         },
         "SourceOrigin": {
-          "description": "Where reference source text was obtained.",
           "oneOf": [
             {
               "const": "tracked",
-              "description": "The text last synchronized to the server.",
               "type": "string"
             },
             {
               "const": "disk",
-              "description": "A contained file read from disk.",
               "type": "string"
             }
           ]
         },
         "SourceUnavailableReason": {
-          "description": "Why a reference has no source text.",
           "oneOf": [
             {
               "const": "candidate_limit",
-              "description": "More than 100 locations requested source.",
               "type": "string"
             },
             {
               "const": "file_limit",
-              "description": "More than 16 distinct files requested source.",
               "type": "string"
             },
             {
               "const": "source_budget",
-              "description": "Source read/copy allowance exhausted.",
               "type": "string"
             },
             {
               "const": "text_budget",
-              "description": "Excerpt output allowance exhausted or reference line is too long.",
               "type": "string"
             },
             {
               "const": "deadline",
-              "description": "Two-second best-effort deadline expired.",
               "type": "string"
             },
             {
               "const": "access_denied",
-              "description": "File URI is invalid or workspace access is denied.",
               "type": "string"
             },
             {
               "const": "read_failed",
-              "description": "The file could not be read.",
               "type": "string"
             },
             {
               "const": "file_too_large",
-              "description": "Source is larger than the per-file allowance.",
               "type": "string"
             },
             {
               "const": "invalid_utf8",
-              "description": "Source is not UTF-8.",
               "type": "string"
             },
             {
               "const": "line_unavailable",
-              "description": "The reference starts past the end of the source.",
               "type": "string"
             }
           ]
         },
         "SymbolFidelity": {
-          "description": "How much ancestry an [`EnclosingSymbol`] name path carries.",
           "oneOf": [
             {
               "const": "hierarchical",
@@ -4533,7 +4489,6 @@
           ]
         },
         "UnavailableReason": {
-          "description": "Why a lookup was attempted but yielded no symbol tree.",
           "oneOf": [
             {
               "const": "capability_absent",
@@ -4560,22 +4515,18 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Optional enclosing-symbol lookup summary."
+          ]
         },
         "index_coverage": {
-          "$ref": "#/$defs/IndexCoverage",
-          "description": "Set only when the original server response is empty: what the routed server's answer covers."
+          "$ref": "#/$defs/IndexCoverage"
         },
         "locations": {
-          "description": "Matching locations in server order, including duplicates.",
           "items": {
             "$ref": "#/$defs/ReferenceLocation"
           },
           "type": "array"
         },
         "matched_count": {
-          "description": "Number of matching locations in the complete server response.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -4588,8 +4539,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Position conversion warning."
+          ]
         },
         "resolved_symbol": {
           "anyOf": [
@@ -4599,11 +4549,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only for a name-addressed call."
+          ]
         },
         "truncated": {
-          "description": "Matching locations were omitted by the requested limit.",
           "type": "boolean"
         }
       },
