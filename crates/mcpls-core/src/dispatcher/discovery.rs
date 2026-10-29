@@ -53,6 +53,16 @@ pub(super) fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+pub(super) fn worktrees(common: &Path) -> Result<Vec<PathBuf>> {
+    let listed = git(common, &["worktree", "list", "--porcelain", "-z"])?;
+    Ok(listed
+        .split(|byte| *byte == 0)
+        .filter_map(|field| field.strip_prefix(b"worktree "))
+        .filter_map(|path| std::str::from_utf8(path).ok())
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect())
+}
+
 fn git_path(dir: &Path, argument: &str) -> Result<PathBuf> {
     let bytes = git(dir, &["rev-parse", "--path-format=absolute", argument])?;
     let value = String::from_utf8(bytes).map_err(|_| DispatchError::invalid(dir))?;

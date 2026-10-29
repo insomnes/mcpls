@@ -1659,3 +1659,84 @@ async fn automatic_symlink_escape_and_parent_replacement_fail_closed() {
     client.cancel().await.unwrap();
     task.await.unwrap();
 }
+
+/// A registered explicit linked checkout cannot acquire an automatic profile after losing .git.
+#[tokio::test]
+async fn automatic_does_not_replace_registered_explicit_linked_checkout() {
+    let mut fixture = Fixture::new(4);
+    let automatic_profile = fixture.profile.with_file_name("automatic.toml");
+    std::fs::copy(&fixture.profile, &automatic_profile).unwrap();
+    fixture
+        .config
+        .dispatcher
+        .as_mut()
+        .unwrap()
+        .auto_workspaces
+        .push(crate::config::DispatcherEntry {
+            path: fixture.linked.parent().unwrap().to_path_buf(),
+            profile: automatic_profile,
+        });
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":fixture.linked}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["workspaces"][0]["temporary"], false);
+    assert_eq!(status["workspaces"][0]["profile"], json!(fixture.profile));
+    std::fs::rename(
+        fixture.linked.join(".git"),
+        fixture.linked.join(".git-removed"),
+    )
+    .unwrap();
+    for name in ["get_workspace_status", "get_hover"] {
+        let args = if name == "get_hover" {
+            hover(&fixture.linked)
+        } else {
+            json!({"workspace_path":fixture.linked})
+        };
+        error_code(
+            call(&client, name, args).await.unwrap_err(),
+            "workspace_not_approved",
+        );
+    }
+    assert_eq!(fixture.events().len(), 0);
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+
+    // The Git registry also protects the linked root before any request observes it.
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let reconciler = dispatcher.spawn_reconciler();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    // Reconciliation discovers the main checkout; it must skip the invalid linked entry.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status = call(&client, "get_workspace_status", json!({}))
+                .await
+                .unwrap();
+            let entries = status["workspaces"].as_array().unwrap();
+            if !entries.is_empty() {
+                assert!(entries.iter().all(|entry| entry["temporary"] == false));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    error_code(
+        call(&client, "get_hover", hover(&fixture.linked))
+            .await
+            .unwrap_err(),
+        "workspace_not_approved",
+    );
+    assert_eq!(fixture.events().len(), 0);
+    dispatcher.shutdown().await;
+    reconciler.await.unwrap();
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}

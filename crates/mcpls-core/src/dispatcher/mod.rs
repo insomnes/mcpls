@@ -375,19 +375,15 @@ impl Dispatcher {
                 temporary: false,
             });
         }
-        if self
-            .approvals
-            .iter()
-            .any(|approval| canonical.starts_with(&approval.root))
-        {
-            return Err(DispatchError::not_approved(path));
-        }
         let approval = self
             .automatic
             .iter()
             .filter(|a| canonical.starts_with(&a.root))
             .max_by_key(|a| a.root.components().count())
             .ok_or_else(|| DispatchError::not_approved(path))?;
+        if self.inside_explicit_boundary(&canonical) {
+            return Err(DispatchError::not_approved(path));
+        }
         if ObjectId::read(&approval.root)? != approval.object {
             return Err(DispatchError::not_approved(path));
         }
@@ -441,6 +437,15 @@ impl Dispatcher {
         })
     }
 
+    fn inside_explicit_boundary(&self, canonical: &Path) -> bool {
+        self.approvals.iter().any(|approval| canonical.starts_with(&approval.root))
+            // Registered linked checkouts retain explicit authority even if their
+            // .git marker disappears. Automatic profiles must not replace it.
+            || self.approvals.iter().filter_map(|approval| approval.common.as_ref())
+                .filter_map(|common| discovery::worktrees(common).ok())
+                .flatten().any(|root| canonical.starts_with(root))
+    }
+
     pub(crate) async fn select(
         self: &Arc<Self>,
         path: PathBuf,
@@ -451,6 +456,16 @@ impl Dispatcher {
         let result = crate::on_blocking_pool(move || dispatcher.discover(&path, directory))
             .await
             .map_err(|_| DispatchError::invalid(Path::new("selected workspace")))?;
+        let result = if matches!(&result, Ok(selection) if selection.temporary)
+            && self.entries.lock().await.values().any(|entry| {
+                !entry.selection.temporary
+                    && matches!(&result, Ok(selection) if selection.root().starts_with(entry.selection.root()))
+            })
+        {
+            Err(DispatchError::not_approved(&selected_path))
+        } else {
+            result
+        };
         if let Ok(selection) = &result
             && !selection.temporary
         {
@@ -623,17 +638,12 @@ impl Dispatcher {
         for approval in &self.approvals {
             if let Some(common) = &approval.common {
                 let common = common.clone();
-                let listed = crate::on_blocking_pool(move || {
-                    discovery::git(&common, &["worktree", "list", "--porcelain", "-z"])
-                })
-                .await;
+                let listed = crate::on_blocking_pool(move || discovery::worktrees(&common)).await;
                 if let Ok(Ok(listed)) = listed {
-                    for path in listed
-                        .split(|byte| *byte == 0)
-                        .filter_map(|field| field.strip_prefix(b"worktree "))
-                        .filter_map(|path| std::str::from_utf8(path).ok())
-                    {
-                        if let Ok(selection) = self.select(PathBuf::from(path), true).await {
+                    for path in listed {
+                        if let Ok(selection) = self.select(path, true).await
+                            && !selection.temporary
+                        {
                             self.entries
                                 .lock()
                                 .await
