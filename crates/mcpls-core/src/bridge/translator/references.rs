@@ -262,7 +262,6 @@ impl Translator {
                     charge,
                 )
             }
-            Ok(Err(Missing::Deadline)) => (Err(Missing::Deadline), read_cap),
             Ok(Err(Missing::FileTooLarge)) => (Err(Missing::FileTooLarge), 1),
             Ok(Err(reason)) => (Err(reason), read_cap),
             Err(_) => (Err(Missing::ReadFailed), read_cap),
