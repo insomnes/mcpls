@@ -57,19 +57,20 @@ While the file's server is still starting it returns the retryable `ServerInitia
 
 ## format_document
 
-Returns the text edits that format a whole file.
+Returns a one-document `changes` array with a readable diff against observed source.
 
-Arguments: `file_path`, `tab_size` (1 to 32, default 4) and `insert_spaces` (default `true`).
+Arguments: `file_path`, optional `full` (default `false`), `tab_size` (1 to 32, default 4) and `insert_spaces` (default `true`).
 
 ```json
 { "file_path": "/work/app/src/main.rs", "tab_size": 4, "insert_spaces": true }
 ```
 
-The edits are returned, not applied.
+Set `full: true` to include exact normalized raw edits. Empty successful edits still return one document.
+See [observed-source previews](refactoring.md#observed-source-previews) for states, source identity, unknown freshness, redaction, and shared limits.
 
 ## format_range
 
-Returns the edits that format only a range. Arguments: `file_path`, the four range fields, `tab_size` and `insert_spaces`. A line past the end of the file is rejected.
+Returns a one-document preview for formatting a range. Set `full: true` for exact normalized raw edits; the default is `false`. Arguments: `file_path`, the four range fields, `tab_size` and `insert_spaces`. A line past the end of the file is rejected.
 
 ```json
 {

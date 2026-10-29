@@ -25,6 +25,8 @@ rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
 schemars = { workspace = true, features = ["chrono04"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+similar = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }

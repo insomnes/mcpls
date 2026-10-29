@@ -658,7 +658,7 @@ fn sc_format_document(client: &mut McpClient, workspace: &Path) -> Result<(), St
     let resp = client
         .call_tool(
             "format_document",
-            &json!({ "file_path": bad_fmt.to_string_lossy() }),
+            &json!({ "file_path": bad_fmt.to_string_lossy(), "full": true }),
         )
         .map_err(|e| format!("call failed: {e}"))?;
 
@@ -673,9 +673,7 @@ fn sc_format_document(client: &mut McpClient, workspace: &Path) -> Result<(), St
 
     if formatted.is_empty() {
         // Some LSP servers return text edits instead of the full file.
-        let edits = inner["edits"]
-            .as_array()
-            .or_else(|| inner["changes"].as_array());
+        let edits = inner["changes"][0]["edits"].as_array();
         if edits.map_or(0, Vec::len) == 0 {
             return Err(format!(
                 "format_document returned neither formatted content nor edits: {inner}"

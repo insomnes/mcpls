@@ -943,12 +943,16 @@ impl McplsServer {
     // read-only: returns a proposed WorkspaceEdit, does not apply it -- mcpls
     // has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Resolve a target and propose a workspace rename in one call. Runs preparation on the rename server when advertised; explicit unsupported preparation permits rename directly. Returns `status: proposed` with queried `position`, `preparation` (`renameable` with range and optional placeholder, `default_behavior` without range, or `unsupported`) and `changes`, or `status: not_renameable` with position and optional server_message, without edits. Inspect the proposal before applying through the client. A non-empty `dropped` field means some edits were withheld (e.g. out-of-workspace files, or `exceeds_item_cap` when a file's edits exceed the fixed maximum) -- the rename is then incomplete even though `changes` is non-empty. ", name_addressing_note!(), " An ambiguous name never produces an edit. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = "Propose a workspace rename by position or symbol_name. Resolve once; ambiguous names return candidates. Prepare on the rename server when supported. status:proposed has position,preparation,changes; not_renameable has no edits or preview. Preparation rejection stops rename; operational errors remain errors. Empty edits remain proposed. Nonempty dropped means incomplete: do not apply. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
         title = "Rename Symbol"
     )]
     async fn rename_symbol(
         &self,
-        Parameters(RenameParams { target, new_name }): Parameters<RenameParams>,
+        Parameters(RenameParams {
+            target,
+            new_name,
+            full,
+        }): Parameters<RenameParams>,
     ) -> Result<Json<Addressed<RenameResult>>, McpError> {
         let translator = &self.context.translator;
         let (file_path, target) = parse_target(target.file_path, target.target)?;
@@ -957,7 +961,13 @@ impl McplsServer {
                 .resolve_symbol_target(&file_path, target, AddressableTool::Rename)
                 .await?;
             let mut result = translator
-                .handle_rename(file_path, resolved.position, new_name)
+                .handle_rename_with_options(
+                    file_path,
+                    resolved.position,
+                    new_name,
+                    full,
+                    resolved.positions_degraded,
+                )
                 .await?;
             result.positions_degraded = result.positions_degraded.max(resolved.positions_degraded);
             Ok(Addressed {
@@ -1045,12 +1055,13 @@ impl McplsServer {
     // read-only: returns proposed text edits, does not apply them -- mcpls
     // has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Format document with language-specific rules. Returns text edits for indentation, spacing, and style. ", positions_note_response!()),
+        description = "Propose whole-file formatting as one changes document, including empty successful edits. positions_degraded:response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
         title = "Format Document"
     )]
     async fn format_document(
         &self,
         Parameters(FormatDocumentParams {
+            full,
             file_path,
             tab_size,
             insert_spaces,
@@ -1060,7 +1071,7 @@ impl McplsServer {
         self.structured_result(
             self.context
                 .translator
-                .handle_format_document(file_path, tab_size, insert_spaces)
+                .handle_format_document_with_options(file_path, tab_size, insert_spaces, full)
                 .await,
         )
     }
@@ -1091,12 +1102,13 @@ impl McplsServer {
     // read-only: returns proposed CodeAction edits, does not apply them --
     // mcpls has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Code actions for range. Returns quick fixes, refactorings, and source actions with edits. Capped at a fixed maximum; `truncated: true` on the result means some actions, diagnostics, or edits were left out. An action's `edit.dropped` field, when non-empty, means some of that edit's changes were withheld (e.g. out-of-workspace files). The end line must exist in the file; a line past the end is rejected as invalid params. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = "Propose range quick fixes/refactorings/source actions; resolved edits and commands are retained. A line past EOF is invalid. truncated means actions/diagnostics/edits omitted; nonempty edit.dropped means incomplete edits. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
         title = "Code Actions"
     )]
     async fn get_code_actions(
         &self,
         Parameters(CodeActionsParams {
+            full,
             file_path,
             range,
             kind_filter,
@@ -1107,7 +1119,12 @@ impl McplsServer {
         self.structured_result(
             self.context
                 .translator
-                .handle_code_actions(file_path, parse_bounded_range(&range)?, kind_filter)
+                .handle_code_actions_with_options(
+                    file_path,
+                    parse_bounded_range(&range)?,
+                    kind_filter,
+                    full,
+                )
                 .await,
         )
     }
@@ -1265,12 +1282,13 @@ impl McplsServer {
     // read-only: returns proposed text edits, does not apply them -- mcpls
     // has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Format only a range with language-specific rules. Returns text edits the server reports for that range; edits are not filtered or applied. A line past the end of the file is rejected. ", positions_note_request!()),
+        description = "Propose formatting as one changes document for a valid range; reported edits are not filtered. A line past EOF is invalid. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
         title = "Format Range"
     )]
     async fn format_range(
         &self,
         Parameters(FormatRangeParams {
+            full,
             file_path,
             range,
             tab_size,
@@ -1281,11 +1299,12 @@ impl McplsServer {
         self.structured_result(
             self.context
                 .translator
-                .handle_format_range(
+                .handle_format_range_with_options(
                     file_path,
                     parse_bounded_range(&range)?,
                     tab_size,
                     insert_spaces,
+                    full,
                 )
                 .await,
         )
@@ -2735,6 +2754,7 @@ mod tests {
                     .map(|_| ()),
                 server
                     .get_code_actions(Parameters(CodeActionsParams {
+                        full: true,
                         file_path: PathBuf::from("/ws/a.rs"),
                         range: range((line, character), (line, character)),
                         kind_filter: None,
@@ -2743,6 +2763,7 @@ mod tests {
                     .map(|_| ()),
                 server
                     .format_range(Parameters(FormatRangeParams {
+                        full: true,
                         file_path: PathBuf::from("/ws/a.rs"),
                         range: range((line, character), (line, character)),
                         tab_size: crate::bridge::TabSize::default(),
@@ -3065,6 +3086,7 @@ mod tests {
                     .map(|_| ()),
                 server
                     .rename_symbol(Parameters(RenameParams {
+                        full: true,
                         target: position(line, character).into(),
                         new_name: NewName::new("x").unwrap(),
                     }))
@@ -3104,6 +3126,7 @@ mod tests {
 
         let oversized = server
             .format_range(Parameters(FormatRangeParams {
+                full: true,
                 file_path: PathBuf::from("/ws/a.rs"),
                 range: range((1, 1), (10_002, 1)),
                 tab_size: crate::bridge::TabSize::default(),
@@ -4038,6 +4061,7 @@ mod tests {
     async fn test_rename_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(RenameParams {
+            full: true,
             target: PositionParams {
                 file_path: PathBuf::from(test_file.to_str().unwrap()),
                 line: 10,
@@ -4103,6 +4127,7 @@ mod tests {
     async fn test_format_document_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(FormatDocumentParams {
+            full: true,
             file_path: PathBuf::from(test_file.to_str().unwrap()),
             tab_size: crate::bridge::TabSize::default(),
             insert_spaces: true,
@@ -4128,6 +4153,7 @@ mod tests {
     async fn test_code_actions_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(CodeActionsParams {
+            full: true,
             file_path: PathBuf::from(test_file.to_str().unwrap()),
             range: RangeParams {
                 start_line: 10,
@@ -4504,23 +4530,39 @@ mod tests {
 
         let edits = server
             .structured_result(Ok(FormatDocumentResult {
-                edits: vec![TextEdit {
-                    range: Range {
-                        start: Position2D {
-                            line: 1,
-                            character: 1,
-                        },
-                        end: Position2D {
-                            line: 1,
-                            character: 2,
-                        },
+                changes: vec![crate::bridge::DocumentChanges {
+                    uri: "file:///work.rs".into(),
+                    edit_count: 1,
+                    preview: crate::bridge::EditPreview {
+                        status: crate::bridge::PreviewStatus::Complete,
+                        diff: Some("SuperSecretValue123".into()),
+                        reason: None,
+                        redacted: false,
                     },
-                    new_text: "SuperSecretValue123".to_owned(),
+                    preview_source: None,
+                    supplied_version: None,
+                    analysis_freshness: crate::bridge::AnalysisFreshness::Unknown,
+                    edits: Some(vec![TextEdit {
+                        range: Range {
+                            start: Position2D {
+                                line: 1,
+                                character: 1,
+                            },
+                            end: Position2D {
+                                line: 1,
+                                character: 2,
+                            },
+                        },
+                        new_text: "SuperSecretValue123".to_owned(),
+                    }]),
                 }],
                 positions_degraded: None,
             }))
             .unwrap();
-        assert_eq!(edits.0.edits[0].new_text, "SuperSecretValue123");
+        assert_eq!(
+            edits.0.changes[0].edits.as_ref().unwrap()[0].new_text,
+            "SuperSecretValue123"
+        );
     }
 
     /// #583: a configured secret echoed in a pushed diagnostic never reaches
@@ -7552,6 +7594,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::RenameSymbol => server
                 .rename_symbol(Parameters(RenameParams {
+                    full: true,
                     target: position().into(),
                     new_name: NewName::new("renamed").unwrap(),
                 }))
@@ -7582,6 +7625,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::FormatDocument => server
                 .format_document(Parameters(FormatDocumentParams {
+                    full: true,
                     file_path: PathBuf::from(file_path.clone()),
                     tab_size: crate::bridge::TabSize::default(),
                     insert_spaces: true,
@@ -7598,6 +7642,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::GetCodeActions => server
                 .get_code_actions(Parameters(CodeActionsParams {
+                    full: true,
                     file_path: PathBuf::from(file_path.clone()),
                     range: range(),
                     kind_filter: None,
@@ -7641,6 +7686,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::FormatRange => server
                 .format_range(Parameters(FormatRangeParams {
+                    full: true,
                     file_path: PathBuf::from(file_path.clone()),
                     range: range(),
                     tab_size: crate::bridge::TabSize::default(),

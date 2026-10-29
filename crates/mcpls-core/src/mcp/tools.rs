@@ -524,6 +524,9 @@ target_wire! {
     /// Wire form of [`RenameParams`].
     #[schemars(description = "Parameters for renaming a symbol across the workspace.")]
     RenameWire {
+        #[schemars(description = "Include exact normalized raw edits as well as bounded previews (default: false).")]
+        #[serde(default)]
+        full: bool,
         #[schemars(description = "New name for the symbol (non-blank, at most 1000 bytes).")]
         #[schemars(with = "String")]
         new_name: NewName,
@@ -535,6 +538,9 @@ target_wire! {
 #[serde(try_from = "RenameWire")]
 #[schemars(with = "RenameWire")]
 pub struct RenameParams {
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
     /// The symbol to rename.
     pub target: SymbolTargetParams,
     /// New name for the symbol.
@@ -546,6 +552,7 @@ impl TryFrom<RenameWire> for RenameParams {
 
     fn try_from(mut wire: RenameWire) -> Result<Self, Self::Error> {
         Ok(Self {
+            full: wire.full,
             target: wire.take_target()?,
             new_name: wire.new_name,
         })
@@ -639,6 +646,9 @@ pub struct DocumentOutlineParams {
 #[serde(deny_unknown_fields)]
 #[schemars(description = "Parameters for formatting a document.")]
 pub struct FormatDocumentParams {
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
     /// Absolute path to the file.
     #[schemars(description = "Absolute path to the file.")]
     pub file_path: PathBuf,
@@ -694,6 +704,9 @@ range_wire! {
         description = "Parameters for getting available code actions (quick fixes, refactorings) for a range."
     )]
     CodeActionsWire {
+        #[schemars(description = "Include exact normalized raw edits as well as bounded previews (default: false).")]
+        #[serde(default)]
+        full: bool,
         #[schemars(
             description = "Optional filter by action kind, in any case; sent to the server in its canonical spelling."
         )]
@@ -706,6 +719,9 @@ range_wire! {
 #[serde(from = "CodeActionsWire")]
 #[schemars(with = "CodeActionsWire")]
 pub struct CodeActionsParams {
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
     /// Absolute path to the file.
     pub file_path: PathBuf,
     /// Range in the file to operate on.
@@ -718,6 +734,7 @@ impl From<CodeActionsWire> for CodeActionsParams {
     fn from(wire: CodeActionsWire) -> Self {
         let range = wire.range();
         Self {
+            full: wire.full,
             file_path: wire.file_path,
             range,
             kind_filter: wire.kind_filter,
@@ -927,6 +944,9 @@ range_wire! {
     /// Wire form of [`FormatRangeParams`].
     #[schemars(description = "Parameters for formatting a range of a document.")]
     FormatRangeWire {
+        #[schemars(description = "Include exact normalized raw edits as well as bounded previews (default: false).")]
+        #[serde(default)]
+        full: bool,
         #[schemars(description = "Tab size for formatting (1 to 32, default: 4).")]
         #[serde(default)]
         tab_size: TabSize,
@@ -941,6 +961,9 @@ range_wire! {
 #[serde(from = "FormatRangeWire")]
 #[schemars(with = "FormatRangeWire")]
 pub struct FormatRangeParams {
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
     /// Absolute path to the file.
     pub file_path: PathBuf,
     /// Range in the file to format.
@@ -955,6 +978,7 @@ impl From<FormatRangeWire> for FormatRangeParams {
     fn from(wire: FormatRangeWire) -> Self {
         let range = wire.range();
         Self {
+            full: wire.full,
             file_path: wire.file_path,
             range,
             tab_size: wire.tab_size,

@@ -26,7 +26,7 @@ Preparation rejection stops before rename. Timeout, cancellation, invalid positi
 
 **Migration:** The standalone MCP `prepare_rename` tool was removed. Call `rename_symbol` once, inspect the result, then apply complete edits through the client.
 
-Arguments: `file_path`, `new_name`, and either `line` with `character` or `symbol_name` (with optional `symbol_kind` and `container`).
+Arguments: `file_path`, `new_name`, optional `full` (default `false`), and either `line` with `character` or `symbol_name` (with optional `symbol_kind` and `container`).
 
 ```json
 {
@@ -44,15 +44,12 @@ Arguments: `file_path`, `new_name`, and either `line` with `character` or `symbo
   "changes": [
     {
       "uri": "file:///work/app/src/data.rs",
-      "edits": [
-        {
-          "range": {
-            "start": { "line": 10, "character": 4 },
-            "end": { "line": 10, "character": 16 }
-          },
-          "new_text": "handle_data"
-        }
-      ]
+      "edit_count": 1,
+      "analysis_freshness": "unknown",
+      "preview": {
+        "status": "complete",
+        "diff": "--- observed\n+++ proposed\n@@ -10 +10 @@\n-process_data()\n+handle_data()\n"
+      }
     }
   ]
 }
@@ -68,11 +65,40 @@ A non-empty `dropped` means the rename is incomplete even when `changes` is not 
 
 An ambiguous `symbol_name` never produces edits; mcpls returns the candidates instead.
 
+## Observed-source previews
+
+`rename_symbol`, `format_document`, `format_range`, and `get_code_actions` return readable previews by default.
+Set `full: true` to also receive exact normalized raw `edits`, including unredacted replacement text.
+Default responses omit `edits`. mcpls never writes files or executes action commands.
+
+Every retained document has `uri`, `edit_count`, `preview`, and `analysis_freshness: "unknown"`.
+Formatting returns a one-document `changes` array, including successful empty edit sets.
+Code actions retain their commands and optional `edit.changes`; command-only actions have no edit preview.
+
+`preview.status` is `complete`, `truncated`, or `unavailable`.
+Available `diff` text uses unified diff syntax with three context lines and observed/proposed headers.
+A `reason` explains unavailable or shortened output. Preview truncation does not drop edits.
+Configured secrets are redacted in displayed diffs; `redacted: true` records a changed display.
+Raw edits requested with `full: true` retain their exact normalized ranges and replacement text.
+
+When source is available, `preview_source` contains `origin` (`tracked` or `disk`) and a lowercase `sha256` of the exact unredacted observed bytes.
+This identifies an observation, not the source analyzed by the server. No freshness check is performed.
+A selected text-document edit with a version field also has `supplied_version: {"version": 7}` or `{"version": null}`.
+Absent fields and edits from the selected changes map omit `supplied_version`. A supplied version does not establish freshness.
+
+One response shares these limits across all documents and actions: 32 canonical files, 8 MiB of source plus constructed text, and 64 KiB of displayed UTF-8 diff text after redaction.
+Source acquisition has a two-second best-effort deadline checked between reads and bounded copies; an in-progress OS operation can overrun.
+Diff algorithms run off the async executor with a shared 100 ms deadline; a less compact diff can result.
+Aliases reuse one observation while preserving returned URI groups. Sources outside the workspace are withheld.
+Oversized eligible tracked sources do not fall back to disk.
+Invalid or overlapping edits and unreliable positions suppress the diff while retaining permitted metadata and raw edits.
+No additional documents are opened on the language server solely for previews.
+
 ## get_code_actions
 
 Returns the quick fixes, refactorings and source actions available for a range, with their edits.
 
-Arguments: `file_path`, the four range fields, and optional `kind_filter` (`quickfix`, `refactor`, `source`, or a more specific kind, in any case).
+Arguments: `file_path`, the four range fields, and optional `full` (default `false`) and `kind_filter` (`quickfix`, `refactor`, `source`, or a more specific kind, in any case).
 
 ```json
 {

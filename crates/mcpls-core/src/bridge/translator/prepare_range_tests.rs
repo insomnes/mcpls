@@ -412,12 +412,18 @@ async fn every_positioned_tool_rejects_a_line_beyond_the_document() {
     reject!("selection_range", t.handle_selection_range(file(), beyond));
     reject!(
         "rename",
-        t.handle_rename(file(), beyond, crate::bridge::NewName::new("x").unwrap())
+        t.handle_rename_with_options(
+            file(),
+            beyond,
+            crate::bridge::NewName::new("x").unwrap(),
+            true,
+            None
+        )
     );
     reject!("prepare_rename", t.handle_prepare_rename(file(), beyond));
     reject!(
         "code_actions",
-        t.handle_code_actions(file(), bounded(pos(1, 1), beyond), None)
+        t.handle_code_actions_with_options(file(), bounded(pos(1, 1), beyond), None, true)
     );
     reject!(
         "inlay_hints",
@@ -427,7 +433,7 @@ async fn every_positioned_tool_rejects_a_line_beyond_the_document() {
     let past = pos(100, 1);
     reject!(
         "code_actions_start",
-        t.handle_code_actions(file(), bounded(beyond, past), None)
+        t.handle_code_actions_with_options(file(), bounded(beyond, past), None, true)
     );
     reject!(
         "inlay_hints_start",
@@ -490,10 +496,11 @@ async fn capability_error_wins_over_a_line_beyond_the_document() {
         .unwrap_err();
     assert_matches!(rename, Error::CapabilityNotSupported { .. });
     let format = translator
-        .handle_format_range(
+        .handle_format_range_with_options(
             file(),
             bounded(pos(1, 1), pos(99, 1)),
             TabSize::default(),
+            true,
             true,
         )
         .await
@@ -705,11 +712,12 @@ async fn format_range_with(
         let path = path.to_string_lossy().into_owned();
         tokio::spawn(async move {
             translator
-                .handle_format_range(
+                .handle_format_range_with_options(
                     client_path(path),
                     bounded(pos(2, 1), pos(3, 6)),
                     TabSize::try_from(2).unwrap(),
                     false,
+                    true,
                 )
                 .await
         })
@@ -756,9 +764,9 @@ async fn format_range_sends_zero_based_range_and_options() {
     );
     assert_eq!(params["options"]["tabSize"], 2);
     assert_eq!(params["options"]["insertSpaces"], false);
-    assert_eq!(result.edits.len(), 1);
+    assert_eq!(result.changes[0].edits.as_ref().unwrap().len(), 1);
     assert_eq!(
-        result.edits[0].range.start,
+        result.changes[0].edits.as_ref().unwrap()[0].range.start,
         Position2D {
             line: 2,
             character: 2
@@ -781,14 +789,20 @@ async fn format_range_converts_utf8_edit_columns() {
         }]),
     )
     .await;
-    assert_eq!(result.edits[0].range.start.character, 3);
+    assert_eq!(
+        result.changes[0].edits.as_ref().unwrap()[0]
+            .range
+            .start
+            .character,
+        3
+    );
     assert_eq!(result.positions_degraded, None);
 }
 
 #[tokio::test]
 async fn format_range_null_response_has_no_edits() {
     let (_, result) = format_range_with("a\nb\nc", None, serde_json::Value::Null).await;
-    assert!(result.edits.is_empty());
+    assert!(result.changes[0].edits.as_ref().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -800,10 +814,11 @@ async fn format_range_with_a_line_beyond_the_document_is_rejected_before_the_req
     for (start, end, line) in [(pos(1, 1), pos(9, 1), 9), (pos(7, 1), pos(8, 1), 7)] {
         let err = timeout(
             Duration::from_secs(5),
-            translator.handle_format_range(
+            translator.handle_format_range_with_options(
                 client_file(),
                 bounded(start, end),
                 TabSize::default(),
+                true,
                 true,
             ),
         )
@@ -827,10 +842,11 @@ async fn format_range_end_character_past_the_line_end_is_forwarded() {
         let path = path.to_string_lossy().into_owned();
         tokio::spawn(async move {
             translator
-                .handle_format_range(
+                .handle_format_range_with_options(
                     client_path(path),
                     bounded(pos(1, 1), pos(2, 999)),
                     TabSize::default(),
+                    true,
                     true,
                 )
                 .await
@@ -871,10 +887,11 @@ async fn format_range_without_capability_is_rejected() {
     let path = dir.path().join("a.rs");
     fs::write(&path, "a\nb\n").unwrap();
     let err = translator
-        .handle_format_range(
+        .handle_format_range_with_options(
             client_path(path.to_string_lossy().into_owned()),
             bounded(pos(1, 1), pos(2, 1)),
             TabSize::default(),
+            true,
             true,
         )
         .await
@@ -894,10 +911,12 @@ async fn composed_rename_with(answer: Answer, permits_rename: bool) -> Result<se
     let request_path = path.clone();
     let task = tokio::spawn(async move {
         translator
-            .handle_rename(
+            .handle_rename_with_options(
                 client_path(request_path),
                 pos(1, 5),
                 super::dto::NewName::new("new_name").unwrap(),
+                true,
+                None,
             )
             .await
     });

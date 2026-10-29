@@ -309,7 +309,7 @@ impl EncodingCtx {
 
     /// Records `degradation`, returning whether it raised the recorded level
     /// (so callers log once per level rather than per position).
-    fn record_degradation(&self, degradation: PositionDegradation) -> bool {
+    pub(super) fn record_degradation(&self, degradation: PositionDegradation) -> bool {
         let mut state = lock_std(&self.line_cache);
         let raised = state.positions_degraded < Some(degradation);
         state.positions_degraded = state.positions_degraded.max(Some(degradation));

@@ -42,6 +42,19 @@ that prefix (`{tool_prefix}_{tool}`).
 Its `proposed` result includes the queried `position`, `preparation`, and `changes`.
 A `not_renameable` result has no edits. The standalone MCP `prepare_rename` tool was removed.
 Request a proposal, inspect it, then apply complete edits through the client.
+
+Edit tools (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) default to bounded readable previews.
+Set `full: true` to include exact normalized raw `edits`; previews never change raw replacement text.
+Each edit document has `uri`, `edit_count`, `preview`, optional `preview_source` and `supplied_version`, and `analysis_freshness: "unknown"`.
+Formatting returns one document in `changes`, including empty successful edit sets. Command-only actions have no preview.
+`preview.status` is `complete`, `truncated`, or `unavailable`; inspect `reason` when output is limited.
+Diffs have three context lines. Configured secret redaction sets `redacted: true` when it changes displayed text.
+`preview_source.origin` is `tracked` or `disk`; `sha256` hashes the exact unredacted observed bytes.
+The observation does not prove the server's analyzed baseline. `supplied_version.version` retains an integer or explicit null only when supplied by the selected text-document edit; absent and map versions are omitted.
+One response shares 32 files, 8 MiB source plus constructed text, a two-second best-effort acquisition deadline, 100 ms off-executor diff work, and 64 KiB of displayed diff text after redaction.
+An OS read already in progress can overrun the deadline. Unreliable positions, invalid ranges, and overlaps suppress diffs without dropping otherwise retained edits.
+Previews never write files, execute commands, or add language-server opens solely for referenced source.
+
 Do not apply proposals with non-empty `dropped` or unreliable positions.
 
 ## Prerequisites

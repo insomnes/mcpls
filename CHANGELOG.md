@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Edit proposals now show bounded unified diffs by default for rename, formatting, and code actions. Use `full: true` for exact normalized raw edits.
+- Edit documents report observed source hashes and origins, supplied version fields, and explicitly unknown analysis freshness. Preview limits and redaction affect presentation without dropping retained edits.
+
 - Breaking change: `get_references` now defaults to 100 ordered matches with bounded source excerpts. Use `limit` (1 through 10000), absolute lexical `path_filter`, and `include_source` to control selection and context. `matched_count` and `truncated` describe the server response. Source outcomes identify tracked or contained disk text, shortened context, and unavailable reasons under fixed byte, file, and time limits.
 
 - Breaking change: remove the standalone MCP `prepare_rename` tool. Call `rename_symbol` once to resolve, prepare when advertised, and propose edits. Results now distinguish `proposed` (with queried `position`, `preparation`, and `changes`) from `not_renameable` (without edits). Inspect complete proposals before applying them through the client; mcpls does not modify source files. The MCP inventory now contains 30 tools.

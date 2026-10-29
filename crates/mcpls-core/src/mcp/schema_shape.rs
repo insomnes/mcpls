@@ -8,8 +8,8 @@
 //! first paragraph up to a byte cap (whole sentences, or nothing), and a
 //! definition that several tools carry keeps only a one-line form. It changes `description` annotations only, so
 //! property names, types, `required` lists and `$ref`s are untouched.
-//! References omit output descriptions to keep their source-outcome schema
-//! within the tool-size budget; their tool description explains the fields.
+//! Reference and edit tools omit output descriptions to keep source outcomes
+//! and previews within the tool-size budget; tool descriptions explain the fields.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -192,8 +192,15 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
         shape_schema(Arc::make_mut(&mut tool.input_schema), &usage);
         if let Some(output) = tool.output_schema.as_mut() {
             shape_schema(Arc::make_mut(output), &usage);
-            if tool.name == "get_references" {
-                // References add source outcomes to an already rich navigation schema.
+            if matches!(
+                tool.name.as_ref(),
+                "get_references"
+                    | "rename_symbol"
+                    | "format_document"
+                    | "format_range"
+                    | "get_code_actions"
+            ) {
+                // Source outcomes and edit previews add rich per-document metadata.
                 // Keep its structural contract; field meanings are in the tool description.
                 let mut schema = Schema::from(std::mem::take(Arc::make_mut(output)));
                 RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
@@ -733,8 +740,17 @@ mod tests {
         for (before, after) in unshaped.iter().zip(&shaped) {
             for (schema_index, (old, new)) in schemas_of(before).zip(schemas_of(after)).enumerate()
             {
-                // References output uses the explicit dropping policy, not truncation.
-                if before.name == "get_references" && schema_index == 1 {
+                // These rich output schemas use explicit dropping, not truncation.
+                if schema_index == 1
+                    && matches!(
+                        before.name.as_ref(),
+                        "get_references"
+                            | "rename_symbol"
+                            | "format_document"
+                            | "format_range"
+                            | "get_code_actions"
+                    )
+                {
                     continue;
                 }
                 let mut kept = BTreeSet::new();

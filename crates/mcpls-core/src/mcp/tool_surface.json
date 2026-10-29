@@ -2,7 +2,7 @@
   {
     "name": "format_document",
     "title": "Format Document",
-    "description": "Format document with language-specific rules. Returns text edits for indentation, spacing, and style. `positions_degraded: \"response\"` (non-UTF-16 servers only) means some returned `character` offsets may be inexact.",
+    "description": "Propose whole-file formatting as one changes document, including empty successful edits. positions_degraded:response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
     "inputSchema": {
       "$defs": {
         "TabSize": {
@@ -18,6 +18,11 @@
         "file_path": {
           "description": "Absolute path to the file.",
           "type": "string"
+        },
+        "full": {
+          "default": false,
+          "description": "Include exact normalized raw edits alongside bounded previews (default: false).",
+          "type": "boolean"
         },
         "insert_spaces": {
           "default": true,
@@ -37,8 +42,95 @@
     },
     "outputSchema": {
       "$defs": {
+        "AnalysisFreshness": {
+          "oneOf": [
+            {
+              "const": "unknown",
+              "type": "string"
+            }
+          ]
+        },
+        "DocumentChanges": {
+          "properties": {
+            "analysis_freshness": {
+              "$ref": "#/$defs/AnalysisFreshness"
+            },
+            "edit_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "edits": {
+              "items": {
+                "$ref": "#/$defs/TextEdit"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "preview": {
+              "$ref": "#/$defs/EditPreview"
+            },
+            "preview_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PreviewSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "supplied_version": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SuppliedVersion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "uri",
+            "edit_count",
+            "preview",
+            "analysis_freshness"
+          ],
+          "type": "object"
+        },
+        "EditPreview": {
+          "properties": {
+            "diff": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "redacted": {
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/$defs/PreviewStatus"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -46,7 +138,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -59,7 +150,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -71,16 +161,44 @@
             }
           ]
         },
+        "PreviewSource": {
+          "properties": {
+            "origin": {
+              "$ref": "#/$defs/SourceOrigin"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "PreviewStatus": {
+          "oneOf": [
+            {
+              "const": "complete",
+              "type": "string"
+            },
+            {
+              "const": "truncated",
+              "type": "string"
+            },
+            {
+              "const": "unavailable",
+              "type": "string"
+            }
+          ]
+        },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -89,16 +207,37 @@
           ],
           "type": "object"
         },
+        "SourceOrigin": {
+          "oneOf": [
+            {
+              "const": "tracked",
+              "type": "string"
+            },
+            {
+              "const": "disk",
+              "type": "string"
+            }
+          ]
+        },
+        "SuppliedVersion": {
+          "properties": {
+            "version": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "type": "object"
+        },
         "TextEdit": {
-          "description": "A text edit operation.",
           "properties": {
             "new_text": {
-              "description": "New text.",
               "type": "string"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range to replace."
+              "$ref": "#/$defs/Range"
             }
           },
           "required": [
@@ -110,10 +249,9 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "edits": {
-          "description": "List of edits to format the document.",
+        "changes": {
           "items": {
-            "$ref": "#/$defs/TextEdit"
+            "$ref": "#/$defs/DocumentChanges"
           },
           "type": "array"
         },
@@ -125,12 +263,11 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          ]
         }
       },
       "required": [
-        "edits"
+        "changes"
       ],
       "type": "object"
     },
@@ -144,7 +281,7 @@
   {
     "name": "format_range",
     "title": "Format Range",
-    "description": "Format only a range with language-specific rules. Returns text edits the server reports for that range; edits are not filtered or applied. A line past the end of the file is rejected. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact.",
+    "description": "Propose formatting as one changes document for a valid range; reported edits are not filtered. A line past EOF is invalid. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
     "inputSchema": {
       "$defs": {
         "TabSize": {
@@ -172,6 +309,11 @@
         "file_path": {
           "description": "Absolute path to the file.",
           "type": "string"
+        },
+        "full": {
+          "default": false,
+          "description": "Include exact normalized raw edits as well as bounded previews (default: false).",
+          "type": "boolean"
         },
         "insert_spaces": {
           "default": true,
@@ -207,8 +349,95 @@
     },
     "outputSchema": {
       "$defs": {
+        "AnalysisFreshness": {
+          "oneOf": [
+            {
+              "const": "unknown",
+              "type": "string"
+            }
+          ]
+        },
+        "DocumentChanges": {
+          "properties": {
+            "analysis_freshness": {
+              "$ref": "#/$defs/AnalysisFreshness"
+            },
+            "edit_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "edits": {
+              "items": {
+                "$ref": "#/$defs/TextEdit"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "preview": {
+              "$ref": "#/$defs/EditPreview"
+            },
+            "preview_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PreviewSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "supplied_version": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SuppliedVersion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "uri",
+            "edit_count",
+            "preview",
+            "analysis_freshness"
+          ],
+          "type": "object"
+        },
+        "EditPreview": {
+          "properties": {
+            "diff": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "redacted": {
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/$defs/PreviewStatus"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -216,7 +445,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -229,7 +457,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -241,16 +468,44 @@
             }
           ]
         },
+        "PreviewSource": {
+          "properties": {
+            "origin": {
+              "$ref": "#/$defs/SourceOrigin"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "PreviewStatus": {
+          "oneOf": [
+            {
+              "const": "complete",
+              "type": "string"
+            },
+            {
+              "const": "truncated",
+              "type": "string"
+            },
+            {
+              "const": "unavailable",
+              "type": "string"
+            }
+          ]
+        },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -259,16 +514,37 @@
           ],
           "type": "object"
         },
+        "SourceOrigin": {
+          "oneOf": [
+            {
+              "const": "tracked",
+              "type": "string"
+            },
+            {
+              "const": "disk",
+              "type": "string"
+            }
+          ]
+        },
+        "SuppliedVersion": {
+          "properties": {
+            "version": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "type": "object"
+        },
         "TextEdit": {
-          "description": "A text edit operation.",
           "properties": {
             "new_text": {
-              "description": "New text.",
               "type": "string"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range to replace."
+              "$ref": "#/$defs/Range"
             }
           },
           "required": [
@@ -280,10 +556,9 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "edits": {
-          "description": "List of edits to format the document.",
+        "changes": {
           "items": {
-            "$ref": "#/$defs/TextEdit"
+            "$ref": "#/$defs/DocumentChanges"
           },
           "type": "array"
         },
@@ -295,12 +570,11 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          ]
         }
       },
       "required": [
-        "edits"
+        "changes"
       ],
       "type": "object"
     },
@@ -496,7 +770,7 @@
   {
     "name": "get_code_actions",
     "title": "Code Actions",
-    "description": "Code actions for range. Returns quick fixes, refactorings, and source actions with edits. Capped at a fixed maximum; `truncated: true` on the result means some actions, diagnostics, or edits were left out. An action's `edit.dropped` field, when non-empty, means some of that edit's changes were withheld (e.g. out-of-workspace files). The end line must exist in the file; a line past the end is rejected as invalid params. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Propose range quick fixes/refactorings/source actions; resolved edits and commands are retained. A line past EOF is invalid. truncated means actions/diagnostics/edits omitted; nonempty edit.dropped means incomplete edits. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -516,6 +790,11 @@
         "file_path": {
           "description": "Absolute path to the file.",
           "type": "string"
+        },
+        "full": {
+          "default": false,
+          "description": "Include exact normalized raw edits as well as bounded previews (default: false).",
+          "type": "boolean"
         },
         "kind_filter": {
           "description": "Optional filter by action kind, in any case; sent to the server in its canonical spelling.",
@@ -560,8 +839,15 @@
     },
     "outputSchema": {
       "$defs": {
+        "AnalysisFreshness": {
+          "oneOf": [
+            {
+              "const": "unknown",
+              "type": "string"
+            }
+          ]
+        },
         "CodeAction": {
-          "description": "A single code action.",
           "properties": {
             "command": {
               "anyOf": [
@@ -571,11 +857,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Command to execute."
+              ]
             },
             "diagnostics": {
-              "description": "Diagnostics that this action resolves.",
               "items": {
                 "$ref": "#/$defs/Diagnostic"
               },
@@ -589,23 +873,19 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Workspace edit to apply."
+              ]
             },
             "is_preferred": {
               "default": false,
-              "description": "Whether this is the preferred action.",
               "type": "boolean"
             },
             "kind": {
-              "description": "Kind of code action (quickfix, refactor, etc.).",
               "type": [
                 "string",
                 "null"
               ]
             },
             "title": {
-              "description": "Title of the code action.",
               "type": "string"
             }
           },
@@ -615,19 +895,15 @@
           "type": "object"
         },
         "CommandDescription": {
-          "description": "Description of a command.",
           "properties": {
             "arguments": {
-              "description": "Command arguments.",
               "items": true,
               "type": "array"
             },
             "command": {
-              "description": "Command identifier.",
               "type": "string"
             },
             "title": {
-              "description": "Title of the command.",
               "type": "string"
             }
           },
@@ -638,7 +914,6 @@
           "type": "object"
         },
         "Diagnostic": {
-          "description": "A single diagnostic.",
           "properties": {
             "code": {
               "type": [
@@ -647,7 +922,6 @@
               ]
             },
             "message": {
-              "description": "Diagnostic message.",
               "type": "string"
             },
             "range": {
@@ -665,16 +939,13 @@
           "type": "object"
         },
         "DiagnosticSeverity": {
-          "description": "Diagnostic severity.",
           "oneOf": [
             {
               "const": "error",
-              "description": "Error diagnostic.",
               "type": "string"
             },
             {
               "const": "warning",
-              "description": "Warning diagnostic.",
               "type": "string"
             },
             {
@@ -683,29 +954,61 @@
             },
             {
               "const": "hint",
-              "description": "Hint diagnostic.",
               "type": "string"
             }
           ]
         },
         "DocumentChanges": {
-          "description": "Changes to a document.",
           "properties": {
+            "analysis_freshness": {
+              "$ref": "#/$defs/AnalysisFreshness"
+            },
+            "edit_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
             "edits": {
-              "description": "List of edits to apply.",
               "items": {
                 "$ref": "#/$defs/TextEdit"
               },
-              "type": "array"
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "preview": {
+              "$ref": "#/$defs/EditPreview"
+            },
+            "preview_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PreviewSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "supplied_version": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SuppliedVersion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
           "required": [
             "uri",
-            "edits"
+            "edit_count",
+            "preview",
+            "analysis_freshness"
           ],
           "type": "object"
         },
@@ -739,8 +1042,33 @@
           },
           "type": "object"
         },
+        "EditPreview": {
+          "properties": {
+            "diff": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "redacted": {
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/$defs/PreviewStatus"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -748,7 +1076,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -761,7 +1088,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -773,16 +1099,44 @@
             }
           ]
         },
+        "PreviewSource": {
+          "properties": {
+            "origin": {
+              "$ref": "#/$defs/SourceOrigin"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "PreviewStatus": {
+          "oneOf": [
+            {
+              "const": "complete",
+              "type": "string"
+            },
+            {
+              "const": "truncated",
+              "type": "string"
+            },
+            {
+              "const": "unavailable",
+              "type": "string"
+            }
+          ]
+        },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -791,16 +1145,37 @@
           ],
           "type": "object"
         },
+        "SourceOrigin": {
+          "oneOf": [
+            {
+              "const": "tracked",
+              "type": "string"
+            },
+            {
+              "const": "disk",
+              "type": "string"
+            }
+          ]
+        },
+        "SuppliedVersion": {
+          "properties": {
+            "version": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "type": "object"
+        },
         "TextEdit": {
-          "description": "A text edit operation.",
           "properties": {
             "new_text": {
-              "description": "New text.",
               "type": "string"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range to replace."
+              "$ref": "#/$defs/Range"
             }
           },
           "required": [
@@ -810,18 +1185,15 @@
           "type": "object"
         },
         "WorkspaceEditDescription": {
-          "description": "Description of a workspace edit.",
           "properties": {
             "changes": {
-              "description": "Changes to apply to documents.",
               "items": {
                 "$ref": "#/$defs/DocumentChanges"
               },
               "type": "array"
             },
             "dropped": {
-              "$ref": "#/$defs/DroppedEdits",
-              "description": "Entries withheld from `changes` -- see [`DroppedEdits`]."
+              "$ref": "#/$defs/DroppedEdits"
             }
           },
           "required": [
@@ -833,7 +1205,6 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "actions": {
-          "description": "Available code actions.",
           "items": {
             "$ref": "#/$defs/CodeAction"
           },
@@ -847,11 +1218,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          ]
         },
         "truncated": {
-          "description": "Whether `actions`, their diagnostics or their edits were capped below the server's response.",
           "type": "boolean"
         }
       },
@@ -7152,7 +7521,7 @@
   {
     "name": "rename_symbol",
     "title": "Rename Symbol",
-    "description": "Resolve a target and propose a workspace rename in one call. Runs preparation on the rename server when advertised; explicit unsupported preparation permits rename directly. Returns `status: proposed` with queried `position`, `preparation` (`renameable` with range and optional placeholder, `default_behavior` without range, or `unsupported`) and `changes`, or `status: not_renameable` with position and optional server_message, without edits. Inspect the proposal before applying through the client. A non-empty `dropped` field means some edits were withheld (e.g. out-of-workspace files, or `exceeds_item_cap` when a file's edits exceed the fixed maximum) -- the rename is then incomplete even though `changes` is non-empty. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. An ambiguous name never produces an edit. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Propose a workspace rename by position or symbol_name. Resolve once; ambiguous names return candidates. Prepare on the rename server when supported. status:proposed has position,preparation,changes; not_renameable has no edits or preview. Preparation rejection stops rename; operational errors remain errors. Empty edits remain proposed. Nonempty dropped means incomplete: do not apply. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7178,6 +7547,11 @@
         "file_path": {
           "description": "Absolute path to the file.",
           "type": "string"
+        },
+        "full": {
+          "default": false,
+          "description": "Include exact normalized raw edits as well as bounded previews (default: false).",
+          "type": "boolean"
         },
         "line": {
           "default": null,
@@ -7257,24 +7631,65 @@
     },
     "outputSchema": {
       "$defs": {
+        "AnalysisFreshness": {
+          "oneOf": [
+            {
+              "const": "unknown",
+              "type": "string"
+            }
+          ]
+        },
         "DocumentChanges": {
-          "description": "Changes to a document.",
           "properties": {
+            "analysis_freshness": {
+              "$ref": "#/$defs/AnalysisFreshness"
+            },
+            "edit_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
             "edits": {
-              "description": "List of edits to apply.",
               "items": {
                 "$ref": "#/$defs/TextEdit"
               },
-              "type": "array"
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "preview": {
+              "$ref": "#/$defs/EditPreview"
+            },
+            "preview_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PreviewSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "supplied_version": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SuppliedVersion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
           "required": [
             "uri",
-            "edits"
+            "edit_count",
+            "preview",
+            "analysis_freshness"
           ],
           "type": "object"
         },
@@ -7308,8 +7723,33 @@
           },
           "type": "object"
         },
+        "EditPreview": {
+          "properties": {
+            "diff": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "redacted": {
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/$defs/PreviewStatus"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -7317,7 +7757,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -7330,7 +7769,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -7343,7 +7781,6 @@
           ]
         },
         "PositionSource": {
-          "description": "Where the queried position of a name-addressed call came from.",
           "oneOf": [
             {
               "const": "selection_range",
@@ -7355,16 +7792,44 @@
             }
           ]
         },
+        "PreviewSource": {
+          "properties": {
+            "origin": {
+              "$ref": "#/$defs/SourceOrigin"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "PreviewStatus": {
+          "oneOf": [
+            {
+              "const": "complete",
+              "type": "string"
+            },
+            {
+              "const": "truncated",
+              "type": "string"
+            },
+            {
+              "const": "unavailable",
+              "type": "string"
+            }
+          ]
+        },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -7374,21 +7839,17 @@
           "type": "object"
         },
         "RenamePreparation": {
-          "description": "Preparation that permitted the rename request.",
           "oneOf": [
             {
-              "description": "The server supplied the identifier range.",
               "properties": {
                 "placeholder": {
-                  "description": "Current name, when supplied by the server.",
                   "type": [
                     "string",
                     "null"
                   ]
                 },
                 "range": {
-                  "$ref": "#/$defs/Range",
-                  "description": "Identifier range (1-based UTF-16)."
+                  "$ref": "#/$defs/Range"
                 },
                 "status": {
                   "const": "renameable",
@@ -7402,7 +7863,6 @@
               "type": "object"
             },
             {
-              "description": "The server permits rename without supplying an identifier range.",
               "properties": {
                 "status": {
                   "const": "default_behavior",
@@ -7415,7 +7875,6 @@
               "type": "object"
             },
             {
-              "description": "The server explicitly does not advertise preparation support.",
               "properties": {
                 "status": {
                   "const": "unsupported",
@@ -7460,16 +7919,37 @@
           ],
           "type": "object"
         },
+        "SourceOrigin": {
+          "oneOf": [
+            {
+              "const": "tracked",
+              "type": "string"
+            },
+            {
+              "const": "disk",
+              "type": "string"
+            }
+          ]
+        },
+        "SuppliedVersion": {
+          "properties": {
+            "version": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "type": "object"
+        },
         "TextEdit": {
-          "description": "A text edit operation.",
           "properties": {
             "new_text": {
-              "description": "New text.",
               "type": "string"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range to replace."
+              "$ref": "#/$defs/Range"
             }
           },
           "required": [
@@ -7482,22 +7962,18 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "oneOf": [
         {
-          "description": "The server returned a proposal; an empty edit set is still a proposal.",
           "properties": {
             "changes": {
-              "description": "Proposed per-document edits. mcpls does not apply them.",
               "items": {
                 "$ref": "#/$defs/DocumentChanges"
               },
               "type": "array"
             },
             "dropped": {
-              "$ref": "#/$defs/DroppedEdits",
-              "description": "Withheld edits. A non-empty value means the proposal is incomplete."
+              "$ref": "#/$defs/DroppedEdits"
             },
             "preparation": {
-              "$ref": "#/$defs/RenamePreparation",
-              "description": "Preparation performed before requesting edits."
+              "$ref": "#/$defs/RenamePreparation"
             },
             "status": {
               "const": "proposed",
@@ -7512,10 +7988,8 @@
           "type": "object"
         },
         {
-          "description": "Preparation rejected this position. No rename request was sent.",
           "properties": {
             "server_message": {
-              "description": "Redacted explanation supplied by the language server, if any.",
               "type": [
                 "string",
                 "null"
@@ -7534,8 +8008,7 @@
       ],
       "properties": {
         "position": {
-          "$ref": "#/$defs/Position2D",
-          "description": "Queried client position (1-based UTF-16)."
+          "$ref": "#/$defs/Position2D"
         },
         "positions_degraded": {
           "anyOf": [
@@ -7545,8 +8018,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Worst position-conversion warning across this request."
+          ]
         },
         "resolved_symbol": {
           "anyOf": [
@@ -7556,8 +8028,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only for a name-addressed call."
+          ]
         }
       },
       "required": [

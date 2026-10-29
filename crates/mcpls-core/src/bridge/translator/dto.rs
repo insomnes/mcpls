@@ -602,13 +602,79 @@ pub struct TextEdit {
     pub new_text: String,
 }
 
-/// Changes to a document.
+/// Presentation of edits against observed source, not a verified analysis baseline.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EditPreview {
+    /// Complete, truncated, or unavailable presentation.
+    pub status: PreviewStatus,
+    /// Unified diff with three context lines, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// Why the preview could not be completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Configured secret redaction changed the displayed diff.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub redacted: bool,
+}
+
+/// Preview presentation state, independent of retained edits.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewStatus {
+    /// All rendered diff text is present.
+    Complete,
+    /// Display or work limits shortened the presentation.
+    Truncated,
+    /// No reliable diff can be rendered.
+    Unavailable,
+}
+
+/// Identity of the exact unredacted source bytes observed for a proposal.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PreviewSource {
+    /// Source acquisition origin; this does not prove server analysis input.
+    pub origin: SourceOrigin,
+    /// Lowercase SHA-256 of the observed bytes.
+    pub sha256: String,
+}
+
+/// Version field supplied by the selected text-document edit.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SuppliedVersion {
+    /// Server-supplied integer or explicit null, without freshness verification.
+    #[schemars(required)]
+    pub version: Option<i32>,
+}
+
+/// Unverified relationship between observed source and server analysis.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisFreshness {
+    /// No analyzed baseline has been verified.
+    Unknown,
+}
+
+/// Changes proposed for one document. No files are written.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DocumentChanges {
-    /// URI of the document.
+    /// Original document URI.
     pub uri: String,
-    /// List of edits to apply.
-    pub edits: Vec<TextEdit>,
+    /// Number of retained edits, including when raw edits are omitted.
+    pub edit_count: usize,
+    /// Bounded presentation against observed source.
+    pub preview: EditPreview,
+    /// Observed source identity, omitted when no source bytes were acquired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_source: Option<PreviewSource>,
+    /// Present only if the selected text-document edit supplied a version field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplied_version: Option<SuppliedVersion>,
+    /// Always unknown; hashes and supplied versions do not establish freshness.
+    pub analysis_freshness: AnalysisFreshness,
+    /// Exact normalized raw edits, present only with full:true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<Vec<TextEdit>>,
 }
 
 /// Result of a rename request.
@@ -798,8 +864,8 @@ pub struct DocumentOutlineResult {
 /// Result of a format document request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FormatDocumentResult {
-    /// List of edits to format the document.
-    pub edits: Vec<TextEdit>,
+    /// One proposed document, including an empty successful edit set.
+    pub changes: Vec<DocumentChanges>,
     /// Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise.
     ///
     /// Tells whether the queried position or only the returned offsets are affected.
@@ -1097,7 +1163,7 @@ pub enum ReferenceSource {
     },
 }
 
-/// Where reference source text was obtained.
+/// Where observed source text was obtained.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceOrigin {
@@ -1735,9 +1801,13 @@ impl ServerText for TextEdit {
 
 impl ServerText for DocumentChanges {
     fn redact_server_text(&mut self, redactions: &Redactions) {
-        let Self { uri, edits } = self;
-        redactions.note_payload(uri);
-        edits.redact_server_text(redactions);
+        redactions.note_payload(&self.uri);
+        self.edits.redact_server_text(redactions);
+        if let Some(diff) = &mut self.preview.diff {
+            let before = diff.clone();
+            redactions.redact_in_place(diff);
+            self.preview.redacted |= *diff != before;
+        }
     }
 }
 
@@ -1757,6 +1827,7 @@ impl ServerText for RenameResult {
                     redactions.redact_in_place(placeholder);
                 }
                 changes.redact_server_text(redactions);
+                super::previews::limit_display(changes.iter_mut());
             }
             RenameOutcome::NotRenameable { server_message } => {
                 if let Some(message) = server_message {
@@ -1831,10 +1902,11 @@ impl ServerText for DocumentOutlineResult {
 impl ServerText for FormatDocumentResult {
     fn redact_server_text(&mut self, redactions: &Redactions) {
         let Self {
-            edits,
+            changes,
             positions_degraded: _,
         } = self;
-        edits.redact_server_text(redactions);
+        changes.redact_server_text(redactions);
+        super::previews::limit_display(changes.iter_mut());
     }
 }
 
@@ -1916,6 +1988,12 @@ impl ServerText for CodeActionsResult {
             positions_degraded: _,
         } = self;
         actions.redact_server_text(redactions);
+        super::previews::limit_display(
+            actions
+                .iter_mut()
+                .filter_map(|a| a.edit.as_mut())
+                .flat_map(|e| e.changes.iter_mut()),
+        );
     }
 }
 
@@ -2267,11 +2345,21 @@ mod tests {
             }],
             edit: Some(WorkspaceEditDescription {
                 changes: vec![DocumentChanges {
+                    edit_count: 1,
+                    preview_source: None,
+                    supplied_version: None,
+                    analysis_freshness: AnalysisFreshness::Unknown,
+                    preview: EditPreview {
+                        status: PreviewStatus::Complete,
+                        diff: None,
+                        reason: None,
+                        redacted: false,
+                    },
                     uri: format!("file:///{SECRET}.rs"),
-                    edits: vec![TextEdit {
+                    edits: Some(vec![TextEdit {
                         range: range(),
                         new_text: format!("let k = \"{SECRET}\";"),
-                    }],
+                    }]),
                 }],
                 dropped: DroppedEdits::default(),
             }),
@@ -2290,7 +2378,7 @@ mod tests {
         );
         let changes = &action.edit.as_ref().unwrap().changes[0];
         assert!(changes.uri.contains(SECRET));
-        assert!(changes.edits[0].new_text.contains(SECRET));
+        assert!(changes.edits.as_ref().unwrap()[0].new_text.contains(SECRET));
     }
 
     #[test]

@@ -50,6 +50,7 @@ mod navigation;
 mod positioned;
 #[cfg(test)]
 mod prepare_range_tests;
+mod previews;
 mod pull_support;
 mod references;
 pub use references::ReferenceOptions;
@@ -135,6 +136,8 @@ pub struct Translator {
     #[cfg(test)]
     reference_work: Arc<StdMutex<references::ReferenceWork>>,
     #[cfg(test)]
+    preview_work: Arc<StdMutex<previews::PreviewWork>>,
+    #[cfg(test)]
     reference_read_hook: Option<fn(&Path, bool)>,
     #[cfg(test)]
     reference_io_failure_after: Option<usize>,
@@ -206,6 +209,8 @@ impl Translator {
             workspace_roots: WorkspaceRoots::default(),
             #[cfg(test)]
             reference_work: Arc::new(StdMutex::new(references::ReferenceWork::default())),
+            #[cfg(test)]
+            preview_work: Arc::default(),
             #[cfg(test)]
             reference_read_hook: None,
             #[cfg(test)]

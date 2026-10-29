@@ -9,13 +9,15 @@ use super::Translator;
 use super::diagnostics::diagnostic_to_mcp;
 use super::dto::{
     BoundedRange, CodeAction, CodeActionsResult, CommandDescription, DocumentChanges, DroppedEdits,
-    FormatDocumentResult, NewName, Position, Position2D, PrepareRenameOutcome, PrepareRenameResult,
-    RenameOutcome, RenamePreparation, RenameResult, TabSize, TextEdit, WorkspaceEditDescription,
+    FormatDocumentResult, NewName, Position, Position2D, PositionDegradation, PrepareRenameOutcome,
+    PrepareRenameResult, RenameOutcome, RenamePreparation, RenameResult, SuppliedVersion, TabSize,
+    TextEdit, WorkspaceEditDescription,
 };
 use super::encoding_ctx::EncodingCtx;
 use super::kind_filter::CodeActionKindFilter;
 use super::navigation::ItemBudget;
 use super::positioned::{Positioned, budgeted, budgeted_classified, document_request};
+use super::previews::{Previews, suppress_degraded};
 use super::routing::{Capability, FileLocalCapability, IndexingGate};
 use crate::bridge::{ClientPath, WorkspaceRoots};
 use crate::config::ServerId;
@@ -23,6 +25,39 @@ use crate::error::{ErrorChain, Result, is_invalid_offset};
 use crate::escape_control;
 use crate::lsp::{LspClient, UnclassifiedError};
 use crate::redaction::Redactions;
+
+/// Preserve optional version-field presence before typed LSP decoding.
+struct EditRequest<R>(std::marker::PhantomData<R>);
+impl<R: lsp_types::Request> lsp_types::Request for EditRequest<R> {
+    type Params = R::Params;
+    type Result = serde_json::Value;
+    const METHOD: lsp_types::LspRequestMethod<'static> = R::METHOD;
+    const MESSAGE_DIRECTION: lsp_types::MessageDirection = R::MESSAGE_DIRECTION;
+}
+
+fn versions(value: &serde_json::Value) -> Vec<Option<SuppliedVersion>> {
+    value
+        .get("documentChanges")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    entry
+                        .get("textDocument")
+                        .and_then(|doc| doc.get("version"))
+                        .map(|v| SuppliedVersion {
+                            version: v.as_i64().and_then(|v| i32::try_from(v).ok()),
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T> {
+    serde_json::from_value(value).map_err(crate::Error::from)
+}
 
 /// Convert a raw LSP `WorkspaceEdit` into MCP `DocumentChanges`.
 ///
@@ -62,6 +97,8 @@ async fn convert_workspace_edit(
     workspace_roots: &WorkspaceRoots,
     edit_kind: &str,
     budget: &mut ItemBudget,
+    previews: Option<&mut Previews<'_>>,
+    versions: &[Option<SuppliedVersion>],
 ) -> (Vec<DocumentChanges>, DroppedEdits) {
     let mut converter = WorkspaceEditConverter {
         ctx,
@@ -70,6 +107,8 @@ async fn convert_workspace_edit(
         budget,
         dropped: DroppedEdits::default(),
         changes: Vec::new(),
+        previews,
+        versions,
     };
 
     if let Some(changes_map) = edit.changes.filter(|m| !m.is_empty()) {
@@ -87,16 +126,18 @@ async fn convert_workspace_edit(
 
 /// Mutable state threaded through [`convert_workspace_edit`]'s two source
 /// branches so they share one item budget and one drop tally.
-struct WorkspaceEditConverter<'a> {
+struct WorkspaceEditConverter<'a, 'b> {
     ctx: &'a EncodingCtx,
     workspace_roots: &'a WorkspaceRoots,
     edit_kind: &'a str,
     budget: &'a mut ItemBudget,
     dropped: DroppedEdits,
     changes: Vec<DocumentChanges>,
+    previews: Option<&'a mut Previews<'b>>,
+    versions: &'a [Option<SuppliedVersion>],
 }
 
-impl WorkspaceEditConverter<'_> {
+impl WorkspaceEditConverter<'_, '_> {
     /// Whether `uri` may be written through (see
     /// [`WorkspaceRoots::admits_edit_uri`]: exact-case lexical containment plus
     /// canonical containment); an outside URI is logged and tallied in
@@ -128,11 +169,36 @@ impl WorkspaceEditConverter<'_> {
 
     /// An entry whose edits were all dropped is left out; one that arrived
     /// empty still round-trips.
-    fn push_entry(&mut self, uri: String, edits: Vec<TextEdit>, entry_dropped: usize) {
+    async fn push_entry(
+        &mut self,
+        uri: lsp_types::Uri,
+        edits: Vec<lsp_types::TextEdit>,
+        entry_dropped: usize,
+        version: Option<SuppliedVersion>,
+    ) {
         if edits.is_empty() && entry_dropped > 0 {
             return;
         }
-        self.changes.push(DocumentChanges { uri, edits });
+        let document = if let Some(previews) = &mut self.previews {
+            previews.document(uri, edits, version, self.ctx).await
+        } else {
+            let edits = convert_text_edits(edits, self.ctx, &uri).await;
+            DocumentChanges {
+                uri: uri.to_string(),
+                edit_count: edits.len(),
+                edits: Some(edits),
+                preview: super::dto::EditPreview {
+                    status: super::dto::PreviewStatus::Unavailable,
+                    diff: None,
+                    reason: Some("source_unavailable".into()),
+                    redacted: false,
+                },
+                preview_source: None,
+                supplied_version: version,
+                analysis_freshness: super::dto::AnalysisFreshness::Unknown,
+            }
+        };
+        self.changes.push(document);
     }
 
     async fn convert_changes_map(
@@ -148,19 +214,12 @@ impl WorkspaceEditConverter<'_> {
             let Some(edits) = self.admit_edits(edits) else {
                 continue;
             };
-            let mut text_edits = Vec::with_capacity(edits.len());
-            for e in edits {
-                text_edits.push(TextEdit {
-                    range: self.ctx.normalize_range(&uri, e.range).await,
-                    new_text: e.new_text,
-                });
-            }
-            self.push_entry(uri.to_string(), text_edits, 0);
+            self.push_entry(uri, edits, 0, None).await;
         }
     }
 
     async fn convert_document_changes(&mut self, document_changes: Vec<lsp_types::DocumentChange>) {
-        for change in document_changes {
+        for (index, change) in document_changes.into_iter().enumerate() {
             let tde = match change {
                 lsp_types::DocumentChange::TextDocumentEdit(e) => e,
                 lsp_types::DocumentChange::CreateFile(_)
@@ -183,17 +242,8 @@ impl WorkspaceEditConverter<'_> {
             let mut text_edits = Vec::with_capacity(edits.len());
             for one_of in edits {
                 let text_edit = match one_of {
-                    lsp_types::Edit::TextEdit(te) => TextEdit {
-                        range: self.ctx.normalize_range(&edit_uri, te.range).await,
-                        new_text: te.new_text,
-                    },
-                    lsp_types::Edit::AnnotatedTextEdit(ate) => TextEdit {
-                        range: self
-                            .ctx
-                            .normalize_range(&edit_uri, ate.text_edit.range)
-                            .await,
-                        new_text: ate.text_edit.new_text,
-                    },
+                    lsp_types::Edit::TextEdit(te) => te,
+                    lsp_types::Edit::AnnotatedTextEdit(ate) => ate.text_edit,
                     // Snippet edits are an LSP 3.18 addition mcpls does not
                     // advertise support for (`WorkspaceEditClientCapabilities`
                     // carries no `snippetEditSupport`). A server can still send
@@ -213,7 +263,13 @@ impl WorkspaceEditConverter<'_> {
                 };
                 text_edits.push(text_edit);
             }
-            self.push_entry(edit_uri.to_string(), text_edits, entry_dropped);
+            self.push_entry(
+                edit_uri,
+                text_edits,
+                entry_dropped,
+                self.versions.get(index).cloned().flatten(),
+            )
+            .await;
         }
     }
 
@@ -286,10 +342,16 @@ async fn resolve_code_action(
     client: &LspClient,
     server_id: &ServerId,
     mut action: lsp_types::CodeAction,
-) -> lsp_types::CodeAction {
-    let outcome = budgeted::<lsp_types::CodeActionResolveRequest>(client, action.clone()).await;
+) -> (lsp_types::CodeAction, Vec<Option<SuppliedVersion>>) {
+    let outcome =
+        budgeted::<EditRequest<lsp_types::CodeActionResolveRequest>>(client, action.clone()).await;
+    let mut supplied = Vec::new();
     match outcome {
-        Ok(resolved) => {
+        Ok(value) => {
+            supplied = value.get("edit").map(versions).unwrap_or_default();
+            let Ok(resolved) = decode::<lsp_types::CodeAction>(value) else {
+                return (action, Vec::new());
+            };
             if resolved.edit.is_some() {
                 action.edit = resolved.edit;
             } else {
@@ -309,7 +371,7 @@ async fn resolve_code_action(
             );
         }
     }
-    action
+    (action, supplied)
 }
 
 /// Resolves up to [`MAX_CODE_ACTION_RESOLVES`] deferred actions in `entries`
@@ -321,6 +383,7 @@ async fn resolve_code_action(
 /// to how many deferred actions the response contains (#432).
 async fn resolve_deferred_code_actions(
     entries: &mut [lsp_types::CodeActionResponse],
+    supplied: &mut [Vec<Option<SuppliedVersion>>],
     client: &LspClient,
     server_id: &ServerId,
 ) {
@@ -358,7 +421,10 @@ async fn resolve_deferred_code_actions(
 
     while let Some(result) = resolve_tasks.join_next().await {
         match result {
-            Ok((index, resolved_action)) => {
+            Ok((index, (resolved_action, versions))) => {
+                if let Some(slot) = supplied.get_mut(index) {
+                    *slot = versions;
+                }
                 if let Some(slot) = entries.get_mut(index) {
                     *slot = lsp_types::CodeActionResponse::CodeAction(resolved_action);
                 }
@@ -388,6 +454,8 @@ async fn convert_code_action(
     uri: &lsp_types::Uri,
     workspace_roots: &WorkspaceRoots,
     budget: &mut ItemBudget,
+    previews: Option<&mut Previews<'_>>,
+    versions: &[Option<SuppliedVersion>],
 ) -> CodeAction {
     let diagnostics = match action.diagnostics {
         Some(diags) => {
@@ -403,9 +471,16 @@ async fn convert_code_action(
 
     let edit = match action.edit {
         Some(edit) => {
-            let (changes, dropped) =
-                convert_workspace_edit(edit, ctx, workspace_roots, "code-action edit", budget)
-                    .await;
+            let (changes, dropped) = convert_workspace_edit(
+                edit,
+                ctx,
+                workspace_roots,
+                "code-action edit",
+                budget,
+                previews,
+                versions,
+            )
+            .await;
             Some(WorkspaceEditDescription { changes, dropped })
         }
         None => None,
@@ -506,6 +581,22 @@ impl Translator {
         position: Position,
         new_name: NewName,
     ) -> Result<RenameResult> {
+        self.handle_rename_with_options(file_path, position, new_name, false, None)
+            .await
+    }
+
+    /// Propose edits with bounded previews and optional exact raw edits.
+    ///
+    /// # Errors
+    /// Returns the same routing, position, and server errors as the default handler.
+    pub async fn handle_rename_with_options(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        new_name: NewName,
+        full: bool,
+        positions_degraded: Option<PositionDegradation>,
+    ) -> Result<RenameResult> {
         let doc = self
             .prepare_positioned_document(
                 &file_path,
@@ -516,6 +607,9 @@ impl Translator {
         // Build once: both LSP requests use this connection, URI, converted
         // position and conversion budget while the document guard remains alive.
         let ctx = self.encoding_ctx(doc.server_id());
+        if let Some(warning) = positions_degraded {
+            ctx.record_degradation(warning);
+        }
         let target = lsp_types::TextDocumentPositionParams {
             text_document: lsp_types::TextDocumentIdentifier {
                 uri: doc.uri().clone(),
@@ -557,7 +651,7 @@ impl Translator {
                 }
             }
         };
-        let response = budgeted::<lsp_types::RenameRequest>(
+        let response = budgeted::<EditRequest<lsp_types::RenameRequest>>(
             doc.client(),
             lsp_types::RenameParams {
                 text_document_position_params: target,
@@ -567,19 +661,25 @@ impl Translator {
         )
         .await?;
 
-        let (changes, dropped) = if let Some(edit) = response {
+        let supplied = versions(&response);
+        let response: Option<lsp_types::WorkspaceEdit> = decode(response)?;
+        let mut previews = Previews::new(self, doc.server_id(), full);
+        let (mut changes, dropped) = if let Some(edit) = response {
             convert_workspace_edit(
                 edit,
                 &ctx,
                 &self.workspace_roots,
                 "rename edit",
                 &mut ItemBudget::new(),
+                Some(&mut previews),
+                &supplied,
             )
             .await
         } else {
             (vec![], DroppedEdits::default())
         };
 
+        suppress_degraded(changes.iter_mut(), ctx.positions_degraded());
         Ok(RenameResult {
             position: queried_position,
             outcome: RenameOutcome::Proposed {
@@ -682,6 +782,21 @@ impl Translator {
         tab_size: TabSize,
         insert_spaces: bool,
     ) -> Result<FormatDocumentResult> {
+        self.handle_format_document_with_options(file_path, tab_size, insert_spaces, false)
+            .await
+    }
+
+    /// Propose edits with bounded previews and optional exact raw edits.
+    ///
+    /// # Errors
+    /// Returns the same routing, position, and server errors as the default handler.
+    pub async fn handle_format_document_with_options(
+        &self,
+        file_path: ClientPath,
+        tab_size: TabSize,
+        insert_spaces: bool,
+        full: bool,
+    ) -> Result<FormatDocumentResult> {
         let doc = self
             .prepare_gated_document(
                 &file_path,
@@ -699,8 +814,12 @@ impl Translator {
         let response =
             document_request::<lsp_types::DocumentFormattingRequest>(&doc, options).await?;
 
+        let mut previews = Previews::new(self, doc.server_id(), full);
+        let document = previews
+            .document(response_uri, response.unwrap_or_default(), None, &ctx)
+            .await;
         Ok(FormatDocumentResult {
-            edits: convert_text_edits(response.unwrap_or_default(), &ctx, &response_uri).await,
+            changes: vec![document],
             positions_degraded: ctx.positions_degraded(),
         })
     }
@@ -721,6 +840,22 @@ impl Translator {
         tab_size: TabSize,
         insert_spaces: bool,
     ) -> Result<FormatDocumentResult> {
+        self.handle_format_range_with_options(file_path, range, tab_size, insert_spaces, false)
+            .await
+    }
+
+    /// Propose edits with bounded previews and optional exact raw edits.
+    ///
+    /// # Errors
+    /// Returns the same routing, position, and server errors as the default handler.
+    pub async fn handle_format_range_with_options(
+        &self,
+        file_path: ClientPath,
+        range: BoundedRange,
+        tab_size: TabSize,
+        insert_spaces: bool,
+        full: bool,
+    ) -> Result<FormatDocumentResult> {
         let options = FormattingOptions {
             tab_size: tab_size.get(),
             insert_spaces,
@@ -740,8 +875,12 @@ impl Translator {
             .await?;
         let response_uri = doc.uri().clone();
 
+        let mut previews = Previews::new(self, doc.server_id(), full);
+        let document = previews
+            .document(response_uri, response.unwrap_or_default(), None, &ctx)
+            .await;
         Ok(FormatDocumentResult {
-            edits: convert_text_edits(response.unwrap_or_default(), &ctx, &response_uri).await,
+            changes: vec![document],
             positions_degraded: ctx.positions_degraded(),
         })
     }
@@ -765,6 +904,21 @@ impl Translator {
         range: BoundedRange,
         kind_filter: Option<CodeActionKindFilter>,
     ) -> Result<CodeActionsResult> {
+        self.handle_code_actions_with_options(file_path, range, kind_filter, false)
+            .await
+    }
+
+    /// Propose edits with bounded previews and optional exact raw edits.
+    ///
+    /// # Errors
+    /// Returns the same routing, position, and server errors as the default handler.
+    pub async fn handle_code_actions_with_options(
+        &self,
+        file_path: ClientPath,
+        range: BoundedRange,
+        kind_filter: Option<CodeActionKindFilter>,
+        full: bool,
+    ) -> Result<CodeActionsResult> {
         let only = kind_filter.map(|k| vec![lsp_types::CodeActionKind::from(k)]);
 
         // Pass empty diagnostics context — rust-analyzer generates code actions
@@ -782,7 +936,7 @@ impl Translator {
             ctx,
             doc,
         } = self
-            .range_request::<lsp_types::CodeActionRequest>(
+            .range_request::<EditRequest<lsp_types::CodeActionRequest>>(
                 &file_path,
                 IndexingGate::Required(Capability::CodeActions),
                 range.range(),
@@ -792,13 +946,23 @@ impl Translator {
         let (server_id, client) = (doc.server_id(), doc.client());
         let response_uri = doc.uri().clone();
         let mut budget = ItemBudget::new();
-        let mut entries = budget.admit(response.unwrap_or_default());
+        let raw: Option<Vec<serde_json::Value>> = decode(response)?;
+        let raw = budget.admit(raw.unwrap_or_default());
+        let mut supplied = raw
+            .iter()
+            .map(|v| v.get("edit").map(versions).unwrap_or_default())
+            .collect::<Vec<_>>();
+        let mut entries = raw
+            .into_iter()
+            .map(decode)
+            .collect::<Result<Vec<lsp_types::CodeActionResponse>>>()?;
         if self.code_action_resolve_supported(server_id) {
-            resolve_deferred_code_actions(&mut entries, client, server_id).await;
+            resolve_deferred_code_actions(&mut entries, &mut supplied, client, server_id).await;
         }
 
         let mut actions = Vec::with_capacity(entries.len());
-        for action_or_command in entries {
+        let mut previews = Previews::new(self, server_id, full);
+        for (index, action_or_command) in entries.into_iter().enumerate() {
             let action = match action_or_command {
                 lsp_types::CodeActionResponse::CodeAction(action) => {
                     convert_code_action(
@@ -807,6 +971,8 @@ impl Translator {
                         &response_uri,
                         &self.workspace_roots,
                         &mut budget,
+                        Some(&mut previews),
+                        supplied.get(index).map_or(&[], Vec::as_slice),
                     )
                     .await
                 }
@@ -829,6 +995,13 @@ impl Translator {
             actions.push(action);
         }
 
+        suppress_degraded(
+            actions
+                .iter_mut()
+                .filter_map(|a| a.edit.as_mut())
+                .flat_map(|e| e.changes.iter_mut()),
+            ctx.positions_degraded(),
+        );
         Ok(CodeActionsResult {
             actions,
             truncated: budget.truncated(),
@@ -889,10 +1062,12 @@ mod tests {
             let path = file_path.to_str().unwrap().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_rename(
+                    .handle_rename_with_options(
                         client_path(path),
                         Position::at(1, 4),
                         NewName::new("new_name").unwrap(),
+                        true,
+                        None,
                     )
                     .await
             })
@@ -948,14 +1123,16 @@ mod tests {
         };
         assert_eq!(changes.len(), 1);
         assert_eq!(
-            changes[0].edits.len(),
+            changes[0].edits.as_ref().unwrap().len(),
             1,
             "the snippet edit must be dropped, not converted to literal text"
         );
-        assert_eq!(changes[0].edits[0].new_text, "new_name");
+        assert_eq!(changes[0].edits.as_ref().unwrap()[0].new_text, "new_name");
         assert!(
             !changes[0]
                 .edits
+                .as_ref()
+                .unwrap()
                 .iter()
                 .any(|e| e.new_text.contains("${1:comment}")),
             "snippet placeholder syntax must never appear as literal replacement text"
@@ -1004,10 +1181,12 @@ mod tests {
             let path = file_path.to_str().unwrap().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_rename(
+                    .handle_rename_with_options(
                         client_path(path),
                         Position::at(1, 4),
                         NewName::new("new_name").unwrap(),
+                        true,
+                        None,
                     )
                     .await
             })
@@ -1091,10 +1270,11 @@ mod tests {
         fs::write(&test_file, "fn main() {}").unwrap();
 
         let result = translator
-            .handle_code_actions(
+            .handle_code_actions_with_options(
                 client_path(test_file.to_str().unwrap()),
                 bounded(Position::at(1, 1), Position::at(1, 10)),
                 Some(CodeActionKindFilter::QuickFix),
+                true,
             )
             .await;
         // Will fail due to no LSP server, but validates kind is accepted
@@ -1115,10 +1295,11 @@ mod tests {
         fs::write(&test_file, "fn main() {}").unwrap();
 
         let result = translator
-            .handle_code_actions(
+            .handle_code_actions_with_options(
                 client_path(test_file.to_str().unwrap()),
                 bounded(Position::at(1, 1), Position::at(1, 10)),
                 Some(CodeActionKindFilter::Refactor),
+                true,
             )
             .await;
         assert!(result.is_err());
@@ -1138,10 +1319,11 @@ mod tests {
         fs::write(&test_file, "fn main() {}").unwrap();
 
         let result = translator
-            .handle_code_actions(
+            .handle_code_actions_with_options(
                 client_path(test_file.to_str().unwrap()),
                 bounded(Position::at(1, 1), Position::at(1, 10)),
                 Some(CodeActionKindFilter::RefactorExtract),
+                true,
             )
             .await;
         assert!(result.is_err());
@@ -1161,10 +1343,11 @@ mod tests {
         fs::write(&test_file, "fn main() {}").unwrap();
 
         let result = translator
-            .handle_code_actions(
+            .handle_code_actions_with_options(
                 client_path(test_file.to_str().unwrap()),
                 bounded(Position::at(1, 1), Position::at(1, 10)),
                 Some(CodeActionKindFilter::SourceOrganizeImports),
+                true,
             )
             .await;
         assert!(result.is_err());
@@ -1185,10 +1368,11 @@ mod tests {
 
         // Empty range (same position) should be valid
         let result = translator
-            .handle_code_actions(
+            .handle_code_actions_with_options(
                 client_path(test_file.to_str().unwrap()),
                 bounded(Position::at(1, 5), Position::at(1, 5)),
                 None,
+                true,
             )
             .await;
         // Will fail due to no LSP server, but validates range is accepted
@@ -1216,6 +1400,8 @@ mod tests {
             &test_uri(),
             &WorkspaceRoots::default(),
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         assert_eq!(result.title, "Fix issue");
@@ -1333,6 +1519,8 @@ mod tests {
             &test_uri(),
             &WorkspaceRoots::default(),
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         assert_eq!(result.diagnostics.len(), 4);
@@ -1403,14 +1591,16 @@ mod tests {
             &test_uri(),
             &workspace_roots,
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         assert!(result.edit.is_some());
         let edit = result.edit.unwrap();
         assert_eq!(edit.changes.len(), 1);
         assert_eq!(edit.changes[0].uri, uri_string);
-        assert_eq!(edit.changes[0].edits.len(), 1);
-        assert_eq!(edit.changes[0].edits[0].new_text, "fixed");
+        assert_eq!(edit.changes[0].edits.as_ref().unwrap().len(), 1);
+        assert_eq!(edit.changes[0].edits.as_ref().unwrap()[0].new_text, "fixed");
         assert!(result.is_preferred);
     }
 
@@ -1471,6 +1661,8 @@ mod tests {
                 &roots,
                 "rename edit",
                 &mut ItemBudget::new(),
+                None,
+                &[],
             )
             .await;
 
@@ -1503,6 +1695,8 @@ mod tests {
             roots,
             "rename edit",
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         (changes.len(), dropped.out_of_workspace)
@@ -1604,14 +1798,16 @@ mod tests {
             &test_uri(),
             &workspace_roots,
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         assert!(result.edit.is_some());
         let edit = result.edit.unwrap();
         assert_eq!(edit.changes.len(), 1);
         assert_eq!(edit.changes[0].uri, uri_string);
-        assert_eq!(edit.changes[0].edits.len(), 1);
-        assert_eq!(edit.changes[0].edits[0].new_text, "fixed");
+        assert_eq!(edit.changes[0].edits.as_ref().unwrap().len(), 1);
+        assert_eq!(edit.changes[0].edits.as_ref().unwrap()[0].new_text, "fixed");
         assert!(result.is_preferred);
     }
 
@@ -1706,6 +1902,8 @@ mod tests {
             &test_uri(),
             &workspace_roots,
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         let edit = result.edit.unwrap();
@@ -1715,7 +1913,10 @@ mod tests {
             "only the `changes` entry should be present"
         );
         assert_eq!(edit.changes[0].uri, changes_uri_string);
-        assert_eq!(edit.changes[0].edits[0].new_text, "from_changes");
+        assert_eq!(
+            edit.changes[0].edits.as_ref().unwrap()[0].new_text,
+            "from_changes"
+        );
         assert_eq!(
             edit.dropped.shadowed_by_changes, 1,
             "a documentChanges entry shadowed by a non-empty changes map must be tallied (#498)"
@@ -1785,6 +1986,8 @@ mod tests {
             &test_uri(),
             &workspace_roots,
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         let edit = result.edit.unwrap();
@@ -1794,7 +1997,7 @@ mod tests {
             "the out-of-workspace entry must be dropped, not forwarded"
         );
         assert_eq!(edit.changes[0].uri, inside_uri_string);
-        assert_eq!(edit.changes[0].edits[0].new_text, "fixed");
+        assert_eq!(edit.changes[0].edits.as_ref().unwrap()[0].new_text, "fixed");
         assert_eq!(
             edit.dropped.out_of_workspace, 1,
             "the dropped out-of-workspace entry must be tallied so callers can tell the code action is incomplete"
@@ -1867,6 +2070,8 @@ mod tests {
             &workspace_roots,
             "rename edit",
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
 
@@ -1927,6 +2132,8 @@ mod tests {
             &workspace_roots,
             "rename edit",
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         assert!(changes.is_empty());
@@ -1947,6 +2154,8 @@ mod tests {
             &workspace_roots,
             "rename edit",
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         assert!(changes.is_empty());
@@ -2023,6 +2232,8 @@ mod tests {
             &workspace_roots,
             "rename edit",
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
 
@@ -2130,6 +2341,8 @@ mod tests {
             &workspace_roots,
             "rename edit",
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
 
@@ -2201,6 +2414,8 @@ mod tests {
             &workspace_roots,
             "rename edit",
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
 
@@ -2291,6 +2506,8 @@ mod tests {
             &test_uri(),
             &WorkspaceRoots::default(),
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await;
         assert!(result.command.is_some());
@@ -2333,10 +2550,11 @@ mod tests {
         fs::write(&path, "fn main() {}").unwrap();
 
         let err = translator
-            .handle_code_actions(
+            .handle_code_actions_with_options(
                 client_path(path.to_string_lossy().into_owned()),
                 bounded(Position::at(1, 1), Position::at(1, 10)),
                 None,
+                true,
             )
             .await
             .unwrap_err();
@@ -2384,10 +2602,11 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_code_actions(
+                    .handle_code_actions_with_options(
                         client_path(path),
                         bounded(Position::at(1, 1), Position::at(1, 10)),
                         Some(CodeActionKindFilter::SourceOrganizeImports),
+                        true,
                     )
                     .await
             })
@@ -2459,10 +2678,11 @@ mod tests {
             let path = file_path.to_str().unwrap().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_code_actions(
+                    .handle_code_actions_with_options(
                         client_path(path),
                         bounded(Position::at(1, 1), Position::at(1, 10)),
                         None,
+                        true,
                     )
                     .await
             })
@@ -2520,7 +2740,10 @@ mod tests {
             .as_ref()
             .expect("edit must be populated by codeAction/resolve");
         assert_eq!(edit.changes.len(), 1);
-        assert_eq!(edit.changes[0].edits[0].new_text, "use std::fmt;\n");
+        assert_eq!(
+            edit.changes[0].edits.as_ref().unwrap()[0].new_text,
+            "use std::fmt;\n"
+        );
     }
 
     /// #432 companion: a server that does not advertise
@@ -2564,10 +2787,11 @@ mod tests {
             let path = file_path.to_str().unwrap().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_code_actions(
+                    .handle_code_actions_with_options(
                         client_path(path),
                         bounded(Position::at(1, 1), Position::at(1, 10)),
                         None,
+                        true,
                     )
                     .await
             })
@@ -2647,10 +2871,11 @@ mod tests {
             let path = file_path.to_str().unwrap().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_code_actions(
+                    .handle_code_actions_with_options(
                         client_path(path),
                         bounded(Position::at(1, 1), Position::at(1, 10)),
                         None,
+                        true,
                     )
                     .await
             })
@@ -2740,10 +2965,11 @@ mod tests {
             let path = file_path.to_str().unwrap().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_code_actions(
+                    .handle_code_actions_with_options(
                         client_path(path),
                         bounded(Position::at(1, 1), Position::at(1, 10)),
                         None,
+                        true,
                     )
                     .await
             })
@@ -2793,7 +3019,10 @@ mod tests {
             .edit
             .as_ref()
             .expect("original edit must be preserved");
-        assert_eq!(edit.changes[0].edits[0].new_text, "use std::fmt;\n");
+        assert_eq!(
+            edit.changes[0].edits.as_ref().unwrap()[0].new_text,
+            "use std::fmt;\n"
+        );
     }
 
     /// #432 companion: an action with `data: None` must never be resolved,
@@ -2841,10 +3070,11 @@ mod tests {
             let path = file_path.to_str().unwrap().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_code_actions(
+                    .handle_code_actions_with_options(
                         client_path(path),
                         bounded(Position::at(1, 1), Position::at(1, 10)),
                         None,
+                        true,
                     )
                     .await
             })
@@ -2913,10 +3143,12 @@ mod tests {
         fs::write(&path, "fn old_name() {}").unwrap();
 
         let err = translator
-            .handle_rename(
+            .handle_rename_with_options(
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 4),
                 NewName::new("new_name").unwrap(),
+                true,
+                None,
             )
             .await
             .unwrap_err();
@@ -2964,10 +3196,12 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_rename(
+                    .handle_rename_with_options(
                         client_path(path),
                         Position::at(1, 4),
                         NewName::new("new_name").unwrap(),
+                        true,
+                        None,
                     )
                     .await
             })
@@ -3037,6 +3271,8 @@ mod tests {
             &roots,
             "rename edit",
             &mut ItemBudget::new(),
+            None,
+            &[],
         )
         .await
     }
@@ -3140,7 +3376,7 @@ mod tests {
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].uri, first);
-        assert_eq!(changes[0].edits.len(), per_file);
+        assert_eq!(changes[0].edits.as_ref().unwrap().len(), per_file);
         assert_eq!(dropped.exceeds_item_cap, per_file);
     }
 
@@ -3158,7 +3394,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(changes[0].edits.len(), MAX_NORMALIZED_LOCATIONS);
+        assert_eq!(
+            changes[0].edits.as_ref().unwrap().len(),
+            MAX_NORMALIZED_LOCATIONS
+        );
         assert!(dropped.is_empty(), "{dropped:?}");
     }
 
@@ -3205,7 +3444,10 @@ mod tests {
         .await;
 
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].edits.len(), MAX_NORMALIZED_LOCATIONS);
+        assert_eq!(
+            changes[0].edits.as_ref().unwrap().len(),
+            MAX_NORMALIZED_LOCATIONS
+        );
         assert_eq!(dropped.exceeds_item_cap, 0);
         assert_eq!(dropped.shadowed_by_changes, 1);
     }
@@ -3229,10 +3471,26 @@ mod tests {
         let roots = WorkspaceRoots::from_paths(&[dir.path().to_path_buf()]).unwrap();
         let mut budget = ItemBudget::new();
 
-        let first =
-            convert_code_action(action("one"), &test_ctx(), &test_uri(), &roots, &mut budget).await;
-        let second =
-            convert_code_action(action("two"), &test_ctx(), &test_uri(), &roots, &mut budget).await;
+        let first = convert_code_action(
+            action("one"),
+            &test_ctx(),
+            &test_uri(),
+            &roots,
+            &mut budget,
+            None,
+            &[],
+        )
+        .await;
+        let second = convert_code_action(
+            action("two"),
+            &test_ctx(),
+            &test_uri(),
+            &roots,
+            &mut budget,
+            None,
+            &[],
+        )
+        .await;
 
         assert!(first.edit.unwrap().dropped.is_empty());
         let second_edit = second.edit.unwrap();

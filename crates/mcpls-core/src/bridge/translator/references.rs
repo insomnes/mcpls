@@ -1,4 +1,4 @@
-//! Bounded source context and lexical selection for references only.
+//! Bounded reference context and contained source acquisition shared with edit previews.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -118,7 +118,7 @@ impl Translator {
                         continue;
                     }
                     let (source, charge) = if let Some(validated) = validated {
-                        self.reference_source_file(validated, source_left, deadline)
+                        self.bounded_source_file(validated, source_left, deadline, FILE_BYTES, None)
                             .await
                     } else if source_left == 0 {
                         (Err(Missing::SourceBudget), 0)
@@ -160,11 +160,13 @@ impl Translator {
         }
     }
 
-    async fn reference_source_file(
+    pub(super) async fn bounded_source_file(
         &self,
         validated: WorkspacePath,
         remaining: usize,
         deadline: std::time::Instant,
+        file_bytes: usize,
+        server: Option<&crate::config::ServerId>,
     ) -> (Result<(String, SourceOrigin), Missing>, usize) {
         if remaining == 0 {
             return (Err(Missing::SourceBudget), 0);
@@ -172,31 +174,70 @@ impl Translator {
         if self.clock.now() >= deadline {
             return (Err(Missing::Deadline), 1);
         }
-        let max = FILE_BYTES.min(remaining);
-        if let Some(snapshot) = self.document_tracker.bounded_text(validated.as_path(), max) {
+        let max = file_bytes.min(remaining);
+        #[cfg(test)]
+        if server.is_some() {
+            crate::util::lock_std(&self.preview_work).source_starts += 1;
+        }
+        let snapshot = self.document_tracker.bounded_observed_text(
+            validated.as_path(),
+            max,
+            server,
+            |bytes| {
+                if self.clock.now() >= deadline {
+                    return false;
+                }
+                #[cfg(test)]
+                if server.is_some() && bytes > 0 {
+                    let mut work = crate::util::lock_std(&self.preview_work);
+                    work.chunk_starts += 1;
+                    work.tracked_bytes += bytes;
+                }
+                let _ = bytes;
+                true
+            },
+        );
+        if let Some(snapshot) = snapshot {
             return match snapshot {
                 Ok(text) => {
                     let charge = text.len();
                     (Ok((text, SourceOrigin::Tracked)), charge)
                 }
                 Err(()) => (
-                    Err(if max < FILE_BYTES {
+                    Err(if self.clock.now() >= deadline {
+                        Missing::Deadline
+                    } else if max < file_bytes {
                         Missing::SourceBudget
                     } else {
                         Missing::FileTooLarge
                     }),
-                    1,
+                    if server.is_some() { max.max(1) } else { 1 },
                 ),
             };
         }
+        self.bounded_disk_source(validated, remaining, deadline, file_bytes, server)
+            .await
+    }
+
+    async fn bounded_disk_source(
+        &self,
+        validated: WorkspacePath,
+        remaining: usize,
+        deadline: std::time::Instant,
+        file_bytes: usize,
+        server: Option<&crate::config::ServerId>,
+    ) -> (Result<(String, SourceOrigin), Missing>, usize) {
+        let _ = server;
         let roots = self.workspace_roots.clone();
         let clock = self.clock.clone();
         // Keep the contained handle for the read. Never reopen a validated path.
-        let read_cap = remaining.min(FILE_BYTES + 1);
+        let read_cap = remaining.min(file_bytes.saturating_add(1));
         #[cfg(test)]
         let hook = self.reference_read_hook;
         #[cfg(test)]
         let work = self.reference_work.clone();
+        #[cfg(test)]
+        let preview_work = server.map(|_| self.preview_work.clone());
         #[cfg(test)]
         let fail_after = self.reference_io_failure_after;
         let result = tokio::task::spawn_blocking(move || {
@@ -211,7 +252,7 @@ impl Translator {
                 .open_contained(&validated)
                 .map_err(|_| Missing::ReadFailed)?;
             let (file, metadata) = file.into_parts();
-            if metadata.len() > FILE_BYTES as u64 {
+            if metadata.len() > file_bytes as u64 {
                 return Err(Missing::FileTooLarge);
             }
             #[cfg(test)]
@@ -232,6 +273,10 @@ impl Translator {
                 if fail_after.is_some_and(|limit| bytes.len() >= limit) {
                     return Err(Missing::ReadFailed);
                 }
+                #[cfg(test)]
+                if let Some(work) = &preview_work {
+                    crate::util::lock_std(work).chunk_starts += 1;
+                }
                 let read = file.read(&mut chunk).map_err(|_| Missing::ReadFailed)?;
                 if read == 0 {
                     break;
@@ -239,6 +284,9 @@ impl Translator {
                 #[cfg(test)]
                 {
                     crate::util::lock_std(&work).read_bytes += read;
+                    if let Some(work) = &preview_work {
+                        crate::util::lock_std(work).read_bytes += read;
+                    }
                 }
                 bytes.extend_from_slice(chunk.get(..read).unwrap_or_default());
             }
@@ -248,11 +296,11 @@ impl Translator {
         match result {
             Ok(Ok(bytes)) => {
                 let charge = bytes.len();
-                if charge > FILE_BYTES {
+                if charge > file_bytes {
                     return (Err(Missing::FileTooLarge), charge);
                 }
                 // Without room for lookahead, EOF cannot be established safely.
-                if charge == read_cap && read_cap <= FILE_BYTES {
+                if charge == read_cap && read_cap <= file_bytes {
                     return (Err(Missing::SourceBudget), charge);
                 }
                 (
