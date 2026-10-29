@@ -39,7 +39,7 @@ while True:
     request = json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
     method = request.get("method")
     params = request.get("params", {})
-    event("request", method=method)
+    event("request", method=method, params=params)
     if method == "exit":
         break
     if method == "textDocument/didOpen":
@@ -56,7 +56,7 @@ while True:
             send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32603, "message": "authored initialize failure"}})
             continue
         result = {"capabilities": {"hoverProvider": True, "definitionProvider": True, "documentSymbolProvider": True,
-                                   "workspaceSymbolProvider": True, "callHierarchyProvider": True}}
+                                   "workspaceSymbolProvider": True, "callHierarchyProvider": True, "typeHierarchyProvider": True}}
     elif method == "textDocument/hover":
         event("hover")
         wait_for_release(root / ".hold-response")
@@ -66,14 +66,16 @@ while True:
                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
                    "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}
                   for index in range(3)]
-    elif method == "textDocument/prepareCallHierarchy":
-        result = [{"name": "entry", "kind": 12, "uri": params["textDocument"]["uri"], "data": {"marker": (root / "marker").read_text()},
+    elif method in ("textDocument/prepareCallHierarchy", "textDocument/prepareTypeHierarchy"):
+        result = [{"name": "entry", "kind": 12, "uri": params["textDocument"]["uri"], "data": {"marker": (root / "marker").read_text(), "server_pid": os.getpid()},
                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
                    "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}]
     elif method == "callHierarchy/incomingCalls":
         result = [{"from": params["item"], "fromRanges": [params["item"]["range"]]}]
     elif method == "callHierarchy/outgoingCalls":
         result = [{"to": params["item"], "fromRanges": [params["item"]["range"]]}]
+    elif method in ("typeHierarchy/supertypes", "typeHierarchy/subtypes"):
+        result = [params["item"]]
     elif method == "workspace/symbol":
         result = []
     else:

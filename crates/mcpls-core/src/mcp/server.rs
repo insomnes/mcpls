@@ -1358,8 +1358,24 @@ impl McplsServer {
     async fn get_incoming_calls(
         &self,
         Parameters(params): Parameters<CallHierarchyCallsParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<Json<CallHierarchyCallsResult<IncomingCallsResult>>, McpError> {
-        self.call_hierarchy_calls(params, |item| {
+        self.get_incoming_calls_with_origin(
+            Parameters(params),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
+        )
+        .await
+    }
+
+    async fn get_incoming_calls_with_origin(
+        &self,
+        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+    ) -> Result<Json<CallHierarchyCallsResult<IncomingCallsResult>>, McpError> {
+        self.call_hierarchy_calls(params, origin, |item| {
             self.context.translator.handle_incoming_calls(item)
         })
         .await
@@ -1373,8 +1389,24 @@ impl McplsServer {
     async fn get_outgoing_calls(
         &self,
         Parameters(params): Parameters<CallHierarchyCallsParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<Json<CallHierarchyCallsResult<OutgoingCallsResult>>, McpError> {
-        self.call_hierarchy_calls(params, |item| {
+        self.get_outgoing_calls_with_origin(
+            Parameters(params),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
+        )
+        .await
+    }
+
+    async fn get_outgoing_calls_with_origin(
+        &self,
+        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+    ) -> Result<Json<CallHierarchyCallsResult<OutgoingCallsResult>>, McpError> {
+        self.call_hierarchy_calls(params, origin, |item| {
             self.context.translator.handle_outgoing_calls(item)
         })
         .await
@@ -1410,8 +1442,24 @@ impl McplsServer {
     async fn get_supertypes(
         &self,
         Parameters(params): Parameters<TypeHierarchyWalkParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
-        self.type_hierarchy_walk(params, |item| {
+        self.get_supertypes_with_origin(
+            Parameters(params),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
+        )
+        .await
+    }
+
+    async fn get_supertypes_with_origin(
+        &self,
+        Parameters(params): Parameters<TypeHierarchyWalkParams>,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
+        self.type_hierarchy_walk(params, origin, |item| {
             self.context.translator.handle_supertypes(item)
         })
         .await
@@ -1425,9 +1473,27 @@ impl McplsServer {
     async fn get_subtypes(
         &self,
         Parameters(params): Parameters<TypeHierarchyWalkParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
-        self.type_hierarchy_walk(params, |item| self.context.translator.handle_subtypes(item))
-            .await
+        self.get_subtypes_with_origin(
+            Parameters(params),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
+        )
+        .await
+    }
+
+    async fn get_subtypes_with_origin(
+        &self,
+        Parameters(params): Parameters<TypeHierarchyWalkParams>,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
+        self.type_hierarchy_walk(params, origin, |item| {
+            self.context.translator.handle_subtypes(item)
+        })
+        .await
     }
 
     /// Get all occurrences of the symbol at a position within one file.
@@ -1774,7 +1840,8 @@ impl McplsServer {
         request: SubscribeRequestParams,
         context: rmcp::service::RequestContext<RoleServer>,
         resolved: Option<ResolvedResource>,
-    ) -> Result<(), McpError> {
+        lease: Option<crate::dispatcher::Lease>,
+    ) -> Result<super::session::SubscriptionRollback, McpError> {
         contain_panic(
             async {
                 let session = self.context.session.require_stateful(&context)?;
@@ -1801,16 +1868,11 @@ impl McplsServer {
                 // The raw request URI is recorded as an alias of the canonical one so a later
                 // `unsubscribe` for the same raw URI still resolves even if canonicalizing it then
                 // fails, e.g. because the file was deleted since subscribing (#499).
-                let newly_subscribed = session
-                    .subscribe(canonical_uri.clone(), request.uri.clone())
+                let rollback = session
+                    .begin_subscribe(canonical_uri.clone(), request.uri.clone(), lease)
                     .await
                     .map_err(|e| self.render_error(e.into()))?;
-                let mut rollback = session.rollback_new(
-                    newly_subscribed,
-                    canonical_uri.clone(),
-                    request.uri.clone(),
-                );
-                if !newly_subscribed {
+                if !rollback.newly_created() {
                     tracing::debug!(
                         "client re-subscribed to already-subscribed resource {canonical_uri}"
                     );
@@ -1829,11 +1891,6 @@ impl McplsServer {
                     .diagnostics_route_for_path(&validated_path)
                     .into_startup_failure()
                 {
-                    if newly_subscribed {
-                        session
-                            .unsubscribe(Some(&canonical_uri), &request.uri)
-                            .await;
-                    }
                     return Err(
                         self.render_error(crate::error::Error::ServerFailedToStart(failure))
                     );
@@ -1859,8 +1916,7 @@ impl McplsServer {
                     tracing::warn!("Failed to replay cached diagnostics for {canonical_uri}: {e}");
                 }
 
-                rollback.commit();
-                Ok(())
+                Ok(rollback)
             },
             "subscribe",
         )
@@ -1917,6 +1973,7 @@ impl McplsServer {
     async fn call_hierarchy_calls<T, F, Fut>(
         &self,
         params: CallHierarchyCallsParams,
+        origin: Option<crate::bridge::HierarchyOrigin>,
         walk: F,
     ) -> Result<Json<CallHierarchyCallsResult<T>>, McpError>
     where
@@ -1927,7 +1984,7 @@ impl McplsServer {
         let target = match params {
             CallHierarchyCallsParams::Item { item } => {
                 return self.structured_result(
-                    walk(parse_hierarchy_item(item)?)
+                    walk(parse_hierarchy_item(item)?.with_origin(origin))
                         .await
                         .map(CallHierarchyCallsResult::Legacy),
                 );
@@ -1994,6 +2051,7 @@ impl McplsServer {
     async fn type_hierarchy_walk<F, Fut>(
         &self,
         params: TypeHierarchyWalkParams,
+        origin: Option<crate::bridge::HierarchyOrigin>,
         walk: F,
     ) -> Result<Json<TypeHierarchyWalkResult>, McpError>
     where
@@ -2003,7 +2061,7 @@ impl McplsServer {
         let target = match params {
             TypeHierarchyWalkParams::Item { item } => {
                 return self.structured_result(
-                    walk(parse_hierarchy_item(item)?)
+                    walk(parse_hierarchy_item(item)?.with_origin(origin))
                         .await
                         .map(TypeHierarchyWalkResult::Legacy),
                 );
@@ -2440,26 +2498,62 @@ impl ServerHandler for McplsServer {
         request: SubscribeRequestParams,
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
-        if let Some(dispatcher) = &self.dispatcher {
-            let (lease, server, resolved) = self.resource_session(&request.uri).await?;
-            let ct = context.ct.clone();
-            let invalid = lease.resident.cancel();
-            #[allow(
-                deprecated,
-                reason = "delegates the legacy protocol method to its scoped runtime"
-            )]
-            let result = tokio::select! {
-                ()=ct.cancelled()=>Err(McpError::new(ErrorCode(-32800),"subscription request cancelled",None)),
-                ()=invalid.cancelled()=>Err(McpError::new(ErrorCode(-32056),"workspace invalidated while subscribing",Some(serde_json::json!({"code":"workspace_invalidated","retryable":true})))),
-                result=server.subscribe_resolved(request,context,Some(resolved))=>result,
-            };
-            dispatcher
-                .validate(&lease.resident)
-                .await
-                .map_err(crate::dispatcher::DispatchError::wire)?;
-            return result;
-        }
-        self.subscribe_resolved(request, context, None).await
+        let ct = context.ct.clone();
+        let peer = context.peer.clone();
+        let handler = Box::pin(async {
+            if let Some(dispatcher) = &self.dispatcher {
+                let (lease, server, resolved) = self.resource_session(&request.uri).await?;
+                let resident = lease.resident.clone();
+                let invalid = resident.cancel();
+                let registration = async {
+                    let mut rollback = server
+                        .subscribe_resolved(request, context, Some(resolved), Some(lease))
+                        .await?;
+                    dispatcher
+                        .validate(&resident)
+                        .await
+                        .map_err(crate::dispatcher::DispatchError::wire)?;
+                    if ct.is_cancelled() || peer.is_transport_closed() {
+                        return Err(McpError::new(
+                            ErrorCode(-32800),
+                            "subscription request cancelled",
+                            None,
+                        ));
+                    }
+                    rollback.commit();
+                    drop(rollback);
+                    Ok(())
+                };
+                tokio::select! {
+                    biased;
+                    ()=invalid.cancelled()=>Err(McpError::new(ErrorCode(-32056), "workspace invalidated while subscribing", Some(serde_json::json!({"code":"workspace_invalidated","retryable":true})))),
+                    result=registration=>result,
+                }
+            } else {
+                let mut rollback = self
+                    .subscribe_resolved(request, context, None, None)
+                    .await?;
+                if ct.is_cancelled() || peer.is_transport_closed() {
+                    return Err(McpError::new(
+                        ErrorCode(-32800),
+                        "subscription request cancelled",
+                        None,
+                    ));
+                }
+                rollback.commit();
+                drop(rollback);
+                Ok(())
+            }
+        });
+        run_cancellable(&ct, &self.stop, peer_closed(&peer), handler)
+            .await
+            .unwrap_or_else(|_| {
+                Err(McpError::new(
+                    ErrorCode(-32800),
+                    "subscription request cancelled",
+                    None,
+                ))
+            })
     }
 
     async fn unsubscribe(
@@ -3115,15 +3209,21 @@ mod tests {
                     .await
                     .map(|_| ()),
                 server
-                    .get_incoming_calls(Parameters(CallHierarchyCallsParams::Target(
-                        position(line, character).into(),
-                    )))
+                    .get_incoming_calls_with_origin(
+                        Parameters(CallHierarchyCallsParams::Target(
+                            position(line, character).into(),
+                        )),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
-                    .get_outgoing_calls(Parameters(CallHierarchyCallsParams::Target(
-                        position(line, character).into(),
-                    )))
+                    .get_outgoing_calls_with_origin(
+                        Parameters(CallHierarchyCallsParams::Target(
+                            position(line, character).into(),
+                        )),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
@@ -3221,27 +3321,39 @@ mod tests {
         ] {
             let results = [
                 server
-                    .get_incoming_calls(Parameters(CallHierarchyCallsParams::Item {
-                        item: item_json(range, selection),
-                    }))
+                    .get_incoming_calls_with_origin(
+                        Parameters(CallHierarchyCallsParams::Item {
+                            item: item_json(range, selection),
+                        }),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
-                    .get_outgoing_calls(Parameters(CallHierarchyCallsParams::Item {
-                        item: item_json(range, selection),
-                    }))
+                    .get_outgoing_calls_with_origin(
+                        Parameters(CallHierarchyCallsParams::Item {
+                            item: item_json(range, selection),
+                        }),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
-                    .get_supertypes(Parameters(TypeHierarchyWalkParams::Item {
-                        item: item_json(range, selection),
-                    }))
+                    .get_supertypes_with_origin(
+                        Parameters(TypeHierarchyWalkParams::Item {
+                            item: item_json(range, selection),
+                        }),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
-                    .get_subtypes(Parameters(TypeHierarchyWalkParams::Item {
-                        item: item_json(range, selection),
-                    }))
+                    .get_subtypes_with_origin(
+                        Parameters(TypeHierarchyWalkParams::Item {
+                            item: item_json(range, selection),
+                        }),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
             ];
@@ -3419,7 +3531,10 @@ mod tests {
         };
         let call = |item| async {
             server
-                .get_incoming_calls(Parameters(CallHierarchyCallsParams::Item { item }))
+                .get_incoming_calls_with_origin(
+                    Parameters(CallHierarchyCallsParams::Item { item }),
+                    None,
+                )
                 .await
                 .map(|_| ())
         };
@@ -4571,7 +4686,7 @@ mod tests {
         let params = Parameters(CallHierarchyCallsParams::Item {
             item: serde_json::from_value(item).unwrap(),
         });
-        let result = server.get_incoming_calls(params).await;
+        let result = server.get_incoming_calls_with_origin(params, None).await;
         assert!(result.is_err());
     }
 
@@ -4595,7 +4710,7 @@ mod tests {
         let params = Parameters(CallHierarchyCallsParams::Item {
             item: serde_json::from_value(item).unwrap(),
         });
-        let result = server.get_outgoing_calls(params).await;
+        let result = server.get_outgoing_calls_with_origin(params, None).await;
         assert!(result.is_err());
     }
 
@@ -8242,11 +8357,11 @@ sleep 0.3
                 .await
                 .map(|_| ()),
             McpTool::GetIncomingCalls => server
-                .get_incoming_calls(Parameters(item()))
+                .get_incoming_calls_with_origin(Parameters(item()), None)
                 .await
                 .map(|_| ()),
             McpTool::GetOutgoingCalls => server
-                .get_outgoing_calls(Parameters(item()))
+                .get_outgoing_calls_with_origin(Parameters(item()), None)
                 .await
                 .map(|_| ()),
             McpTool::PrepareTypeHierarchy => server
@@ -8254,11 +8369,11 @@ sleep 0.3
                 .await
                 .map(|_| ()),
             McpTool::GetSupertypes => server
-                .get_supertypes(Parameters(type_item()))
+                .get_supertypes_with_origin(Parameters(type_item()), None)
                 .await
                 .map(|_| ()),
             McpTool::GetSubtypes => server
-                .get_subtypes(Parameters(type_item()))
+                .get_subtypes_with_origin(Parameters(type_item()), None)
                 .await
                 .map(|_| ()),
             McpTool::GetDocumentHighlights => server

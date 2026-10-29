@@ -103,50 +103,82 @@ impl McplsServer {
         let mut languages = std::collections::BTreeSet::new();
         let mut grouped = std::collections::BTreeMap::<String, Vec<Value>>::new();
         for config in dispatcher.configured_profiles() {
-            let router = crate::config::ToolRouter::from_configs(&config.lsp_servers)
-                .map_err(|e| self.render_error(e))?;
-            let translator = crate::bridge::Translator::new()
-                .with_router(router)
-                .with_extensions(config.build_effective_language_map());
-            translator.set_expected_servers(
-                config
-                    .lsp_servers
-                    .iter()
-                    .map(crate::config::LspServerConfig::id)
-                    .collect(),
-            );
-            let snapshot = translator.tool_support_snapshot();
-            let languages_in_profile = snapshot.languages();
-            languages.extend(languages_in_profile.iter().map(ToString::to_string));
-            let report = super::ToolSupportReport::build(
-                &snapshot,
-                &languages_in_profile,
-                self.context.mcp.tool_prefix.as_ref(),
-                self.context.mcp.tool_profile,
-            );
-            let report = serde_json::to_value(report)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            for tool in report
-                .get("tools")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let Some(name) = tool.get("name").and_then(Value::as_str) else {
-                    continue;
-                };
-                let entries = grouped.entry(name.to_string()).or_default();
-                for route in tool
-                    .get("routes")
+            // Without a selected workspace these are alternatives, not one live router.
+            for alternative in &config.lsp_servers {
+                let router = crate::config::ToolRouter::from_configs([alternative])
+                    .map_err(|e| self.render_error(e))?;
+                let translator = crate::bridge::Translator::new()
+                    .with_router(router)
+                    .with_extensions(config.build_effective_language_map());
+                translator.set_expected_servers(std::iter::once(alternative.id()).collect());
+                let snapshot = translator.tool_support_snapshot();
+                let languages_in_profile = snapshot.languages();
+                languages.extend(languages_in_profile.iter().map(ToString::to_string));
+                let report = super::ToolSupportReport::build(
+                    &snapshot,
+                    &languages_in_profile,
+                    self.context.mcp.tool_prefix.as_ref(),
+                    self.context.mcp.tool_profile,
+                );
+                let report = serde_json::to_value(report)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                for tool in report
+                    .get("tools")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
                 {
-                    if !entries.contains(route) {
-                        entries.push(route.clone());
+                    let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let entries = grouped.entry(name.to_string()).or_default();
+                    for route in tool
+                        .get("routes")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if !entries.contains(route) {
+                            entries.push(route.clone());
+                        }
                     }
                 }
             }
+        }
+        // An alternative with no claim must not negate another possible route.
+        for routes in grouped.values_mut() {
+            let mut possible = std::collections::BTreeSet::new();
+            let mut workspace_possible = false;
+            for route in routes
+                .iter()
+                .filter(|route| route["status"] == "initializing")
+            {
+                if let Some(languages) = route["languages"].as_array() {
+                    possible.extend(
+                        languages
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned),
+                    );
+                } else {
+                    workspace_possible = true;
+                }
+            }
+            routes.retain_mut(|route| {
+                if route["status"] != "no_server" {
+                    return true;
+                }
+                route["languages"]
+                    .as_array_mut()
+                    .map_or(!workspace_possible, |languages| {
+                        languages.retain(|language| {
+                            !language
+                                .as_str()
+                                .is_some_and(|language| possible.contains(language))
+                        });
+                        !languages.is_empty()
+                    })
+            });
         }
         let tools=self.tool_router.list_all().iter().map(|tool| {
             let plain=self.unprefixed(&tool.name);
@@ -272,7 +304,7 @@ impl McplsServer {
         file: Option<PathBuf>,
         name: String,
         request: CallToolRequestParams,
-        context: rmcp::service::RequestContext<RoleServer>,
+        mut context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let dispatcher = self.require_dispatcher()?;
         let resident = &lease.resident;
@@ -304,6 +336,7 @@ impl McplsServer {
             .await
             .map_err(DispatchError::wire)?;
         let server = self.runtime_session(&lease).await?;
+        let continuation = origin.is_some();
         let origin = if let Some(origin) = origin {
             Some(origin)
         } else if let (Some(file), Some(tool)) = (&file, tool) {
@@ -327,6 +360,19 @@ impl McplsServer {
         let incarnation = origin
             .as_ref()
             .and_then(|origin| resident.incarnation(origin));
+        if continuation {
+            let authenticated = origin
+                .as_ref()
+                .zip(incarnation.as_ref())
+                .and_then(|(origin, incarnation)| {
+                    server
+                        .context
+                        .translator
+                        .hierarchy_origin(origin, incarnation)
+                })
+                .ok_or_else(|| DispatchError::stale().wire())?;
+            context.extensions.insert(authenticated);
+        }
         let invalid = resident.cancel();
         let mut result = tokio::select! {
             ()=invalid.cancelled()=>return Err(McpError::new(ErrorCode(-32056),"workspace invalidated while request was pending",Some(json!({"code":"workspace_invalidated","retryable":true})))),

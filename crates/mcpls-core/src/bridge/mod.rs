@@ -69,8 +69,8 @@ pub use translator::{
     SymbolTarget, TabSize, TextEdit, TextField, Translator, TypeHierarchyResult, UnavailableReason,
 };
 pub(crate) use translator::{
-    CallHierarchyPrepareResult, CodeActionsResult, DiagnosticsRole, IncomingCallsResult,
-    InlayHintsResult, Interest, MAX_COMPANION_FILES, MAX_SWEPT_FILES_PER_TICK,
+    CallHierarchyPrepareResult, CodeActionsResult, DiagnosticsRole, HierarchyOrigin,
+    IncomingCallsResult, InlayHintsResult, Interest, MAX_COMPANION_FILES, MAX_SWEPT_FILES_PER_TICK,
     NotificationReceivers, NotificationWiring, OutgoingCallsResult, SWEEP_INTERVAL,
     ServerLogsResult, ServerMessagesResult, SignatureHelpResult, SweepContext, SweepMemo,
     ToolSupportSnapshot, WorkspaceSymbolResult,

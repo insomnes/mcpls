@@ -370,6 +370,7 @@ fn take_one(pending: &StdMutex<HashSet<DiagnosticsResourceUri>>) -> Option<Diagn
 /// Subscription set and delivery channel of one MCP session.
 #[derive(Debug, Default)]
 pub struct SessionState {
+    subscription_mutations: Arc<tokio::sync::Mutex<()>>,
     subs: ResourceSubscriptions,
     delivery: OnceLock<Delivery>,
 }
@@ -756,6 +757,7 @@ impl ListenPermit {
         target: impl FnOnce(Arc<ListenUris>) -> Target,
     ) -> ListenRegistration {
         let state = Arc::new(SessionState {
+            subscription_mutations: Arc::default(),
             subs: ResourceSubscriptions::from_canonical(
                 uris.canonical().map(|(uri, _)| uri.clone()),
             ),
@@ -907,8 +909,13 @@ pub struct SubscriptionRollback {
     uri: DiagnosticsResourceUri,
     raw: String,
     armed: bool,
+    mutation: Option<tokio::sync::OwnedMutexGuard<()>>,
+    lease: Option<crate::dispatcher::Lease>,
 }
 impl SubscriptionRollback {
+    pub(crate) const fn newly_created(&self) -> bool {
+        self.armed
+    }
     pub(crate) const fn commit(&mut self) {
         self.armed = false;
     }
@@ -919,43 +926,46 @@ impl Drop for SubscriptionRollback {
             let state = self.state.clone();
             let uri = self.uri.clone();
             let raw = self.raw.clone();
+            let mutation = self.mutation.take();
+            let lease = self.lease.take();
             tokio::spawn(async move {
                 state.unsubscribe(Some(&uri), &raw).await;
+                drop(mutation);
+                drop(lease);
             });
         }
     }
 }
 
 impl StatefulSession<'_> {
-    pub(crate) fn rollback_new(
-        &self,
-        armed: bool,
-        uri: DiagnosticsResourceUri,
-        raw: String,
-    ) -> SubscriptionRollback {
-        SubscriptionRollback {
-            state: self.handle.state.clone(),
-            uri,
-            raw,
-            armed,
-        }
-    }
-    /// Records a subscription to `canonical` (reachable from the client as
-    /// `raw`), binding delivery and registering the session first.
-    ///
-    /// Returns whether the URI was newly subscribed.
-    pub(crate) async fn subscribe(
+    /// Serialize registration and its commit/rollback within this session.
+    /// Admission and LSP startup happen before acquiring this local permit.
+    pub(crate) async fn begin_subscribe(
         &self,
         canonical: DiagnosticsResourceUri,
         raw: String,
-    ) -> Result<bool, SubscriptionError> {
+        lease: Option<crate::dispatcher::Lease>,
+    ) -> Result<SubscriptionRollback, SubscriptionError> {
+        let mutation = self
+            .handle
+            .state
+            .subscription_mutations
+            .clone()
+            .lock_owned()
+            .await;
+        let mut rollback = SubscriptionRollback {
+            state: self.handle.state.clone(),
+            uri: canonical.clone(),
+            raw: raw.clone(),
+            armed: false,
+            mutation: Some(mutation),
+            lease,
+        };
         self.handle
             .ensure_delivery(|| Target::Peer(self.peer.clone()));
-        let newly = self.handle.state.subs.subscribe(canonical.clone()).await?;
-        let mut rollback = self.rollback_new(newly, canonical.clone(), raw.clone());
+        rollback.armed = self.handle.state.subs.subscribe(canonical.clone()).await?;
         self.handle.state.subs.record_alias(raw, &canonical).await;
-        rollback.commit();
-        Ok(newly)
+        Ok(rollback)
     }
 
     /// Removes the subscription `canonical` or the recorded alias `raw`
@@ -971,6 +981,7 @@ impl StatefulSession<'_> {
         canonical: Option<&DiagnosticsResourceUri>,
         raw: &str,
     ) -> bool {
+        let _mutation = self.handle.state.subscription_mutations.lock().await;
         self.handle.state.unsubscribe(canonical, raw).await
     }
 }

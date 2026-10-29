@@ -1185,6 +1185,29 @@ impl Translator {
             .await
     }
 
+    pub(super) async fn prepare_origin_document(
+        &self,
+        path: &WorkspacePath,
+        origin: &super::HierarchyOrigin,
+        gate: IndexingGate,
+    ) -> Result<PreparedDocument> {
+        self.require_hierarchy_origin(origin)?;
+        check_capability(
+            &origin.server,
+            Some(&origin.capabilities),
+            gate.capability(),
+        )?;
+        self.wait_for_indexing_ready(&origin.server).await?;
+        self.require_hierarchy_origin(origin)?;
+        self.open_prepared(
+            origin.server.clone(),
+            origin.client.clone(),
+            path,
+            Access::Use,
+        )
+        .await
+    }
+
     /// Opens `file_path` for a name-resolving tool that discloses indexing
     /// instead of waiting for it, after the capability gate and the line check
     /// of every one of `positions`.

@@ -94,6 +94,15 @@ pub use restart::{
 pub use routing::Capability;
 pub use support::{RouteSupport, ToolSupportSnapshot};
 
+/// Authenticated connection snapshot for a dispatcher hierarchy follow-up.
+#[derive(Debug, Clone)]
+pub struct HierarchyOrigin {
+    server: ServerId,
+    client: crate::lsp::LspClient,
+    capabilities: Arc<lsp_types::ServerCapabilities>,
+    encoding: EncodingCtx,
+}
+
 /// Translator handles MCP tool calls by converting them to LSP requests.
 ///
 /// All fields use interior mutability so `Translator` can be shared via a
@@ -352,6 +361,46 @@ impl Translator {
                 server.dispatcher_connection(),
             )
         })
+    }
+
+    pub(crate) fn hierarchy_origin(
+        &self,
+        id: &ServerId,
+        incarnation: &str,
+    ) -> Option<HierarchyOrigin> {
+        let mut servers = lock_std(&self.servers);
+        let server = servers.server_mut(id)?;
+        if server.is_dead().unwrap_or(true) || server.dispatcher_connection() != incarnation {
+            return None;
+        }
+        let origin = HierarchyOrigin {
+            server: id.clone(),
+            client: server.client().clone(),
+            capabilities: Arc::new(server.capabilities().clone()),
+            encoding: EncodingCtx::new(
+                PositionEncoding::from_lsp(server.position_encoding().as_str())
+                    .unwrap_or(PositionEncoding::Utf16),
+                self.document_tracker.clone(),
+                self.workspace_roots.clone(),
+            ),
+        };
+        drop(servers);
+        Some(origin)
+    }
+
+    fn require_hierarchy_origin(&self, origin: &HierarchyOrigin) -> crate::error::Result<()> {
+        if self
+            .dispatcher_server(&origin.server)
+            .is_some_and(|(alive, incarnation)| {
+                alive && incarnation == format!("{:?}", origin.client.connection_id())
+            })
+        {
+            Ok(())
+        } else {
+            Err(crate::Error::ServerRestarted {
+                server_id: origin.server.clone(),
+            })
+        }
     }
 
     /// Every recorded startup failure, ordered by routing identity.

@@ -1386,6 +1386,7 @@ pub enum InvalidHierarchyItem {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CheckedHierarchyItem {
+    pub(super) origin: Option<super::HierarchyOrigin>,
     pub(super) name: String,
     pub(super) kind: u32,
     pub(super) detail: Option<String>,
@@ -1407,6 +1408,7 @@ impl CheckedHierarchyItem {
         let selection_range =
             checked_range(&item.selection_range).map_err(InvalidHierarchyItem::SelectionRange)?;
         Ok(Self {
+            origin: None,
             name: item.name,
             kind: item.kind,
             detail: item.detail,
@@ -1415,6 +1417,11 @@ impl CheckedHierarchyItem {
             selection_range,
             data: item.data,
         })
+    }
+
+    pub(crate) fn with_origin(mut self, origin: Option<super::HierarchyOrigin>) -> Self {
+        self.origin = origin;
+        self
     }
 
     /// The item's document URI, as the client sent it.

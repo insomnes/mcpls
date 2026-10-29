@@ -770,6 +770,16 @@ async fn demand_uses_marker_filtered_and_settled_routes() {
     std::fs::write(&fixture.profile, format!("{working}\n{working}name='absent'\n[lsp_servers.heuristics]\nproject_markers=['ABSENT-MARKER']\n")).unwrap();
     let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
     let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let support = call(&client, "get_tool_support", json!({})).await.unwrap();
+    assert_eq!(support["basis"], "configured");
+    assert_eq!(fixture.events().len(), 0);
+    assert!(
+        support["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "get_hover" && tool["coverage"] == "unknown")
+    );
     assert!(
         call(&client, "get_hover", hover(&fixture.main))
             .await
@@ -1105,4 +1115,219 @@ async fn lost_route_keeps_demand_only_backoff_and_recovery() {
     dispatcher.shutdown().await;
     client.cancel().await.unwrap();
     task.await.unwrap();
+}
+
+/// Authentic opaque items stay on their producer after an explicit provider recovers.
+#[tokio::test]
+async fn hierarchy_followups_keep_producer_after_route_recovery() {
+    let fixture = Fixture::new(4);
+    let working = std::fs::read_to_string(&fixture.profile).unwrap();
+    let other_events = fixture.main.parent().unwrap().join("explicit.jsonl");
+    let explicit = working.replace(
+        &format!("{:?}", fixture.events),
+        &format!("{other_events:?}"),
+    );
+    std::fs::write(
+        &fixture.profile,
+        format!(
+            "{working}\n{explicit}name='explicit'\nhandles=['call_hierarchy','type_hierarchy']\n"
+        ),
+    )
+    .unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    call(&client, "get_hover", hover(&fixture.main))
+        .await
+        .unwrap();
+    std::fs::write(fixture.main.join(".fail-start"), "").unwrap();
+    error_code(
+        call(&client, "get_incoming_calls", hover(&fixture.main))
+            .await
+            .unwrap_err(),
+        "workspace_unavailable",
+    );
+    std::fs::remove_file(fixture.main.join(".fail-start")).unwrap();
+    let mut items = Vec::new();
+    for (method, field) in [
+        ("get_incoming_calls", "from"),
+        ("get_outgoing_calls", "to"),
+        ("get_supertypes", ""),
+        ("get_subtypes", ""),
+    ] {
+        let result = call(&client, method, hover(&fixture.main)).await.unwrap();
+        let item = if field.is_empty() {
+            result["items"][0].clone()
+        } else {
+            result["calls"][0][field].clone()
+        };
+        assert!(item["dispatcher_context"].is_string(), "{result}");
+        items.push((method, item));
+    }
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while call(
+            &client,
+            "get_tool_support",
+            json!({"file_path":fixture.main.join("file.py")}),
+        )
+        .await
+        .is_err()
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = std::fs::read_to_string(&other_events)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    for (method, item) in &items {
+        call(&client, method, json!({"item":item})).await.unwrap();
+    }
+    let methods = [
+        "callHierarchy/incomingCalls",
+        "callHierarchy/outgoingCalls",
+        "typeHierarchy/supertypes",
+        "typeHierarchy/subtypes",
+    ];
+    let events: Vec<Value> = std::fs::read_to_string(&other_events)
+        .unwrap()
+        .lines()
+        .skip(before)
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(
+        !events
+            .iter()
+            .any(|event| methods.contains(&event["method"].as_str().unwrap_or_default())),
+        "opaque item reached recovered provider: {events:?}"
+    );
+    call(
+        &client,
+        "restart_server",
+        json!({"workspace_path":fixture.main,"servers":["python"]}),
+    )
+    .await
+    .unwrap();
+    for (method, item) in items {
+        error_code(
+            call(&client, method, json!({"item":item}))
+                .await
+                .unwrap_err(),
+            "stale_continuation",
+        );
+    }
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+async fn wait_activity(client: &Client, active: usize, state: Option<&str>) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status = call(client, "get_workspace_status", json!({}))
+                .await
+                .unwrap();
+            let row = &status["workspaces"][0];
+            if row["active_requests"] == active
+                && state.is_none_or(|state| row["servers"][0]["state"] == state)
+            {
+                break row.clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+/// Cold cancellation cannot add a pin; shared start and overlapping successful callers survive.
+#[tokio::test]
+#[allow(
+    deprecated,
+    reason = "covers stateful resources subscription cancellation"
+)]
+async fn cold_subscribe_cancellation_preserves_survivors_and_committed_pins() {
+    for mode in 0..3 {
+        let fixture = Fixture::new(4);
+        std::fs::write(fixture.main.join(".hold-start"), "").unwrap();
+        let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+        let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+        let uri = crate::bridge::resources::make_uri(&fixture.main.join("file.py")).unwrap();
+        let request = || {
+            serde_json::from_value(json!({"method":"resources/subscribe","params":{"uri":uri}}))
+                .unwrap()
+        };
+        let first = client
+            .peer()
+            .send_cancellable_request(request(), rmcp::service::PeerRequestOptions::no_options())
+            .await
+            .unwrap();
+        fixture.wait_event("initialize", 1).await;
+        let second = if mode > 0 {
+            Some(
+                client
+                    .peer()
+                    .send_cancellable_request(
+                        request(),
+                        rmcp::service::PeerRequestOptions::no_options(),
+                    )
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        if mode > 0 {
+            wait_activity(&client, 2, Some("starting")).await;
+        }
+        first.cancel(None).await.unwrap();
+        let second = if mode == 2 {
+            second.unwrap().cancel(None).await.unwrap();
+            None
+        } else {
+            second
+        };
+        let pending = usize::from(mode == 1);
+        let held = wait_activity(&client, pending, Some("starting")).await;
+        assert_eq!(held["subscriptions"], 0);
+        std::fs::remove_file(fixture.main.join(".hold-start")).unwrap();
+        if let Some(second) = second {
+            second.await_response().await.unwrap();
+        } else {
+            call(&client, "get_hover", hover(&fixture.main))
+                .await
+                .unwrap();
+        }
+        let expected = usize::from(mode == 1);
+        let settled = wait_activity(&client, 0, Some("ready")).await;
+        assert_eq!(settled["subscriptions"], expected);
+        if mode == 1 {
+            let duplicate = client
+                .peer()
+                .send_cancellable_request(
+                    request(),
+                    rmcp::service::PeerRequestOptions::no_options(),
+                )
+                .await
+                .unwrap();
+            duplicate.cancel(None).await.unwrap();
+            let status = call(&client, "get_workspace_status", json!({}))
+                .await
+                .unwrap();
+            assert_eq!(status["workspaces"][0]["subscriptions"], 1);
+            client
+                .peer()
+                .unsubscribe(rmcp::model::UnsubscribeRequestParams::new(uri))
+                .await
+                .unwrap();
+            let status = call(&client, "get_workspace_status", json!({}))
+                .await
+                .unwrap();
+            assert_eq!(status["workspaces"][0]["subscriptions"], 0);
+        }
+        dispatcher.shutdown().await;
+        client.cancel().await.unwrap();
+        task.await.unwrap();
+    }
 }
