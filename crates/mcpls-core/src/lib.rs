@@ -120,7 +120,7 @@ pub async fn serve(config: ServerConfig) -> Result<(), Error> {
 async fn plan_off_runtime(
     config: &ServerConfig,
     redactions: &Arc<redaction::Redactions>,
-    boundary: Option<std::path::PathBuf>,
+    boundary: Option<Vec<std::path::PathBuf>>,
 ) -> Result<(WorkspaceRoots, StartPlan), Error> {
     let (config, redactions) = (config.clone(), Arc::clone(redactions));
     on_blocking_pool(move || {
@@ -365,7 +365,7 @@ impl WorkspaceRuntime {
 
     pub(crate) async fn prepare_scoped(
         config: &ServerConfig,
-        boundary: Option<std::path::PathBuf>,
+        boundary: Option<Vec<std::path::PathBuf>>,
     ) -> Result<Self, Error> {
         let language_map = config.build_effective_language_map();
 

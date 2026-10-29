@@ -12,6 +12,7 @@ pub(super) fn read(
     root: &Path,
     daemon: &ServerConfig,
     automatic: bool,
+    automatic_parents: &[PathBuf],
 ) -> Result<(ServerConfig, String)> {
     let bytes = crate::util::read_regular_file_bounded(
         path,
@@ -88,9 +89,12 @@ pub(super) fn read(
     config.workspace_trust = match &daemon.workspace_trust {
         crate::config::WorkspaceTrust::Trusted => crate::config::WorkspaceTrust::Trusted,
         crate::config::WorkspaceTrust::Untrusted(allowlist) => {
-            if std::fs::canonicalize(path)
-                .map_err(|_| DispatchError::profile(path))?
-                .starts_with(root)
+            let canonical =
+                std::fs::canonicalize(path).map_err(|_| DispatchError::profile(path))?;
+            if canonical.starts_with(root)
+                || automatic_parents
+                    .iter()
+                    .any(|parent| canonical.starts_with(parent))
             {
                 return Err(DispatchError::profile(path));
             }

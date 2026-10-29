@@ -387,7 +387,7 @@ pub fn plan_server_starts_scoped(
     config: &ServerConfig,
     roots: &WorkspaceRoots,
     redactions: &Arc<Redactions>,
-    boundary: Option<&Path>,
+    boundary: Option<&[PathBuf]>,
 ) -> crate::error::Result<StartPlan> {
     let mut mode = PlanMode::of(config, roots);
     if let (
@@ -395,13 +395,18 @@ pub fn plan_server_starts_scoped(
             boundary: trust_boundary,
             ..
         },
-        Some(root),
+        Some(boundary),
     ) = (&mut mode, boundary)
     {
-        let configured = crate::config::ConfiguredRoot::new(root.to_path_buf()).map_err(|_| {
-            crate::error::ConfigError::Dispatcher("invalid execution boundary".into())
-        })?;
-        *trust_boundary = WorkspaceRoots::from_configured(&[configured])?;
+        let configured = boundary
+            .iter()
+            .cloned()
+            .map(crate::config::ConfiguredRoot::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| {
+                crate::error::ConfigError::Dispatcher("invalid execution boundary".into())
+            })?;
+        *trust_boundary = WorkspaceRoots::from_configured(&configured)?;
     }
     Ok(plan_in_mode(config, roots, redactions, &mode))
 }

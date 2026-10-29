@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Untrusted automatic contexts apply executable, helper, and service-profile restrictions across every configured automatic parent while keeping analysis scoped to the selected project.
+
 - Accept diagnostic full reports with an empty `kind` discriminator, including stock gopls v0.24.0 responses. Required diagnostic items remain validated.
 
 ## [0.8.0] - 2026-10-20

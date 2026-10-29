@@ -1759,3 +1759,156 @@ async fn automatic_does_not_replace_registered_explicit_linked_checkout() {
     client.cancel().await.unwrap();
     task.await.unwrap();
 }
+
+/// Allowlisting a server never permits executables or helpers from any automatic parent.
+#[cfg(unix)]
+#[tokio::test]
+async fn automatic_untrusted_execution_uses_all_parent_boundaries() {
+    use std::os::unix::fs::PermissionsExt as _;
+    for other_parent in [false, true] {
+        for invocation in ["direct", "wrapper", "argument"] {
+            let mut fixture = Fixture::new(4);
+            let zone = automatic_fixture(&mut fixture);
+            let selected = zone.join("narrow/selected");
+            script_directory(&selected, "SELECTED");
+            let other = zone.with_file_name("other-zone");
+            std::fs::create_dir(&other).unwrap();
+            let policies = &mut fixture.config.dispatcher.as_mut().unwrap().auto_workspaces;
+            for path in [zone.join("narrow"), other.clone()] {
+                policies.push(crate::config::DispatcherEntry {
+                    path,
+                    profile: fixture.profile.clone(),
+                });
+            }
+            let executable = if other_parent { &other } else { &zone }.join("local-server");
+            let effect = fixture.profile.with_file_name("executed");
+            std::fs::write(&executable, format!("#!/usr/bin/python3\nfrom pathlib import Path\nPath({effect:?}).write_text('EXECUTED')\nraise SystemExit(99)\n")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let wrapper = fixture.profile.with_file_name("outside-wrapper");
+            let wrapper_effect = fixture.profile.with_file_name("wrapper-executed");
+            std::fs::write(&wrapper, format!("#!/usr/bin/python3\nimport os,sys\nfrom pathlib import Path\nPath({wrapper_effect:?}).write_text('WRAPPER')\nos.execv(sys.argv[1], sys.argv[1:])\n")).unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let (command, args) = match invocation {
+                "direct" => (executable.clone(), Vec::new()),
+                "wrapper" => (PathBuf::from("/usr/bin/env"), vec![executable.clone()]),
+                _ => (wrapper, vec![executable.clone()]),
+            };
+            std::fs::write(&fixture.profile, format!("[[lsp_servers]]\nlanguage_id='python'\ncommand={command:?}\nargs={args:?}\nfile_patterns=['*.py']\n")).unwrap();
+            fixture.config.workspace_trust =
+                crate::config::WorkspaceTrust::untrusted([crate::config::ServerId::from_static(
+                    "python",
+                )]);
+            let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+            let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+            let result = call(&client, "get_hover", hover(&selected)).await;
+            let text = result.map_or_else(|error| error.to_string(), |value| value.to_string());
+            assert!(
+                text.contains("inside the workspace"),
+                "{invocation}, other={other_parent}: {text}"
+            );
+            assert!(
+                !effect.exists(),
+                "{invocation} executed the workspace program"
+            );
+            assert!(
+                !wrapper_effect.exists(),
+                "argument backstop did not stop the wrapper"
+            );
+            assert_eq!(fixture.events().len(), 0);
+            dispatcher.shutdown().await;
+            client.cancel().await.unwrap();
+            task.await.unwrap();
+        }
+    }
+}
+
+/// Untrusted automatic profiles must stay outside every automatic parent, including canonical aliases.
+#[cfg(unix)]
+#[tokio::test]
+async fn automatic_untrusted_profile_provenance_uses_all_parents() {
+    let mut fixture = Fixture::new(4);
+    let zone = automatic_fixture(&mut fixture);
+    let selected = zone.join("selected");
+    script_directory(&selected, "SELECTED");
+    let other = zone.with_file_name("other-zone");
+    std::fs::create_dir(&other).unwrap();
+    fixture
+        .config
+        .dispatcher
+        .as_mut()
+        .unwrap()
+        .auto_workspaces
+        .push(crate::config::DispatcherEntry {
+            path: other.clone(),
+            profile: fixture.profile.clone(),
+        });
+    fixture.config.workspace_trust =
+        crate::config::WorkspaceTrust::untrusted([crate::config::ServerId::from_static("python")]);
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let planted_profile = other.join("planted.toml");
+    std::fs::rename(&fixture.profile, &planted_profile).unwrap();
+    std::os::unix::fs::symlink(&planted_profile, &fixture.profile).unwrap();
+    error_code(
+        call(&client, "get_hover", hover(&selected))
+            .await
+            .unwrap_err(),
+        "profile_invalid",
+    );
+    assert_eq!(fixture.events().len(), 0);
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+    // The same canonical provenance rule applies at daemon startup.
+    assert_eq!(
+        Dispatcher::new(fixture.config.clone())
+            .err()
+            .unwrap()
+            .wire()
+            .data
+            .unwrap()["code"],
+        "profile_invalid"
+    );
+}
+
+/// Untrusted execution boundaries do not broaden the workspace supplied to an allowed outside LSP.
+#[tokio::test]
+async fn automatic_untrusted_keeps_selected_analysis_root() {
+    let mut fixture = Fixture::new(4);
+    let zone = automatic_fixture(&mut fixture);
+    let selected = zone.join("selected");
+    script_directory(&selected, "SELECTED");
+    fixture.config.workspace_trust =
+        crate::config::WorkspaceTrust::untrusted([crate::config::ServerId::from_static("python")]);
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let support = call(
+        &client,
+        "get_tool_support",
+        json!({"file_path":selected.join("file.py")}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(support["basis"], "runtime");
+    assert_eq!(support["workspace_path"], json!(selected));
+    let events = fixture.events();
+    let initialized = events
+        .iter()
+        .find(|event| event["event"] == "initialize")
+        .unwrap();
+    assert_eq!(
+        initialized["params"]["rootUri"]
+            .as_str()
+            .unwrap()
+            .trim_end_matches('/'),
+        url::Url::from_directory_path(&selected)
+            .unwrap()
+            .as_str()
+            .trim_end_matches('/')
+    );
+    let cwd = PathBuf::from(initialized["cwd"].as_str().unwrap());
+    assert!(!cwd.starts_with(&zone));
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}

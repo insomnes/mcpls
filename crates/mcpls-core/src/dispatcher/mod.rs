@@ -262,6 +262,11 @@ impl Dispatcher {
                 "dispatcher mode forbids top-level workspace and lsp_servers",
             ));
         }
+        let automatic = automatic_approvals(&config)?;
+        let automatic_parents: Vec<_> = automatic
+            .iter()
+            .map(|approval| approval.root.clone())
+            .collect();
         let mut configured_ids = std::collections::BTreeSet::new();
         let mut approvals: Vec<Approval> = Vec::new();
         for (git, entries) in [(true, &config.repositories), (false, &config.workspaces)] {
@@ -290,7 +295,8 @@ impl Dispatcher {
                         "duplicate canonical dispatcher approval",
                     ));
                 }
-                let (profile_config, _) = profile::read(&entry.profile, &root, &daemon, false)?;
+                let (profile_config, _) =
+                    profile::read(&entry.profile, &root, &daemon, false, &automatic_parents)?;
                 configured_ids.extend(
                     profile_config
                         .lsp_servers
@@ -305,10 +311,14 @@ impl Dispatcher {
                 });
             }
         }
-        let automatic = automatic_approvals(&config)?;
         for approval in &automatic {
-            let (profile_config, _) =
-                profile::read(&approval.profile, &approval.root, &daemon, true)?;
+            let (profile_config, _) = profile::read(
+                &approval.profile,
+                &approval.root,
+                &daemon,
+                true,
+                &automatic_parents,
+            )?;
             configured_ids.extend(
                 profile_config
                     .lsp_servers
@@ -365,8 +375,7 @@ impl Dispatcher {
                 git_dir: None,
                 objects: vec![approval.object.clone()],
             });
-            let (config, digest) =
-                profile::read(&approval.profile, &identity.root, &self.daemon, false)?;
+            let (config, digest) = self.read_profile(approval, &identity.root, false)?;
             return Ok(Selection {
                 identity,
                 profile: approval.profile.clone(),
@@ -387,8 +396,7 @@ impl Dispatcher {
         if ObjectId::read(&approval.root)? != approval.object {
             return Err(DispatchError::not_approved(path));
         }
-        let (policy_config, _) =
-            profile::read(&approval.profile, &approval.root, &self.daemon, true)?;
+        let (policy_config, _) = self.read_profile(approval, &approval.root, true)?;
         let start = if canonical.is_dir() {
             canonical.as_path()
         } else {
@@ -426,8 +434,7 @@ impl Dispatcher {
             git_dir,
             objects,
         };
-        let (config, digest) =
-            profile::read(&approval.profile, &identity.root, &self.daemon, true)?;
+        let (config, digest) = self.read_profile(approval, &identity.root, true)?;
         Ok(Selection {
             identity,
             profile: approval.profile.clone(),
@@ -760,13 +767,35 @@ impl Dispatcher {
         resident.touch();
         Ok(Lease { resident })
     }
+    fn read_profile(
+        &self,
+        approval: &Approval,
+        root: &Path,
+        automatic: bool,
+    ) -> Result<(ServerConfig, String)> {
+        profile::read(
+            &approval.profile,
+            root,
+            &self.daemon,
+            automatic,
+            &self.automatic_parent_roots(),
+        )
+    }
+
+    fn automatic_parent_roots(&self) -> Vec<PathBuf> {
+        self.automatic
+            .iter()
+            .map(|approval| approval.root.clone())
+            .collect()
+    }
+
     pub(crate) fn configured_profiles(&self) -> Vec<ServerConfig> {
         self.approvals
             .iter()
             .map(|approval| (approval, false))
             .chain(self.automatic.iter().map(|approval| (approval, true)))
             .filter_map(|(approval, automatic)| {
-                profile::read(&approval.profile, &approval.root, &self.daemon, automatic)
+                self.read_profile(approval, &approval.root, automatic)
                     .ok()
                     .map(|(config, _)| config)
             })
@@ -990,12 +1019,15 @@ impl Resident {
                         server.heuristics = None;
                     }
                 }
-                let mut runtime = WorkspaceRuntime::prepare_scoped(
-                    &config,
-                    Some(self.selection.identity.root.clone()),
-                )
-                .await
-                .map_err(|_| DispatchError::profile(&self.selection.profile))?;
+                let execution_boundary = if self.selection.temporary {
+                    dispatcher.automatic_parent_roots()
+                } else {
+                    vec![self.selection.identity.root.clone()]
+                };
+                let mut runtime =
+                    WorkspaceRuntime::prepare_scoped(&config, Some(execution_boundary))
+                        .await
+                        .map_err(|_| DispatchError::profile(&self.selection.profile))?;
                 runtime
                     .subscription_registry
                     .set_validity(Arc::new(RuntimeValidity {
