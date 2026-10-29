@@ -113,6 +113,8 @@ impl Translator {
         file_path: ClientPath,
         position: Position,
         trigger: Option<CompletionTrigger>,
+        limit: usize,
+        include_documentation: bool,
     ) -> Result<CompletionsResult> {
         let context = trigger.map(|trigger_char| lsp_types::CompletionContext {
             trigger_kind: CompletionTriggerKind::TriggerCharacter,
@@ -132,22 +134,33 @@ impl Translator {
             )
             .await?;
 
-        let items = match response {
-            Some(lsp_types::CompletionResponse::CompletionItemList(items)) => items,
-            Some(lsp_types::CompletionResponse::CompletionList(list)) => list.items,
-            None => vec![],
+        let (items, provider_is_incomplete) = match response {
+            Some(lsp_types::CompletionResponse::CompletionItemList(items)) => (items, None),
+            Some(lsp_types::CompletionResponse::CompletionList(list)) => {
+                (list.items, Some(list.is_incomplete))
+            }
+            None => (vec![], None),
         };
-
+        let omitted_count = items.len().saturating_sub(limit);
         let result = CompletionsResult {
             items: items
                 .into_iter()
+                .take(limit)
                 .map(|item| Completion {
                     label: item.label,
                     kind: item.kind.map(lsp_kind_to_u32),
                     detail: item.detail,
-                    documentation: item.documentation.map(extract_documentation),
+                    documentation: if include_documentation {
+                        item.documentation.map(extract_documentation)
+                    } else {
+                        None
+                    },
+                    truncated_fields: vec![],
                 })
                 .collect(),
+            provider_is_incomplete,
+            omitted_count,
+            truncated: omitted_count > 0,
             positions_degraded: ctx.positions_degraded(),
         };
 
@@ -324,6 +337,8 @@ mod tests {
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 1),
                 None,
+                20,
+                false,
             )
             .await
             .unwrap_err();
@@ -371,7 +386,7 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_completions(client_path(path), Position::at(1, 1), None)
+                    .handle_completions(client_path(path), Position::at(1, 1), None, 20, false)
                     .await
             })
         };
@@ -563,7 +578,13 @@ mod tests {
             tokio::spawn(async move {
                 if method == "textDocument/completion" {
                     translator
-                        .handle_completions(client_path(path), pos(line, character), None)
+                        .handle_completions(
+                            client_path(path),
+                            pos(line, character),
+                            None,
+                            20,
+                            false,
+                        )
                         .await
                         .map(|r| serde_json::to_value(r).unwrap())
                 } else {
@@ -622,7 +643,9 @@ mod tests {
         fs::write(&path, "fn main() {}").unwrap();
         let file = || client_path(path.to_string_lossy().into_owned());
 
-        let completions = translator.handle_completions(file(), pos(5, 3), None).await;
+        let completions = translator
+            .handle_completions(file(), pos(5, 3), None, 20, false)
+            .await;
         assert_matches!(completions, Err(Error::PositionBeyondDocument { .. }));
         let signature = translator.handle_signature_help(file(), pos(5, 3)).await;
         assert_matches!(signature, Err(Error::PositionBeyondDocument { .. }));

@@ -3662,6 +3662,8 @@ mod tests {
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 1),
                 None,
+                20,
+                false,
             )
             .await;
 

@@ -163,7 +163,41 @@ Returns API-discovery completion candidates at a position. Add `trigger` (for ex
 { "file_path": "/work/app/src/billing.rs", "line": 57, "character": 18, "trigger": "." }
 ```
 
-Each item has a `label`, a numeric `kind` (2 method, 3 function, 5 field, 6 variable, 7 class, 9 module), a `detail`, and optional `documentation`. Results do not include insertion text, snippets, or completion edit payloads. Completion requests are capped at 10 seconds whatever `request_timeout_seconds` says.
+By default, return the first 20 provider candidates without documentation. Set `limit`
+to an integer from 1 through 100, and set `include_documentation: true` to request
+documentation. Null and invalid values for these options are rejected.
+
+```json
+{ "file_path": "/work/app/src/billing.rs", "line": 57, "character": 18, "limit": 40, "include_documentation": true }
+```
+
+Each item has `label`, numeric `kind` (2 method, 3 function, 5 field, 6 variable,
+7 class, 9 module), `detail`, `documentation`, and `truncated_fields`. Missing
+kind, detail, and documentation are null. Disabled documentation is null; enabled
+empty documentation stays an empty string. Provider order and duplicate labels
+are preserved. Results do not include insertion text, snippets, or completion edits.
+
+After existing display-prose redaction, labels, details, and documentation have
+UTF-8 byte limits of 512, 2048, and 4096. Clipping keeps the longest Unicode-scalar
+prefix without an ellipsis. `truncated_fields` lists clipped fields in that order.
+A clipped label is partial and must not be used as an exact source replacement.
+Labels retain their existing identifier-payload redaction semantics.
+
+The final compact structured-result JSON is at most 65536 UTF-8 bytes, including
+JSON escaping and all metadata. The result retains the longest provider prefix
+that fits. `omitted_count` counts provider candidates excluded by count or byte
+limits. `truncated` is true exactly when candidates were omitted or retained
+fields were clipped. Selecting documentation off does not itself mean truncation.
+The legacy text content encodes the same result.
+
+`provider_is_incomplete` preserves an explicit provider boolean. It is null for
+bare arrays and null responses, including empty responses. Provider incompleteness
+and local truncation are independent. A false provider signal does not establish
+complete workspace or API coverage. `positions_degraded` retains its usual meaning.
+
+These bounds apply to the returned structured result, not the original LSP
+response, provider work, process memory, or the complete MCP envelope. Completion
+requests retain their 10-second cap regardless of `request_timeout_seconds`.
 
 ## get_inlay_hints
 

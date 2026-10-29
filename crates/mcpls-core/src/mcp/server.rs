@@ -1202,7 +1202,7 @@ impl McplsServer {
 
     /// Get code completion suggestions.
     #[tool(
-        description = "API-discovery completions at position: labels, kinds, detail and documentation; no insertion text or snippet edits. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
+        description = "API-discovery candidates in provider order: limit 1..100 (default 20), include_documentation false by default. Labels/detail/documentation are clipped to 512/2048/4096 UTF-8 bytes after display redaction. Final structured JSON is at most 65536 bytes; limits do not bound the LSP response. provider_is_incomplete preserves the provider boolean or null; omitted_count and truncated/truncated_fields report local omissions/clipping. Clipped labels are partial. No insertion text or snippet edits. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
         title = "Completions"
     )]
     async fn get_completions(
@@ -1215,15 +1215,53 @@ impl McplsServer {
                     character,
                 },
             trigger,
+            limit,
+            include_documentation,
         }): Parameters<CompletionsParams>,
     ) -> Result<Json<CompletionsResult>, McpError> {
         let file_path = parse_client_path(file_path)?;
-        self.structured_result(
-            self.context
-                .translator
-                .handle_completions(file_path, parse_position(line, character)?, trigger)
-                .await,
-        )
+        let mut result = self
+            .context
+            .translator
+            .handle_completions(
+                file_path,
+                parse_position(line, character)?,
+                trigger,
+                limit,
+                include_documentation,
+            )
+            .await
+            .map_err(|error| self.render_error(error))?;
+        result.redact_server_text(&self.context.translator.server_text_redactions());
+        for item in &mut result.items {
+            for (field, value, maximum) in [
+                ("label", Some(&mut item.label), 512),
+                ("detail", item.detail.as_mut(), 2048),
+                ("documentation", item.documentation.as_mut(), 4096),
+            ] {
+                if let Some(value) = value.filter(|value| value.len() > maximum) {
+                    let end = value.floor_char_boundary(maximum);
+                    value.truncate(end);
+                    item.truncated_fields.push(field.to_owned());
+                }
+            }
+        }
+        loop {
+            result.truncated = result.omitted_count > 0
+                || result
+                    .items
+                    .iter()
+                    .any(|item| !item.truncated_fields.is_empty());
+            let bytes = serde_json::to_vec(&result)
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+            if bytes.len() <= 65536 {
+                return Ok(Json(result));
+            }
+            // Each bounded item is larger than any omission-count digit increase.
+            // Removing the tail therefore finds the longest fitting provider prefix.
+            let _ = result.items.pop();
+            result.omitted_count = result.omitted_count.saturating_add(1);
+        }
     }
 
     /// Get all symbols in a document.
@@ -3593,6 +3631,8 @@ mod tests {
                     .get_completions(Parameters(CompletionsParams {
                         position: position(line, character),
                         trigger: None,
+                        limit: 20,
+                        include_documentation: false,
                     }))
                     .await
                     .map(|_| ()),
@@ -4584,6 +4624,8 @@ mod tests {
                 character: 5,
             },
             trigger: None,
+            limit: 20,
+            include_documentation: false,
         });
 
         let result = server.get_completions(params).await;
@@ -6944,6 +6986,175 @@ sleep 0.3
         }
     }
 
+    /// Exercise real MCP decoding, tool routing, redaction, and framed LSP requests.
+    async fn completions_wire_call(
+        response: serde_json::Value,
+        options: serde_json::Value,
+    ) -> (serde_json::Value, Vec<serde_json::Value>) {
+        use crate::test_lsp::{read_framed_message, write_response};
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    completion_provider: Some(lsp_types::CompletionOptions::default()),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let (client, mut fake, _lanes) = crate::test_lsp::fake_lsp_client_with_redactions(
+            Redactions::new([("API_TOKEN".to_owned(), "synthetic-secret".to_owned())]),
+        );
+        fixture.fake_servers.clear();
+        fixture
+            .server
+            .context
+            .translator
+            .register_client(crate::config::ServerId::from_static("rust"), client);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                seen.lock().await.push(request.clone());
+                if request.get("id").is_some() {
+                    assert_eq!(request["method"], "textDocument/completion");
+                    write_response(&mut fake.read_half_stdin, &request["id"], response.clone())
+                        .await;
+                }
+            }
+        });
+        let mut arguments =
+            serde_json::json!({"file_path": fixture.file, "line": 1, "character": 1});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        let result = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({"name": "get_completions", "arguments": arguments}),
+        )
+        .await;
+        responder.abort();
+        let requests = requests.lock().await.clone();
+        (result, requests)
+    }
+
+    #[tokio::test]
+    async fn test_completions_wire_defaults_projection_and_completeness() {
+        let items: Vec<_> = (0..21)
+            .map(|n| {
+                serde_json::json!({
+                    "label": format!("candidate-{n}"), "documentation": "docs", "detail": "",
+                })
+            })
+            .collect();
+        for signal in [true, false] {
+            let (result, requests) = completions_wire_call(
+                serde_json::json!({"isIncomplete": signal, "items": items}),
+                serde_json::json!({}),
+            )
+            .await;
+            let value = &result["result"]["structuredContent"];
+            assert_eq!(value["items"].as_array().unwrap().len(), 20, "{result}");
+            assert_eq!(value["items"][0]["label"], "candidate-0");
+            assert_eq!(value["items"][19]["label"], "candidate-19");
+            assert_eq!(value["items"][0]["detail"], "");
+            assert!(value["items"][0]["documentation"].is_null());
+            assert_eq!(value["items"][0]["truncated_fields"], serde_json::json!([]));
+            assert_eq!(value["provider_is_incomplete"], signal);
+            assert_eq!(value["omitted_count"], 1);
+            assert_eq!(value["truncated"], true);
+            let params = &requests
+                .iter()
+                .find(|r| r["method"] == "textDocument/completion")
+                .unwrap()["params"];
+            assert_eq!(
+                params["position"],
+                serde_json::json!({"line": 0, "character": 0})
+            );
+            assert!(params.get("limit").is_none());
+            assert!(params.get("include_documentation").is_none());
+        }
+        for response in [serde_json::json!([]), serde_json::Value::Null] {
+            let (result, _) = completions_wire_call(response, serde_json::json!({})).await;
+            let value = &result["result"]["structuredContent"];
+            assert!(value["provider_is_incomplete"].is_null(), "{result}");
+            assert_eq!(value["items"], serde_json::json!([]));
+            assert_eq!(value["omitted_count"], 0);
+            assert_eq!(value["truncated"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completions_wire_final_redaction_field_and_json_bounds() {
+        let label = format!("{}😀", "l".repeat(511));
+        let detail = format!("{}synthetic-secret", "d".repeat(2032));
+        let documentation = format!("{}😀", "\\\"".repeat(2047));
+        let item =
+            serde_json::json!({"label": label, "detail": detail, "documentation": documentation});
+        let (result, _) = completions_wire_call(
+            serde_json::json!({"isIncomplete": false, "items": vec![item; 100]}),
+            serde_json::json!({"limit": 100, "include_documentation": true}),
+        )
+        .await;
+        let value = &result["result"]["structuredContent"];
+        let items = value["items"].as_array().unwrap();
+        assert!(!items.is_empty() && items.len() < 100, "{result}");
+        assert_eq!(items[0]["label"], "l".repeat(511));
+        assert_eq!(
+            items[0]["detail"],
+            format!("{}[redacted:API_TO", "d".repeat(2032))
+        );
+        assert_eq!(items[0]["documentation"], "\\\"".repeat(2047));
+        assert_eq!(
+            items[0]["truncated_fields"],
+            serde_json::json!(["label", "detail", "documentation"])
+        );
+        assert_eq!(
+            value["omitted_count"].as_u64().unwrap(),
+            100 - u64::try_from(items.len()).unwrap()
+        );
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["provider_is_incomplete"], false);
+        assert!(serde_json::to_vec(value).unwrap().len() <= 65536);
+        let legacy: serde_json::Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(legacy, *value);
+        let mut next = value.clone();
+        next["items"].as_array_mut().unwrap().push(items[0].clone());
+        next["omitted_count"] = serde_json::json!(value["omitted_count"].as_u64().unwrap() - 1);
+        assert!(serde_json::to_vec(&next).unwrap().len() > 65536);
+    }
+
+    #[tokio::test]
+    async fn test_completions_wire_rejects_invalid_options_without_lsp_request() {
+        for options in [
+            serde_json::json!({"limit": 0}),
+            serde_json::json!({"limit": -1}),
+            serde_json::json!({"limit": 101}),
+            serde_json::json!({"limit": 1.5}),
+            serde_json::json!({"limit": null}),
+            serde_json::json!({"limit": "20"}),
+            serde_json::json!({"include_documentation": null}),
+            serde_json::json!({"include_documentation": 1}),
+            serde_json::json!({"unexpected": true}),
+        ] {
+            let (result, requests) = completions_wire_call(serde_json::json!([]), options).await;
+            assert!(
+                result.get("error").is_some() || result["result"]["isError"] == true,
+                "{result}"
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request["method"] != "textDocument/completion")
+            );
+        }
+    }
+
     fn hierarchy_wire_fixture() -> SupportFixture {
         support_fixture(
             vec![(
@@ -8311,6 +8522,8 @@ sleep 0.3
                 .get_completions(Parameters(CompletionsParams {
                     position: position(),
                     trigger: None,
+                    limit: 20,
+                    include_documentation: false,
                 }))
                 .await
                 .map(|_| ()),

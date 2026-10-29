@@ -1239,7 +1239,7 @@
   {
     "name": "get_completions",
     "title": "Completions",
-    "description": "API-discovery completions at position: labels, kinds, detail and documentation; no insertion text or snippet edits. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
+    "description": "API-discovery candidates in provider order: limit 1..100 (default 20), include_documentation false by default. Labels/detail/documentation are clipped to 512/2048/4096 UTF-8 bytes after display redaction. Final structured JSON is at most 65536 bytes; limits do not bound the LSP response. provider_is_incomplete preserves the provider boolean or null; omitted_count and truncated/truncated_fields report local omissions/clipping. Clipped labels are partial. No insertion text or snippet edits. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -1253,6 +1253,19 @@
         "file_path": {
           "description": "Absolute path to the file.",
           "type": "string"
+        },
+        "include_documentation": {
+          "default": false,
+          "description": "Include bounded documentation; default false.",
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 20,
+          "description": "Maximum provider candidates, 1 through 100; default 20.",
+          "format": "uint",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
         },
         "line": {
           "description": "Line number (1-based).",
@@ -1281,14 +1294,14 @@
           "description": "A completion item.",
           "properties": {
             "detail": {
-              "description": "Detail information.",
+              "description": "Display detail, at most 2048 UTF-8 bytes after redaction.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "documentation": {
-              "description": "Documentation.",
+              "description": "Opt-in display documentation, at most 4096 UTF-8 bytes after redaction.",
               "type": [
                 "string",
                 "null"
@@ -1304,12 +1317,20 @@
               ]
             },
             "label": {
-              "description": "Label of the completion.",
+              "description": "Display label, at most 512 UTF-8 bytes; a clipped label is partial.",
               "type": "string"
+            },
+            "truncated_fields": {
+              "description": "Clipped fields, in label, detail, documentation order; empty when unchanged.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [
-            "label"
+            "label",
+            "truncated_fields"
           ],
           "type": "object"
         },
@@ -1336,6 +1357,12 @@
           },
           "type": "array"
         },
+        "omitted_count": {
+          "description": "Provider candidates omitted by local count or serialized-output limits.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "positions_degraded": {
           "anyOf": [
             {
@@ -1346,10 +1373,24 @@
             }
           ],
           "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+        },
+        "provider_is_incomplete": {
+          "description": "Explicit provider completeness signal; null for bare arrays and null responses.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "truncated": {
+          "description": "True exactly when candidates were omitted or retained fields were clipped.",
+          "type": "boolean"
         }
       },
       "required": [
-        "items"
+        "items",
+        "provider_is_incomplete",
+        "omitted_count",
+        "truncated"
       ],
       "type": "object"
     },

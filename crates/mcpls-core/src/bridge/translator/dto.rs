@@ -782,14 +782,16 @@ const fn is_zero(count: &usize) -> bool {
 /// A completion item.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Completion {
-    /// Label of the completion.
+    /// Display label, at most 512 UTF-8 bytes; a clipped label is partial.
     pub label: String,
     /// LSP numeric completion-item kind (e.g. 3 for Function).
     pub kind: Option<u32>,
-    /// Detail information.
+    /// Display detail, at most 2048 UTF-8 bytes after redaction.
     pub detail: Option<String>,
-    /// Documentation.
+    /// Opt-in display documentation, at most 4096 UTF-8 bytes after redaction.
     pub documentation: Option<String>,
+    /// Clipped fields, in label, detail, documentation order; empty when unchanged.
+    pub truncated_fields: Vec<String>,
 }
 
 /// Result of a completions request.
@@ -797,6 +799,13 @@ pub struct Completion {
 pub struct CompletionsResult {
     /// List of completion items.
     pub items: Vec<Completion>,
+    /// Explicit provider completeness signal; null for bare arrays and null responses.
+    #[schemars(required, extend("type" = ["boolean", "null"]))]
+    pub provider_is_incomplete: Option<bool>,
+    /// Provider candidates omitted by local count or serialized-output limits.
+    pub omitted_count: usize,
+    /// True exactly when candidates were omitted or retained fields were clipped.
+    pub truncated: bool,
     /// Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise.
     ///
     /// Tells whether the queried position or only the returned offsets are affected.
@@ -1852,6 +1861,7 @@ impl ServerText for Completion {
             kind: _,
             detail,
             documentation,
+            truncated_fields: _,
         } = self;
         redactions.note_payload(label);
         for prose in [detail, documentation].into_iter().flatten() {
@@ -1864,6 +1874,9 @@ impl ServerText for CompletionsResult {
     fn redact_server_text(&mut self, redactions: &Redactions) {
         let Self {
             items,
+            provider_is_incomplete: _,
+            omitted_count: _,
+            truncated: _,
             positions_degraded: _,
         } = self;
         items.redact_server_text(redactions);
@@ -2396,6 +2409,7 @@ mod tests {
             kind: Some(3),
             detail: Some(format!("fn {SECRET}()")),
             documentation: Some(format!("docs {SECRET}")),
+            truncated_fields: vec![],
         };
 
         completion.redact_server_text(&set);

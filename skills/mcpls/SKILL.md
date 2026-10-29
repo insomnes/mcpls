@@ -59,7 +59,13 @@ Previews never write files, execute commands, or add language-server opens solel
 
 Do not apply proposals with non-empty `dropped` or unreliable positions.
 
-`get_completions` provides API-discovery labels, kinds, detail and documentation, without insertion text or snippet edits. `get_tool_support` is an optional diagnostic aid.
+`get_completions` returns API-discovery candidates in provider order, without insertion text or snippet edits. `limit` accepts integers 1 through 100 (default 20); `include_documentation` defaults to false. Null or invalid option values fail. Disabled or absent documentation is null; enabled empty documentation remains empty.
+
+Completion labels, details, and documentation are clipped at 512, 2048, and 4096 UTF-8 bytes after existing display redaction. Labels retain identifier-payload redaction semantics. Clipping keeps a Unicode-scalar prefix without an ellipsis; a clipped label is partial, not an exact source replacement. Each item lists clipped fields in `truncated_fields`, in label/detail/documentation order.
+
+The compact structured JSON is at most 65536 bytes, including escaping and metadata; the legacy text encodes the same result. The longest fitting provider prefix is returned. `omitted_count` counts excluded candidates. `truncated` means candidates were omitted or retained fields clipped; disabled documentation alone does not set it. `provider_is_incomplete` is the provider's explicit boolean, or null for bare arrays/null responses. Empty responses preserve this distinction. Provider incompleteness and local truncation are independent; false does not prove complete API coverage. Existing `positions_degraded` behavior is unchanged. Output bounds do not bound the original LSP response, provider work, process memory, or whole MCP envelope. The existing completion timeout remains 10 seconds.
+
+`get_tool_support` is an optional diagnostic aid.
 
 ## Prerequisites
 

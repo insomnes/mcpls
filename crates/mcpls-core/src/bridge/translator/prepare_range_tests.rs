@@ -398,7 +398,10 @@ async fn every_positioned_tool_rejects_a_line_beyond_the_document() {
     );
     reject!("declaration", t.handle_declaration(file(), beyond, ctx));
     reject!("references", t.handle_references(file(), beyond, true, ctx));
-    reject!("completions", t.handle_completions(file(), beyond, None));
+    reject!(
+        "completions",
+        t.handle_completions(file(), beyond, None, 20, false)
+    );
     reject!("signature_help", t.handle_signature_help(file(), beyond));
     reject!(
         "call_hierarchy",

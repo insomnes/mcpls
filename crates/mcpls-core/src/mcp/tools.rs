@@ -568,30 +568,51 @@ position_wire! {
         )]
         #[schemars(with = "Option<String>")]
         trigger: Option<CompletionTrigger>,
+        #[schemars(description = "Maximum provider candidates, 1 through 100; default 20.", range(min = 1, max = 100))]
+        #[serde(default = "completion_limit")]
+        limit: usize,
+        #[schemars(description = "Include bounded documentation; default false.")]
+        #[serde(default)]
+        include_documentation: bool,
     }
 }
 
 /// Parameters for the `get_completions` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(from = "CompletionsWire")]
+#[serde(try_from = "CompletionsWire")]
 #[schemars(with = "CompletionsWire")]
 pub struct CompletionsParams {
     /// Position in the file to operate on.
     pub position: PositionParams,
     /// Optional trigger character (e.g., '.', ':', '->').
     pub trigger: Option<CompletionTrigger>,
+    /// Maximum provider candidates, from 1 through 100; default 20.
+    pub limit: usize,
+    /// Include documentation only when true; default false.
+    pub include_documentation: bool,
 }
 
-impl From<CompletionsWire> for CompletionsParams {
-    fn from(wire: CompletionsWire) -> Self {
-        Self {
+const fn completion_limit() -> usize {
+    20
+}
+
+impl TryFrom<CompletionsWire> for CompletionsParams {
+    type Error = &'static str;
+
+    fn try_from(wire: CompletionsWire) -> Result<Self, Self::Error> {
+        if !(1..=100).contains(&wire.limit) {
+            return Err("limit must be between 1 and 100");
+        }
+        Ok(Self {
             position: PositionParams {
                 file_path: wire.file_path,
                 line: wire.line,
                 character: wire.character,
             },
             trigger: wire.trigger,
-        }
+            limit: wire.limit,
+            include_documentation: wire.include_documentation,
+        })
     }
 }
 
