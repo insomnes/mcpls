@@ -218,8 +218,11 @@ fn test_e2e_tool_profiles() -> Result<()> {
                 profile == "full"
             );
             if profile != "full" {
-                let rejected = client.call_tool(&name(excluded), &json!({}))?;
-                assert!(rejected.get("error").is_some(), "{rejected}");
+                let unknown = client
+                    .call_tool(&name("unknown_tool"), &json!({}))
+                    .unwrap_err();
+                let rejected = client.call_tool(&name(excluded), &json!({})).unwrap_err();
+                assert_eq!(rejected.to_string(), unknown.to_string());
             }
         }
     }
