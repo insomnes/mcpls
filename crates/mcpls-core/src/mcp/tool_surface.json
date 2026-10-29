@@ -1239,42 +1239,36 @@
   {
     "name": "get_completions",
     "title": "Completions",
-    "description": "API-discovery candidates in provider order: limit 1..100 (default 20), include_documentation false by default. Labels/detail/documentation are clipped to 512/2048/4096 UTF-8 bytes after display redaction. Final structured JSON is at most 65536 bytes; limits do not bound the LSP response. provider_is_incomplete preserves the provider boolean or null; omitted_count and truncated/truncated_fields report local omissions/clipping. Clipped labels are partial. No insertion text or snippet edits. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
+    "description": "Discover API candidates in provider order at 1-based UTF-16 positions. limit is 1..100 (default 20); include_documentation defaults to false. trigger is 1..8 bytes or null. After redaction, label/detail/documentation caps are 512/2048/4096 UTF-8 bytes; labels retain payload handling. Return the longest prefix within 65536 compact JSON bytes. omitted_count/truncated/truncated_fields report local omissions/clipping. provider_is_incomplete preserves bool|null. Clipped labels are partial. Bounds exclude the LSP response. positions_degraded:request means an unreliable target. No edits.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "character": {
-          "description": "Character/column number (1-based).",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
         "file_path": {
-          "description": "Absolute path to the file.",
           "type": "string"
         },
         "include_documentation": {
           "default": false,
-          "description": "Include bounded documentation; default false.",
           "type": "boolean"
         },
         "limit": {
           "default": 20,
-          "description": "Maximum provider candidates, 1 through 100; default 20.",
           "format": "uint",
           "maximum": 100,
           "minimum": 1,
           "type": "integer"
         },
         "line": {
-          "description": "Line number (1-based).",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
         "trigger": {
-          "description": "Optional trigger character (e.g., '.', ':', '->'), 1 to 8 bytes.",
           "type": [
             "string",
             "null"
@@ -1291,24 +1285,20 @@
     "outputSchema": {
       "$defs": {
         "Completion": {
-          "description": "A completion item.",
           "properties": {
             "detail": {
-              "description": "Display detail, at most 2048 UTF-8 bytes after redaction.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "documentation": {
-              "description": "Opt-in display documentation, at most 4096 UTF-8 bytes after redaction.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "kind": {
-              "description": "LSP numeric completion-item kind (e.g. 3 for Function).",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -1317,11 +1307,9 @@
               ]
             },
             "label": {
-              "description": "Display label, at most 512 UTF-8 bytes; a clipped label is partial.",
               "type": "string"
             },
             "truncated_fields": {
-              "description": "Clipped fields, in label, detail, documentation order; empty when unchanged.",
               "items": {
                 "type": "string"
               },
@@ -1335,7 +1323,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -1351,14 +1338,12 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "items": {
-          "description": "List of completion items.",
           "items": {
             "$ref": "#/$defs/Completion"
           },
           "type": "array"
         },
         "omitted_count": {
-          "description": "Provider candidates omitted by local count or serialized-output limits.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -1371,18 +1356,15 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          ]
         },
         "provider_is_incomplete": {
-          "description": "Explicit provider completeness signal; null for bare arrays and null responses.",
           "type": [
             "boolean",
             "null"
           ]
         },
         "truncated": {
-          "description": "True exactly when candidates were omitted or retained fields were clipped.",
           "type": "boolean"
         }
       },

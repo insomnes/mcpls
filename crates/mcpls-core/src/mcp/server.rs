@@ -1202,7 +1202,7 @@ impl McplsServer {
 
     /// Get code completion suggestions.
     #[tool(
-        description = "API-discovery candidates in provider order: limit 1..100 (default 20), include_documentation false by default. Labels/detail/documentation are clipped to 512/2048/4096 UTF-8 bytes after display redaction. Final structured JSON is at most 65536 bytes; limits do not bound the LSP response. provider_is_incomplete preserves the provider boolean or null; omitted_count and truncated/truncated_fields report local omissions/clipping. Clipped labels are partial. No insertion text or snippet edits. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
+        description = "Discover API candidates in provider order at 1-based UTF-16 positions. limit is 1..100 (default 20); include_documentation defaults to false. trigger is 1..8 bytes or null. After redaction, label/detail/documentation caps are 512/2048/4096 UTF-8 bytes; labels retain payload handling. Return the longest prefix within 65536 compact JSON bytes. omitted_count/truncated/truncated_fields report local omissions/clipping. provider_is_incomplete preserves bool|null. Clipped labels are partial. Bounds exclude the LSP response. positions_degraded:request means an unreliable target. No edits.",
         title = "Completions"
     )]
     async fn get_completions(
