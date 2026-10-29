@@ -13,6 +13,7 @@
 # description = "Internal LSP bridge for Acme Corp"
 # instructions = "Use get_hover before get_definition."
 # tool_prefix = "optics"
+# tool_profile = "agent" # Set "full" for all 30 tools.
 
 # Workspace settings
 [workspace]

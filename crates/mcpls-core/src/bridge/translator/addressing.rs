@@ -104,6 +104,8 @@ pub enum AddressableTool {
     TypeDefinition,
     /// `prepare_call_hierarchy`.
     PrepareCallHierarchy,
+    /// Direct type hierarchy preparation.
+    PrepareTypeHierarchy,
     /// `rename_symbol`.
     Rename,
 }
@@ -117,6 +119,7 @@ impl AddressableTool {
             Self::Implementation => Capability::Implementation,
             Self::TypeDefinition => Capability::TypeDefinition,
             Self::PrepareCallHierarchy => Capability::CallHierarchy,
+            Self::PrepareTypeHierarchy => Capability::TypeHierarchy,
             Self::Rename => Capability::Rename,
         }
     }

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The default MCP catalog now exposes 27 tools. Set `[mcp].tool_profile = "full"` for all 30, including folding ranges, selection ranges, and standalone type preparation. Discovery, dispatch and support reports share the selected static catalog.
+- `get_supertypes` and `get_subtypes` accept direct position or qualified symbol-name targets. Direct responses classify preparation outcomes before one-level traversal; unchanged item requests retain their legacy response shape.
+- Tool support checks are optional diagnostics. Completions provide API-discovery metadata, and command-only code actions require execution outside this MCP interface.
+
 - Edit proposals now show bounded unified diffs by default for rename, formatting, and code actions. Use `full: true` for exact normalized raw edits.
 - Edit documents report observed source hashes and origins, supplied version fields, and explicitly unknown analysis freshness. Preview limits and redaction affect presentation without dropping retained edits.
 

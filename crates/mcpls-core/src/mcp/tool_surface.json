@@ -770,7 +770,7 @@
   {
     "name": "get_code_actions",
     "title": "Code Actions",
-    "description": "Propose range quick fixes/refactorings/source actions; resolved edits and commands are retained. A line past EOF is invalid. truncated means actions/diagnostics/edits omitted; nonempty edit.dropped means incomplete edits. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
+    "description": "Propose range quick fixes/refactorings/source actions; resolved edits and commands are retained. A line past EOF is invalid. truncated means actions/diagnostics/edits omitted; nonempty edit.dropped means incomplete edits. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes; execute command-only actions outside this MCP interface.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -1239,7 +1239,7 @@
   {
     "name": "get_completions",
     "title": "Completions",
-    "description": "Completion suggestions at position. Returns methods, functions, variables, types, and snippets. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
+    "description": "API-discovery completions at position: labels, kinds, detail and documentation; no insertion text or snippet edits. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -3322,7 +3322,6 @@
           "type": "string"
         },
         "HierarchyItem": {
-          "description": "A call or type hierarchy item.",
           "properties": {
             "data": {},
             "detail": {
@@ -3337,21 +3336,18 @@
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "out_of_workspace": {
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selectionRange": {
               "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -3365,14 +3361,11 @@
           "type": "object"
         },
         "IncomingCall": {
-          "description": "An incoming call (caller of the current item).",
           "properties": {
             "from": {
-              "$ref": "#/$defs/HierarchyItem",
-              "description": "The item that calls the current item."
+              "$ref": "#/$defs/HierarchyItem"
             },
             "from_ranges": {
-              "description": "Ranges where the call occurs.",
               "items": {
                 "$ref": "#/$defs/Range"
               },
@@ -3386,10 +3379,8 @@
           "type": "object"
         },
         "IncomingCallsResult": {
-          "description": "Result of incoming calls request.",
           "properties": {
             "calls": {
-              "description": "List of incoming calls.",
               "items": {
                 "$ref": "#/$defs/IncomingCall"
               },
@@ -3403,11 +3394,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+              ]
             },
             "truncated": {
-              "description": "Whether `calls` (with their `from_ranges`) was capped below the server's full response.",
               "type": "boolean"
             }
           },
@@ -3421,7 +3410,6 @@
             {
               "properties": {
                 "calls": {
-                  "description": "List of incoming calls.",
                   "items": {
                     "$ref": "#/$defs/IncomingCall"
                   },
@@ -3482,7 +3470,6 @@
               "type": "object"
             }
           ],
-          "description": "A tool result with the [`IndexingSignal`] flattened beside it.",
           "properties": {
             "indexing_in_progress": {
               "type": "boolean"
@@ -3504,7 +3491,6 @@
           "type": "object"
         },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -3512,7 +3498,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -3525,7 +3510,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -3538,7 +3522,6 @@
           ]
         },
         "PositionSource": {
-          "description": "Where the queried position of a name-addressed call came from.",
           "oneOf": [
             {
               "const": "selection_range",
@@ -3567,15 +3550,12 @@
           ]
         },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -4010,7 +3990,6 @@
           "type": "string"
         },
         "HierarchyItem": {
-          "description": "A call or type hierarchy item.",
           "properties": {
             "data": {},
             "detail": {
@@ -4025,21 +4004,18 @@
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "out_of_workspace": {
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selectionRange": {
               "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -4057,7 +4033,6 @@
             {
               "properties": {
                 "calls": {
-                  "description": "List of outgoing calls.",
                   "items": {
                     "$ref": "#/$defs/OutgoingCall"
                   },
@@ -4118,7 +4093,6 @@
               "type": "object"
             }
           ],
-          "description": "A tool result with the [`IndexingSignal`] flattened beside it.",
           "properties": {
             "indexing_in_progress": {
               "type": "boolean"
@@ -4140,18 +4114,15 @@
           "type": "object"
         },
         "OutgoingCall": {
-          "description": "An outgoing call (callee from the current item).",
           "properties": {
             "from_ranges": {
-              "description": "Ranges where the call occurs.",
               "items": {
                 "$ref": "#/$defs/Range"
               },
               "type": "array"
             },
             "to": {
-              "$ref": "#/$defs/HierarchyItem",
-              "description": "The item being called."
+              "$ref": "#/$defs/HierarchyItem"
             }
           },
           "required": [
@@ -4161,10 +4132,8 @@
           "type": "object"
         },
         "OutgoingCallsResult": {
-          "description": "Result of outgoing calls request.",
           "properties": {
             "calls": {
-              "description": "List of outgoing calls.",
               "items": {
                 "$ref": "#/$defs/OutgoingCall"
               },
@@ -4178,11 +4147,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+              ]
             },
             "truncated": {
-              "description": "Whether `calls` (with their `from_ranges`) was capped below the server's full response.",
               "type": "boolean"
             }
           },
@@ -4192,7 +4159,6 @@
           "type": "object"
         },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -4200,7 +4166,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -4213,7 +4178,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -4226,7 +4190,6 @@
           ]
         },
         "PositionSource": {
-          "description": "Where the queried position of a name-addressed call came from.",
           "oneOf": [
             {
               "const": "selection_range",
@@ -4255,15 +4218,12 @@
           ]
         },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -5422,12 +5382,11 @@
   {
     "name": "get_subtypes",
     "title": "Subtypes",
-    "description": "Subtypes (derived classes, implementors) of a type hierarchy item. Takes an item exactly as returned by prepare_type_hierarchy, get_supertypes or get_subtypes; returns one level, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Subtypes (derived classes, implementors) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "HierarchyItem": {
           "additionalProperties": false,
-          "description": "A call or type hierarchy item.",
           "properties": {
             "data": {},
             "detail": {
@@ -5442,21 +5401,18 @@
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "out_of_workspace": {
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selectionRange": {
               "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -5471,7 +5427,6 @@
         },
         "Position2D": {
           "additionalProperties": false,
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -5479,7 +5434,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -5493,15 +5447,12 @@
         },
         "Range": {
           "additionalProperties": false,
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -5514,20 +5465,101 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "character": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "container": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "item": {
-          "$ref": "#/$defs/HierarchyItem",
-          "description": "The type hierarchy item, exactly as a prepare, supertypes or subtypes result gave it."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HierarchyItem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "symbol_kind": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "enum": [
+                    "file",
+                    "module",
+                    "namespace",
+                    "package",
+                    "class",
+                    "method",
+                    "property",
+                    "field",
+                    "constructor",
+                    "enum",
+                    "interface",
+                    "function",
+                    "variable",
+                    "constant",
+                    "string",
+                    "number",
+                    "boolean",
+                    "array",
+                    "object",
+                    "key",
+                    "null",
+                    "enummember",
+                    "struct",
+                    "event",
+                    "operator",
+                    "typeparameter"
+                  ]
+                },
+                {
+                  "pattern": "^[0-9]+$"
+                }
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "symbol_name": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "item"
-      ],
       "type": "object"
     },
     "outputSchema": {
       "$defs": {
         "HierarchyItem": {
-          "description": "A call or type hierarchy item.",
           "properties": {
             "data": {},
             "detail": {
@@ -5542,21 +5574,18 @@
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "out_of_workspace": {
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selectionRange": {
               "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -5569,8 +5598,53 @@
           ],
           "type": "object"
         },
+        "Indexed": {
+          "properties": {
+            "indexing_in_progress": {
+              "type": "boolean"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/HierarchyItem"
+              },
+              "type": "array"
+            },
+            "positions_degraded": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PositionDegradation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resolved_symbol": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResolvedSymbol"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/$defs/TypeWalkStatus"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "status",
+            "items",
+            "truncated",
+            "indexing_in_progress"
+          ],
+          "type": "object"
+        },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -5578,7 +5652,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -5591,7 +5664,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -5603,16 +5675,25 @@
             }
           ]
         },
+        "PositionSource": {
+          "oneOf": [
+            {
+              "const": "selection_range",
+              "type": "string"
+            },
+            {
+              "const": "inferred",
+              "type": "string"
+            }
+          ]
+        },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -5620,28 +5701,76 @@
             "end"
           ],
           "type": "object"
+        },
+        "ResolvedSymbol": {
+          "properties": {
+            "container": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "position": {
+              "$ref": "#/$defs/Position2D"
+            },
+            "position_source": {
+              "$ref": "#/$defs/PositionSource"
+            }
+          },
+          "required": [
+            "name",
+            "kind",
+            "position",
+            "position_source"
+          ],
+          "type": "object"
+        },
+        "TypeHierarchyResult": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/$defs/HierarchyItem"
+              },
+              "type": "array"
+            },
+            "positions_degraded": {
+              "$ref": "#/$defs/PositionDegradation"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "TypeWalkStatus": {
+          "enum": [
+            "ok",
+            "no_item",
+            "selection_required",
+            "preparation_incomplete"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "items": {
-          "description": "Type hierarchy items at the position, or the supertypes/subtypes of\nthe queried item.",
-          "items": {
-            "$ref": "#/$defs/HierarchyItem"
-          },
-          "type": "array"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TypeHierarchyResult"
         },
-        "positions_degraded": {
-          "$ref": "#/$defs/PositionDegradation",
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
-        },
-        "truncated": {
-          "description": "Whether `items` was capped below the server's full response.",
-          "type": "boolean"
+        {
+          "$ref": "#/$defs/Indexed"
         }
-      },
-      "required": [
-        "items"
       ],
       "type": "object"
     },
@@ -5655,12 +5784,11 @@
   {
     "name": "get_supertypes",
     "title": "Supertypes",
-    "description": "Supertypes (base classes, implemented interfaces) of a type hierarchy item. Takes an item exactly as returned by prepare_type_hierarchy, get_supertypes or get_subtypes; returns one level, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Supertypes (base classes, implemented interfaces) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "HierarchyItem": {
           "additionalProperties": false,
-          "description": "A call or type hierarchy item.",
           "properties": {
             "data": {},
             "detail": {
@@ -5675,21 +5803,18 @@
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "out_of_workspace": {
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selectionRange": {
               "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -5704,7 +5829,6 @@
         },
         "Position2D": {
           "additionalProperties": false,
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -5712,7 +5836,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -5726,15 +5849,12 @@
         },
         "Range": {
           "additionalProperties": false,
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -5747,20 +5867,101 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "character": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "container": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "item": {
-          "$ref": "#/$defs/HierarchyItem",
-          "description": "The type hierarchy item, exactly as a prepare, supertypes or subtypes result gave it."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HierarchyItem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "symbol_kind": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "enum": [
+                    "file",
+                    "module",
+                    "namespace",
+                    "package",
+                    "class",
+                    "method",
+                    "property",
+                    "field",
+                    "constructor",
+                    "enum",
+                    "interface",
+                    "function",
+                    "variable",
+                    "constant",
+                    "string",
+                    "number",
+                    "boolean",
+                    "array",
+                    "object",
+                    "key",
+                    "null",
+                    "enummember",
+                    "struct",
+                    "event",
+                    "operator",
+                    "typeparameter"
+                  ]
+                },
+                {
+                  "pattern": "^[0-9]+$"
+                }
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "symbol_name": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "item"
-      ],
       "type": "object"
     },
     "outputSchema": {
       "$defs": {
         "HierarchyItem": {
-          "description": "A call or type hierarchy item.",
           "properties": {
             "data": {},
             "detail": {
@@ -5775,21 +5976,18 @@
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "out_of_workspace": {
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selectionRange": {
               "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -5802,8 +6000,53 @@
           ],
           "type": "object"
         },
+        "Indexed": {
+          "properties": {
+            "indexing_in_progress": {
+              "type": "boolean"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/HierarchyItem"
+              },
+              "type": "array"
+            },
+            "positions_degraded": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PositionDegradation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resolved_symbol": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResolvedSymbol"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "$ref": "#/$defs/TypeWalkStatus"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "status",
+            "items",
+            "truncated",
+            "indexing_in_progress"
+          ],
+          "type": "object"
+        },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -5811,7 +6054,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -5824,7 +6066,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -5836,16 +6077,25 @@
             }
           ]
         },
+        "PositionSource": {
+          "oneOf": [
+            {
+              "const": "selection_range",
+              "type": "string"
+            },
+            {
+              "const": "inferred",
+              "type": "string"
+            }
+          ]
+        },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -5853,28 +6103,76 @@
             "end"
           ],
           "type": "object"
+        },
+        "ResolvedSymbol": {
+          "properties": {
+            "container": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "position": {
+              "$ref": "#/$defs/Position2D"
+            },
+            "position_source": {
+              "$ref": "#/$defs/PositionSource"
+            }
+          },
+          "required": [
+            "name",
+            "kind",
+            "position",
+            "position_source"
+          ],
+          "type": "object"
+        },
+        "TypeHierarchyResult": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/$defs/HierarchyItem"
+              },
+              "type": "array"
+            },
+            "positions_degraded": {
+              "$ref": "#/$defs/PositionDegradation"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "type": "object"
+        },
+        "TypeWalkStatus": {
+          "enum": [
+            "ok",
+            "no_item",
+            "selection_required",
+            "preparation_incomplete"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "items": {
-          "description": "Type hierarchy items at the position, or the supertypes/subtypes of\nthe queried item.",
-          "items": {
-            "$ref": "#/$defs/HierarchyItem"
-          },
-          "type": "array"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TypeHierarchyResult"
         },
-        "positions_degraded": {
-          "$ref": "#/$defs/PositionDegradation",
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
-        },
-        "truncated": {
-          "description": "Whether `items` was capped below the server's full response.",
-          "type": "boolean"
+        {
+          "$ref": "#/$defs/Indexed"
         }
-      },
-      "required": [
-        "items"
       ],
       "type": "object"
     },
@@ -5888,7 +6186,7 @@
   {
     "name": "get_tool_support",
     "title": "Tool Support",
-    "description": "Which tools are usable for which languages in this session, without making a failing call. Call it before using a tool on a new language. Per tool, `coverage` is `all`, `some`, `none`, `unknown` (a server is still initializing) or `always` (needs no language server); `routes` groups the languages (`languages`) that share a `status`: `supported`, `push_only` (no pull provider: `get_diagnostics` answers from the push cache), `capability_not_advertised`, `initializing` or `no_server`. `file_path` restricts the report to that file's language. `supported` means the call will be dispatched to a server advertising the capability, not that it will succeed: indexing, push-only diagnostics and respawn backoff can still fail it.",
+    "description": "Which tools are usable for which languages in this session, without making a failing call. Use it as an optional diagnostic aid. Per tool, `coverage` is `all`, `some`, `none`, `unknown` (a server is still initializing) or `always` (needs no language server); `routes` groups the languages (`languages`) that share a `status`: `supported`, `push_only` (no pull provider: `get_diagnostics` answers from the push cache), `capability_not_advertised`, `initializing` or `no_server`. `file_path` restricts the report to that file's language. `supported` means the call will be dispatched to a server advertising the capability, not that it will succeed: indexing, push-only diagnostics and respawn backoff can still fail it.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,

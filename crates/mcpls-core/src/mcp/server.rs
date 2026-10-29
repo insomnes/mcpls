@@ -58,7 +58,7 @@ use crate::bridge::{
     ServerLogsResult, ServerMessagesResult, SignatureHelpResult, SymbolTarget, Translator,
     TypeHierarchyResult, WorkspaceRoots, WorkspaceSymbolResult,
 };
-use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix};
+use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix, ToolProfile};
 use crate::redaction::{Redactions, ServerText};
 use crate::util::{MAX_ECHOED_NAME_BYTES, escape_bounded};
 
@@ -246,6 +246,48 @@ impl<T: ServerText> ServerText for DirectCallsResult<T> {
             Self::Ok { result, .. } => result.redact_server_text(redactions),
             Self::Stopped { result, .. } => result.redact_server_text(redactions),
         }
+    }
+}
+
+/// Item traversal retains its legacy shape; direct targets add status metadata.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(extend("type" = "object"))]
+enum TypeHierarchyWalkResult {
+    Legacy(TypeHierarchyResult),
+    Direct(Indexed<Addressed<DirectTypesResult>>),
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct DirectTypesResult {
+    status: TypeWalkStatus,
+    items: Vec<HierarchyItem>,
+    truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    positions_degraded: Option<crate::bridge::PositionDegradation>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum TypeWalkStatus {
+    Ok,
+    NoItem,
+    SelectionRequired,
+    PreparationIncomplete,
+}
+
+impl ServerText for TypeHierarchyWalkResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        match self {
+            Self::Legacy(result) => result.redact_server_text(redactions),
+            Self::Direct(result) => result.redact_server_text(redactions),
+        }
+    }
+}
+
+impl ServerText for DirectTypesResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        self.items.redact_server_text(redactions);
     }
 }
 
@@ -636,7 +678,10 @@ impl McplsServer {
         project_config_status: ProjectConfigStatus,
         mcp: McpConfig,
     ) -> Self {
-        let tool_router = Arc::new(Self::build_tool_router(mcp.tool_prefix.as_ref()));
+        let tool_router = Arc::new(Self::build_profile_tool_router(
+            mcp.tool_prefix.as_ref(),
+            mcp.tool_profile,
+        ));
         let context = Arc::new(BridgeContext::new(
             translator,
             notification_cache,
@@ -814,6 +859,22 @@ impl McplsServer {
         router
     }
 
+    /// Select the fixed catalog with matching prefixed discovery and dispatch.
+    fn build_profile_tool_router(
+        prefix: Option<&ToolPrefix>,
+        profile: ToolProfile,
+    ) -> ToolRouter<Self> {
+        let mut router = Self::build_tool_router(prefix);
+        for tool in McpTool::ALL {
+            if !tool.enabled(profile) {
+                router
+                    .map
+                    .remove(prefixed_tool_name(prefix, tool.name()).as_str());
+            }
+        }
+        router
+    }
+
     /// Get hover information at a position in a file.
     #[tool(
         description = concat!("Type and documentation info for a symbol. Returns signatures, docs, and inferred types. ", name_addressing_note!(), " ", positions_note_request!()),
@@ -981,7 +1042,7 @@ impl McplsServer {
 
     /// Get code completion suggestions.
     #[tool(
-        description = "Completion suggestions at position. Returns methods, functions, variables, types, and snippets. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
+        description = "API-discovery completions at position: labels, kinds, detail and documentation; no insertion text or snippet edits. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
         title = "Completions"
     )]
     async fn get_completions(
@@ -1102,7 +1163,7 @@ impl McplsServer {
     // read-only: returns proposed CodeAction edits, does not apply them --
     // mcpls has no write-back path today; revisit if that changes.
     #[tool(
-        description = "Propose range quick fixes/refactorings/source actions; resolved edits and commands are retained. A line past EOF is invalid. truncated means actions/diagnostics/edits omitted; nonempty edit.dropped means incomplete edits. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
+        description = "Propose range quick fixes/refactorings/source actions; resolved edits and commands are retained. A line past EOF is invalid. truncated means actions/diagnostics/edits omitted; nonempty edit.dropped means incomplete edits. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes; execute command-only actions outside this MCP interface.",
         title = "Code Actions"
     )]
     async fn get_code_actions(
@@ -1183,36 +1244,30 @@ impl McplsServer {
 
     /// Get the supertypes (bases) of a type hierarchy item.
     #[tool(
-        description = concat!("Supertypes (base classes, implemented interfaces) of a type hierarchy item. Takes an item exactly as returned by prepare_type_hierarchy, get_supertypes or get_subtypes; returns one level, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Supertypes (base classes, implemented interfaces) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. ", positions_note_request!(), " ", out_of_workspace_note!()),
         title = "Supertypes"
     )]
     async fn get_supertypes(
         &self,
-        Parameters(TypeHierarchyWalkParams { item }): Parameters<TypeHierarchyWalkParams>,
-    ) -> Result<Json<TypeHierarchyResult>, McpError> {
-        self.structured_result(
-            self.context
-                .translator
-                .handle_supertypes(parse_hierarchy_item(item)?)
-                .await,
-        )
+        Parameters(params): Parameters<TypeHierarchyWalkParams>,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
+        self.type_hierarchy_walk(params, |item| {
+            self.context.translator.handle_supertypes(item)
+        })
+        .await
     }
 
     /// Get the subtypes (derived types) of a type hierarchy item.
     #[tool(
-        description = concat!("Subtypes (derived classes, implementors) of a type hierarchy item. Takes an item exactly as returned by prepare_type_hierarchy, get_supertypes or get_subtypes; returns one level, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Subtypes (derived classes, implementors) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. ", positions_note_request!(), " ", out_of_workspace_note!()),
         title = "Subtypes"
     )]
     async fn get_subtypes(
         &self,
-        Parameters(TypeHierarchyWalkParams { item }): Parameters<TypeHierarchyWalkParams>,
-    ) -> Result<Json<TypeHierarchyResult>, McpError> {
-        self.structured_result(
-            self.context
-                .translator
-                .handle_subtypes(parse_hierarchy_item(item)?)
-                .await,
-        )
+        Parameters(params): Parameters<TypeHierarchyWalkParams>,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
+        self.type_hierarchy_walk(params, |item| self.context.translator.handle_subtypes(item))
+            .await
     }
 
     /// Get all occurrences of the symbol at a position within one file.
@@ -1495,7 +1550,7 @@ impl McplsServer {
 
     /// Report which tools are usable for which languages.
     #[tool(
-        description = "Which tools are usable for which languages in this session, without making a failing call. Call it before using a tool on a new language. Per tool, `coverage` is `all`, `some`, `none`, `unknown` (a server is still initializing) or `always` (needs no language server); `routes` groups the languages (`languages`) that share a `status`: `supported`, `push_only` (no pull provider: `get_diagnostics` answers from the push cache), `capability_not_advertised`, `initializing` or `no_server`. `file_path` restricts the report to that file's language. `supported` means the call will be dispatched to a server advertising the capability, not that it will succeed: indexing, push-only diagnostics and respawn backoff can still fail it.",
+        description = "Which tools are usable for which languages in this session, without making a failing call. Use it as an optional diagnostic aid. Per tool, `coverage` is `all`, `some`, `none`, `unknown` (a server is still initializing) or `always` (needs no language server); `routes` groups the languages (`languages`) that share a `status`: `supported`, `push_only` (no pull provider: `get_diagnostics` answers from the push cache), `capability_not_advertised`, `initializing` or `no_server`. `file_path` restricts the report to that file's language. `supported` means the call will be dispatched to a server advertising the capability, not that it will succeed: indexing, push-only diagnostics and respawn backoff can still fail it.",
         title = "Tool Support"
     )]
     async fn get_tool_support(
@@ -1512,7 +1567,12 @@ impl McplsServer {
         self.structured_result(file_language.map(|file_language| {
             let languages =
                 file_language.map_or_else(|| snapshot.languages(), |language| vec![language]);
-            ToolSupportReport::build(&snapshot, &languages, self.context.mcp.tool_prefix.as_ref())
+            ToolSupportReport::build(
+                &snapshot,
+                &languages,
+                self.context.mcp.tool_prefix.as_ref(),
+                self.context.mcp.tool_profile,
+            )
         }))
     }
 
@@ -1666,6 +1726,75 @@ impl McplsServer {
         self.structured_result(Ok(CallHierarchyCallsResult::Direct(Indexed::new(
             Addressed {
                 result,
+                resolved_symbol,
+            },
+            indexing,
+        ))))
+    }
+
+    /// Resolve and prepare a direct type target before one traversal.
+    async fn type_hierarchy_walk<F, Fut>(
+        &self,
+        params: TypeHierarchyWalkParams,
+        walk: F,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError>
+    where
+        F: FnOnce(CheckedHierarchyItem) -> Fut,
+        Fut: Future<Output = crate::error::Result<TypeHierarchyResult>>,
+    {
+        let target = match params {
+            TypeHierarchyWalkParams::Item { item } => {
+                return self.structured_result(
+                    walk(parse_hierarchy_item(item)?)
+                        .await
+                        .map(TypeHierarchyWalkResult::Legacy),
+                );
+            }
+            TypeHierarchyWalkParams::Target(target) => target,
+        };
+        if !target.file_path.is_absolute() {
+            return Err(McpError::invalid_params("file_path must be absolute", None));
+        }
+        let (file_path, target) = parse_target(target.file_path, target.target)?;
+        let translator = &self.context.translator;
+        let prepared = translator
+            .with_resolved_target(
+                file_path,
+                target,
+                AddressableTool::PrepareTypeHierarchy,
+                |file_path, position| translator.handle_type_hierarchy_prepare(file_path, position),
+            )
+            .await
+            .map_err(|error| self.render_error(error))?;
+        let Indexed {
+            result:
+                Addressed {
+                    result: mut prepared,
+                    resolved_symbol,
+                },
+            indexing,
+        } = hoist_indexing(prepared);
+        let status = if prepared.positions_degraded.is_some() {
+            TypeWalkStatus::PreparationIncomplete
+        } else if prepared.truncated || prepared.items.len() > 1 {
+            TypeWalkStatus::SelectionRequired
+        } else if let Some(item) = prepared.items.pop() {
+            // Preserve original opaque data until traversal has completed.
+            prepared = walk(parse_hierarchy_item(item)?)
+                .await
+                .map_err(|error| self.render_error(error))?;
+            TypeWalkStatus::Ok
+        } else {
+            TypeWalkStatus::NoItem
+        };
+        self.structured_result(Ok(TypeHierarchyWalkResult::Direct(Indexed::new(
+            Addressed {
+                result: DirectTypesResult {
+                    status,
+                    items: prepared.items,
+                    truncated: prepared.truncated,
+                    positions_degraded: prepared.positions_degraded,
+                },
                 resolved_symbol,
             },
             indexing,
@@ -2851,13 +2980,13 @@ mod tests {
                     .await
                     .map(|_| ()),
                 server
-                    .get_supertypes(Parameters(TypeHierarchyWalkParams {
+                    .get_supertypes(Parameters(TypeHierarchyWalkParams::Item {
                         item: item_json(range, selection),
                     }))
                     .await
                     .map(|_| ()),
                 server
-                    .get_subtypes(Parameters(TypeHierarchyWalkParams {
+                    .get_subtypes(Parameters(TypeHierarchyWalkParams::Item {
                         item: item_json(range, selection),
                     }))
                     .await
@@ -3300,6 +3429,7 @@ mod tests {
             description: Some(McpDescription::new("Custom description").unwrap()),
             instructions: Some(McpInstructions::new("Custom instructions.").unwrap()),
             tool_prefix: None,
+            ..McpConfig::default()
         };
         let server = create_test_server_with_mcp_config(ProjectConfigStatus::NotIgnored, mcp);
         let info = server.get_info();
@@ -3325,6 +3455,7 @@ mod tests {
             description: None,
             instructions: Some(McpInstructions::new(instructions.clone()).unwrap()),
             tool_prefix: None,
+            ..McpConfig::default()
         };
         let server = create_test_server_with_mcp_config(ProjectConfigStatus::IgnoredUntrusted, mcp);
         let info = server.get_info();
@@ -6084,6 +6215,69 @@ sleep 0.3
         }
     }
 
+    /// Direct queries must distinguish no callable from a callable with no calls,
+    /// and must not traverse ambiguous or degraded preparation.
+    #[tokio::test]
+    async fn test_direct_types_classify_preparation_over_mcp() {
+        // The existing public preparation limit is 10,000 items.
+        const MAX_NORMALIZED_LOCATIONS: usize = 10_000;
+
+        for tool in ["get_supertypes", "get_subtypes"] {
+            for (count, degraded, expected) in [
+                (0, false, "no_item"),
+                (1, false, "ok"),
+                (2, false, "selection_required"),
+                (MAX_NORMALIZED_LOCATIONS + 1, false, "selection_required"),
+                (0, true, "preparation_incomplete"),
+                (1, true, "preparation_incomplete"),
+                (2, true, "preparation_incomplete"),
+                (MAX_NORMALIZED_LOCATIONS + 1, true, "preparation_incomplete"),
+            ] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let items = serde_json::Value::Array(vec![item; count]);
+                let (result, requests) = hierarchy_wire_call(
+                    fixture,
+                    tool,
+                    |file| {
+                        serde_json::json!({
+                            "file_path": file, "line": 1,
+                            "character": if degraded { 15 } else { 4 },
+                        })
+                    },
+                    items,
+                    serde_json::json!([]),
+                    degraded,
+                )
+                .await;
+                assert_eq!(result["status"], expected, "{tool}: {result}");
+                assert_eq!(result["indexing_in_progress"], false);
+                let walks = requests
+                    .iter()
+                    .filter(|request| {
+                        request["method"]
+                            .as_str()
+                            .is_some_and(|method| method.starts_with("typeHierarchy/"))
+                    })
+                    .count();
+                if expected == "ok" {
+                    assert_eq!(result["items"], serde_json::json!([]));
+                    assert_eq!(walks, 1);
+                } else {
+                    assert_eq!(
+                        result["items"].as_array().unwrap().len(),
+                        count.min(MAX_NORMALIZED_LOCATIONS)
+                    );
+                    assert_eq!(walks, 0, "unsafe preparation must not traverse");
+                }
+                assert_eq!(result["truncated"], count > MAX_NORMALIZED_LOCATIONS);
+                if degraded {
+                    assert_eq!(result["positions_degraded"], "request");
+                }
+            }
+        }
+    }
+
     /// Both direct addressing forms return real relationships and forward opaque
     /// JSON unchanged. Legacy reuse retains the old result shape.
     #[tokio::test]
@@ -6131,6 +6325,40 @@ sleep 0.3
         }
     }
 
+    /// Direct type results preserve opaque data for selected-item traversal.
+    #[tokio::test]
+    async fn test_direct_types_position_name_and_item_reuse_over_mcp() {
+        for tool in ["get_supertypes", "get_subtypes"] {
+            for by_name in [false, true] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let opaque = item["data"].clone();
+                let (result, requests) = hierarchy_wire_call(
+                    fixture, tool,
+                    |file| if by_name {
+                        serde_json::json!({"file_path": file, "symbol_name": "f", "symbol_kind": "function"})
+                    } else {
+                        serde_json::json!({"file_path": file, "line": 1, "character": 4})
+                    },
+                    serde_json::json!([item]), serde_json::json!([item]), false,
+                ).await;
+                assert_eq!(result["status"], "ok", "{result}");
+                assert_eq!(result["items"][0]["data"], opaque);
+                assert_eq!(result.get("resolved_symbol").is_some(), by_name);
+                let walks: Vec<_> = requests
+                    .iter()
+                    .filter(|r| {
+                        r["method"]
+                            .as_str()
+                            .is_some_and(|m| m.starts_with("typeHierarchy/"))
+                    })
+                    .collect();
+                assert_eq!(walks.len(), 2);
+                assert!(walks.iter().all(|r| r["params"]["item"]["data"] == opaque));
+            }
+        }
+    }
+
     /// Both forms and statuses are discoverable through the public list endpoint.
     #[tokio::test]
     async fn test_direct_call_schemas_over_mcp() {
@@ -6174,6 +6402,86 @@ sleep 0.3
         }
     }
 
+    /// Static profiles must agree across discovery, support, schemas and dispatch.
+    #[tokio::test]
+    async fn test_static_profiles_over_mcp() {
+        for prefix in [None, Some("p")] {
+            let mut agent_tools = Vec::new();
+            for profile in [ToolProfile::Agent, ToolProfile::Full] {
+                let server = create_test_server_with_mcp_config(
+                    ProjectConfigStatus::NotIgnored,
+                    McpConfig {
+                        tool_profile: profile,
+                        tool_prefix: prefix.map(|p| p.parse().unwrap()),
+                        ..Default::default()
+                    },
+                );
+                let name =
+                    |tool: &str| prefix.map_or_else(|| tool.to_owned(), |p| format!("{p}_{tool}"));
+                let (listed, _) = request_over_the_wire(
+                    server.for_new_session(),
+                    "tools/list",
+                    serde_json::json!({}),
+                )
+                .await;
+                let tools = listed["result"]["tools"].as_array().unwrap();
+                assert_eq!(
+                    tools.len(),
+                    if profile == ToolProfile::Agent {
+                        27
+                    } else {
+                        30
+                    }
+                );
+                let supported = tools_call_over_the_wire(
+                    server.for_new_session(),
+                    serde_json::json!({"name": name("get_tool_support"), "arguments": {}}),
+                )
+                .await;
+                let report = supported["result"]["structuredContent"]["tools"]
+                    .as_array()
+                    .unwrap();
+                let mut listed_names: Vec<_> = tools.iter().map(|t| t["name"].clone()).collect();
+                let mut supported_names: Vec<_> =
+                    report.iter().map(|t| t["name"].clone()).collect();
+                listed_names.sort_by_key(ToString::to_string);
+                supported_names.sort_by_key(ToString::to_string);
+                assert_eq!(listed_names, supported_names);
+                if profile == ToolProfile::Agent {
+                    agent_tools = tools.clone();
+                    let unknown = tools_call_over_the_wire(
+                        server.for_new_session(),
+                        serde_json::json!({"name": name("unknown"), "arguments": {}}),
+                    )
+                    .await;
+                    for excluded in [
+                        "get_folding_ranges",
+                        "get_selection_ranges",
+                        "prepare_type_hierarchy",
+                    ] {
+                        let response = tools_call_over_the_wire(
+                            server.for_new_session(),
+                            serde_json::json!({"name": name(excluded), "arguments": {}}),
+                        )
+                        .await;
+                        assert_eq!(response["error"]["code"], unknown["error"]["code"]);
+                        assert!(!listed_names.contains(&serde_json::json!(name(excluded))));
+                    }
+                } else {
+                    for agent in &agent_tools {
+                        assert_eq!(
+                            tools
+                                .iter()
+                                .find(|full| full["name"] == agent["name"])
+                                .unwrap(),
+                            agent
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Direct queries replace standalone MCP preparation in both inventories.
     #[tokio::test]
     async fn test_removed_call_preparation_over_mcp() {
@@ -6194,7 +6502,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 30);
+            assert_eq!(tools.len(), 27);
             assert!(
                 !tools
                     .iter()
@@ -6208,7 +6516,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 30);
+            assert_eq!(tools.len(), 27);
             assert!(
                 !tools
                     .iter()
@@ -6275,6 +6583,7 @@ sleep 0.3
                 "rust",
                 lsp_types::ServerCapabilities {
                     call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                    type_hierarchy_provider: Some(lsp_types::TypeHierarchyProvider::Bool(true)),
                     document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
                     ..Default::default()
                 },
@@ -6309,6 +6618,7 @@ sleep 0.3
                 crate::lsp::LspServer::new_for_test_with_encoding(
                     lsp_types::ServerCapabilities {
                         call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                        type_hierarchy_provider: Some(lsp_types::TypeHierarchyProvider::Bool(true)),
                         ..Default::default()
                     },
                     lsp_types::PositionEncodingKind::UTF8,
@@ -6325,8 +6635,13 @@ sleep 0.3
                 let request = read_framed_message(&mut wire).await;
                 seen.lock().await.push(request.clone());
                 let response = match request["method"].as_str().unwrap() {
-                    "textDocument/prepareCallHierarchy" => prepared.clone(),
-                    "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls" => calls.clone(),
+                    "textDocument/prepareCallHierarchy" | "textDocument/prepareTypeHierarchy" => {
+                        prepared.clone()
+                    }
+                    "callHierarchy/incomingCalls"
+                    | "callHierarchy/outgoingCalls"
+                    | "typeHierarchy/supertypes"
+                    | "typeHierarchy/subtypes" => calls.clone(),
                     "textDocument/documentSymbol" => serde_json::json!([{
                         "name": "f", "kind": 12,
                         "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 9}},
@@ -6366,6 +6681,22 @@ sleep 0.3
             assert!(legacy.get("status").is_none(), "{reused}");
             assert!(legacy.get("indexing_in_progress").is_none());
             assert_eq!(legacy["calls"], direct["calls"]);
+        }
+        if direct["status"] == "ok"
+            && direct["items"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        {
+            let reused = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({"name": tool, "arguments": {"item": direct["items"][0]}}),
+            )
+            .await;
+            let legacy = &reused["result"]["structuredContent"];
+            assert!(legacy.get("status").is_none(), "{reused}");
+            assert!(legacy.get("indexing_in_progress").is_none());
+            assert!(legacy.get("truncated").is_none());
+            assert_eq!(legacy["items"], direct["items"]);
         }
         responder.abort();
         let requests = requests.lock().await.clone();
@@ -7283,6 +7614,14 @@ sleep 0.3
         );
     }
 
+    #[test]
+    fn test_agent_tool_surface_matches_golden_snapshot() {
+        let tools = McplsServer::build_profile_tool_router(None, ToolProfile::Agent).list_all();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("tool_surface_agent.json")).unwrap();
+        assert_eq!(serde_json::to_value(tools).unwrap(), expected);
+    }
+
     /// Only the six enrichment tools declare `context`, with exactly the
     /// two closed values; `get_cached_diagnostics` must not.
     #[test]
@@ -7548,7 +7887,7 @@ sleep 0.3
         let type_item = || {
             let uri = url::Url::from_file_path(file).unwrap().to_string();
             let at = |character| crate::bridge::Position2D { line: 1, character };
-            TypeHierarchyWalkParams {
+            TypeHierarchyWalkParams::Item {
                 item: crate::bridge::HierarchyItem {
                     name: "T".to_string(),
                     kind: 5,
@@ -7855,7 +8194,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 30);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 27);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

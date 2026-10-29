@@ -23,7 +23,7 @@ metadata:
 mcpls is a single Rust binary that bridges the Model Context Protocol (MCP) to the
 Language Server Protocol (LSP). It spawns and speaks LSP to real language servers
 (rust-analyzer, pyright, gopls, clangd, …) and exposes their capabilities to an AI
-agent as 30 MCP tools — hover, go-to-definition, references, diagnostics, rename with internal preparation, completions, symbols, formatting (document and range), call and type
+agent as 27 default MCP tools (30 with the full profile) — hover, go-to-definition, references, diagnostics, rename with internal preparation, completions, symbols, formatting (document and range), call and type
 hierarchy, document highlights, a `get_tool_support` report of which tools work for which
 languages, and more.
 
@@ -33,10 +33,12 @@ identifiers and command arguments are returned unmodified.
 
 This skill covers operating the **binary**: installing it, choosing CLI flags and
 environment variables, registering it with an MCP client, and writing `mcpls.toml`.
-It does not enumerate the 30 MCP tools themselves or their parameters — for that, see
+It does not enumerate the MCP tools themselves or their parameters — for that, see
 [Tools Reference](https://bug-ops.github.io/mcpls/tools/overview.html).
 If the bridge is configured with `mcp.tool_prefix`, every tool name listed there gains
 that prefix (`{tool_prefix}_{tool}`).
+
+The default `[mcp].tool_profile = "agent"` exposes 27 tools. Set `tool_profile = "full"` to restore all 30 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 `rename_symbol` resolves a name or position and prepares on the rename server when supported.
 Its `proposed` result includes the queried `position`, `preparation`, and `changes`.
@@ -46,7 +48,7 @@ Request a proposal, inspect it, then apply complete edits through the client.
 Edit tools (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) default to bounded readable previews.
 Set `full: true` to include exact normalized raw `edits`; previews never change raw replacement text.
 Each edit document has `uri`, `edit_count`, `preview`, optional `preview_source` and `supplied_version`, and `analysis_freshness: "unknown"`.
-Formatting returns one document in `changes`, including empty successful edit sets. Command-only actions have no preview.
+Formatting returns one document in `changes`, including empty successful edit sets. Command-only actions have no preview and require execution outside this MCP interface; mcpls provides no command execution API.
 `preview.status` is `complete`, `truncated`, or `unavailable`; inspect `reason` when output is limited.
 Diffs have three context lines. Configured secret redaction sets `redacted: true` when it changes displayed text.
 `preview_source.origin` is `tracked` or `disk`; `sha256` hashes the exact unredacted observed bytes.
@@ -56,6 +58,8 @@ An OS read already in progress can overrun the deadline. Unreliable positions, i
 Previews never write files, execute commands, or add language-server opens solely for referenced source.
 
 Do not apply proposals with non-empty `dropped` or unreliable positions.
+
+`get_completions` provides API-discovery labels, kinds, detail and documentation, without insertion text or snippet edits. `get_tool_support` is an optional diagnostic aid.
 
 ## Prerequisites
 

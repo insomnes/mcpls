@@ -126,4 +126,4 @@ Not every server supports every tool. rust-analyzer advertises neither type hier
 
 ## What's Next
 
-Now tour [what the 30 tools can do](../tools/overview.md).
+Now tour [what the 27 default tools (30 with the full profile) can do](../tools/overview.md).

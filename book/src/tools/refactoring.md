@@ -73,7 +73,7 @@ Default responses omit `edits`. mcpls never writes files or executes action comm
 
 Every retained document has `uri`, `edit_count`, `preview`, and `analysis_freshness: "unknown"`.
 Formatting returns a one-document `changes` array, including successful empty edit sets.
-Code actions retain their commands and optional `edit.changes`; command-only actions have no edit preview.
+Code actions retain their commands and optional `edit.changes`; command-only actions have no edit preview. Execute such commands outside this MCP interface; mcpls has no command execution API.
 
 `preview.status` is `complete`, `truncated`, or `unavailable`.
 Available `diff` text uses unified diff syntax with three context lines and observed/proposed headers.

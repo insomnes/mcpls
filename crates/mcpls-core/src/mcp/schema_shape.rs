@@ -8,7 +8,7 @@
 //! first paragraph up to a byte cap (whole sentences, or nothing), and a
 //! definition that several tools carry keeps only a one-line form. It changes `description` annotations only, so
 //! property names, types, `required` lists and `$ref`s are untouched.
-//! Reference and edit tools omit output descriptions to keep source outcomes
+//! Reference, hierarchy and edit tools omit output descriptions to keep source outcomes
 //! and previews within the tool-size budget; tool descriptions explain the fields.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -190,11 +190,26 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
     let usage = DefinitionUsage::count(&tools);
     for tool in &mut tools {
         shape_schema(Arc::make_mut(&mut tool.input_schema), &usage);
+        if matches!(tool.name.as_ref(), "get_supertypes" | "get_subtypes") {
+            // Direct addressing adds the same hierarchy fields to both tools.
+            // The tool description explains them; retain the structural schema.
+            let mut schema = Schema::from(std::mem::take(Arc::make_mut(&mut tool.input_schema)));
+            RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
+                .transform(&mut schema);
+            if let Value::Object(shaped) = Value::from(schema) {
+                *Arc::make_mut(&mut tool.input_schema) = shaped;
+            }
+        }
+
         if let Some(output) = tool.output_schema.as_mut() {
             shape_schema(Arc::make_mut(output), &usage);
             if matches!(
                 tool.name.as_ref(),
                 "get_references"
+                    | "get_incoming_calls"
+                    | "get_outgoing_calls"
+                    | "get_supertypes"
+                    | "get_subtypes"
                     | "rename_symbol"
                     | "format_document"
                     | "format_range"
@@ -741,15 +756,18 @@ mod tests {
             for (schema_index, (old, new)) in schemas_of(before).zip(schemas_of(after)).enumerate()
             {
                 // These rich output schemas use explicit dropping, not truncation.
-                if schema_index == 1
-                    && matches!(
-                        before.name.as_ref(),
-                        "get_references"
-                            | "rename_symbol"
-                            | "format_document"
-                            | "format_range"
-                            | "get_code_actions"
-                    )
+                if matches!(before.name.as_ref(), "get_supertypes" | "get_subtypes")
+                    || schema_index == 1
+                        && matches!(
+                            before.name.as_ref(),
+                            "get_references"
+                                | "get_incoming_calls"
+                                | "get_outgoing_calls"
+                                | "rename_symbol"
+                                | "format_document"
+                                | "format_range"
+                                | "get_code_actions"
+                        )
                 {
                     continue;
                 }

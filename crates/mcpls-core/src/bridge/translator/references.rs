@@ -445,16 +445,18 @@ pub(super) fn redact_sources(locations: &mut [ReferenceLocation], redactions: &R
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use serde_json::{Value, json};
+    use tempfile::TempDir;
+    use tokio::io::BufReader;
+
     use super::*;
     use crate::bridge::translator::dto::ReferencesResult;
     use crate::bridge::translator::enclosing::ResultContext;
     use crate::bridge::translator::testing::*;
     use crate::config::ServerId;
     use crate::test_lsp::client_path;
-    use serde_json::{Value, json};
-    use std::sync::Arc;
-    use tempfile::TempDir;
-    use tokio::io::BufReader;
 
     fn location(path: &Path, line: u32) -> Value {
         json!({"uri":url::Url::from_file_path(path).unwrap().to_string(),"range":{"start":{"line":line,"character":0},"end":{"line":line,"character":1}}})

@@ -57,13 +57,24 @@ Give either `item` or a direct target, never both. Item requests return `calls` 
 
 ## Type hierarchy
 
-The same pattern applies to inheritance and trait relationships:
+`get_supertypes` returns base classes and implemented interfaces. `get_subtypes` returns derived classes and implementors. Both accept an absolute `file_path` with `line` and `character`, or `symbol_name` with optional `symbol_kind` and `container` qualifiers. Positions use 1-based UTF-16 columns.
 
-1. `prepare_type_hierarchy` takes a position and returns type items.
-2. `get_supertypes` returns the base classes and implemented interfaces of an item.
-3. `get_subtypes` returns derived classes and implementors, one level at a time.
+```json
+{ "file_path": "/work/app/model.py", "symbol_name": "Store", "symbol_kind": "class" }
+```
 
-Feed an item back into either tool, including items they returned, to walk up or down the tree. Not every server supports type hierarchy: rust-analyzer and typescript-language-server do not advertise it, and the TypeScript 7 native server does not support it either. Ask `get_tool_support` first.
+Each direct query prepares internally and traverses one level only for one complete item with reliable positions. Results contain `items`, `truncated` (including false), `indexing_in_progress`, and `status`. Name queries also include `resolved_symbol`.
+
+- `ok`: traversal succeeded; empty related items are valid.
+- `no_item`: preparation found no items.
+- `selection_required`: preparation was truncated or returned several candidates; select one unchanged item explicitly.
+- `preparation_incomplete`: preparation positions were degraded. This takes precedence over truncation, multiple candidates, and absence. No traversal occurs.
+
+Preserve position warnings and indexing signals. Empty results while indexing do not prove absence. Give either an item or a file target, never both. Missing names, ambiguous names, invalid targets, unsupported capabilities, and server faults remain errors.
+
+Pass a returned item unchanged as `{ "item": <selected object> }` to either tool for further traversal. Preserve opaque `data`. Item responses keep the legacy shape without direct status, indexing, or resolved-symbol fields. Workspace boundaries still apply to later requests.
+
+The default `agent` profile omits standalone `prepare_type_hierarchy`. Set `[mcp].tool_profile = "full"` for the previous prepare-then-traverse workflow. Direct queries work in both profiles. `get_tool_support` is an optional diagnostic aid for checking server support.
 
 ## What's Next
 

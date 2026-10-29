@@ -9,12 +9,14 @@
 
 **Give your AI coding agent a compiler's understanding of your code.**
 
-mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 30 MCP tools, so an AI client reasons about code the way an IDE does.
+mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 27 default MCP tools (30 with the full profile), so an AI client reasons about code the way an IDE does.
 
 ```mermaid
 flowchart LR
     C["AI client"] <-->|MCP| M["mcpls"] <-->|LSP| S["rust-analyzer / pyright / gopls / ..."]
 ```
+
+The default `[mcp].tool_profile = "agent"` exposes 27 tools. Set `tool_profile = "full"` to restore all 30 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 ## Documentation
 
@@ -25,7 +27,7 @@ The full documentation is the mcpls book: **<https://bug-ops.github.io/mcpls/>**
 | Install and first run | [Installation](https://bug-ops.github.io/mcpls/getting-started/installation.html) |
 | Connect Claude Code or another client | [Connect an AI Client](https://bug-ops.github.io/mcpls/getting-started/connect-client.html) |
 | Configure language servers | [Configuration](https://bug-ops.github.io/mcpls/guide/configuration.html) |
-| All 30 tools | [Tools Overview](https://bug-ops.github.io/mcpls/tools/overview.html) |
+| Tool catalog | [Tools Overview](https://bug-ops.github.io/mcpls/tools/overview.html) |
 | Something does not work | [Troubleshooting](https://bug-ops.github.io/mcpls/guide/troubleshooting.html) |
 | HTTP transport and allowlists | [Transports](https://bug-ops.github.io/mcpls/advanced/transports.html) |
 | Security model and untrusted workspaces | [Security and Trust](https://bug-ops.github.io/mcpls/advanced/security.html) |

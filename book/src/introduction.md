@@ -17,7 +17,7 @@ flowchart LR
     C["AI client"] <-->|MCP| M["mcpls"] <-->|LSP| S["rust-analyzer / pyright / gopls / ..."]
 ```
 
-It starts the language servers it needs for your project, translates every question into LSP, and returns the answer in a form the assistant can use. It exposes 30 tools, from `get_hover` and `get_references` to `rename_symbol` and `get_diagnostics`.
+It starts the language servers it needs for your project, translates every question into LSP, and returns the answer in a form the assistant can use. It exposes 27 default tools (30 with the full profile), from `get_hover` and `get_references` to `rename_symbol` and `get_diagnostics`.
 
 ## What you get
 

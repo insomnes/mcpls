@@ -8,7 +8,7 @@ In this chapter you learn the four tools that look at the language servers thems
 
 ## get_tool_support
 
-Reports which tools are usable for which languages in the current session, without making a call that is certain to fail. Call it before using a tool on a language you have not used yet.
+Reports which tools are usable for which languages in the current session, without making a call that is certain to fail. Use it as an optional diagnostic aid when checking language support.
 
 Argument: optional `file_path`, which restricts the report to that file's language.
 

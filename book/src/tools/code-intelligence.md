@@ -157,13 +157,13 @@ Returns the signatures and parameter documentation for the call at a position, w
 
 ## get_completions
 
-Returns completion candidates at a position. Add `trigger` (for example `.`, `:` or `->`) to mimic typing a trigger character.
+Returns API-discovery completion candidates at a position. Add `trigger` (for example `.`, `:` or `->`) to mimic typing a trigger character.
 
 ```json
 { "file_path": "/work/app/src/billing.rs", "line": 57, "character": 18, "trigger": "." }
 ```
 
-Each item has a `label`, a numeric `kind` (2 method, 3 function, 5 field, 6 variable, 7 class, 9 module), a `detail`, optional `documentation` and `insertText`. Completion requests are capped at 10 seconds whatever `request_timeout_seconds` says.
+Each item has a `label`, a numeric `kind` (2 method, 3 function, 5 field, 6 variable, 7 class, 9 module), a `detail`, and optional `documentation`. Results do not include insertion text, snippets, or completion edit payloads. Completion requests are capped at 10 seconds whatever `request_timeout_seconds` says.
 
 ## get_inlay_hints
 

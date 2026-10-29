@@ -169,13 +169,60 @@ fn test_e2e_get_tool_support_reports_every_tool() -> Result<()> {
     let tools = report["tools"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("tools should be an array: {report}"))?;
-    assert_eq!(tools.len(), 30, "{report}");
+    assert_eq!(tools.len(), 27, "{report}");
     let logs = tools
         .iter()
         .find(|tool| tool["name"] == "get_server_logs")
         .ok_or_else(|| anyhow::anyhow!("get_server_logs missing: {report}"))?;
     assert_eq!(logs["coverage"], "always");
 
+    Ok(())
+}
+
+/// Each configured profile controls public discovery, support and excluded dispatch.
+#[test]
+#[ignore = "Requires mcpls binary built"]
+fn test_e2e_tool_profiles() -> Result<()> {
+    for (profile, count) in [("", 27), ("agent", 27), ("full", 30)] {
+        let temp = TempDir::new()?;
+        let config = temp.path().join("profile.toml");
+        let mcp = if profile.is_empty() {
+            String::new()
+        } else {
+            format!("[mcp]\ntool_profile = \"{profile}\"\ntool_prefix = \"p\"\n")
+        };
+        std::fs::write(&config, format!("lsp_servers = []\n{mcp}"))?;
+        let mut client = McpClient::spawn_with_args(&["--config", config.to_str().unwrap()])?;
+        client.initialize()?;
+        let name = |tool: &str| {
+            if profile.is_empty() {
+                tool.to_owned()
+            } else {
+                format!("p_{tool}")
+            }
+        };
+        let listed = client.list_tools()?;
+        let tools = listed["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), count);
+        let support = client.call_tool(&name("get_tool_support"), &json!({}))?;
+        let report: serde_json::Value =
+            serde_json::from_str(support["result"]["content"][0]["text"].as_str().unwrap())?;
+        assert_eq!(report["tools"].as_array().unwrap().len(), count);
+        for excluded in [
+            "get_folding_ranges",
+            "get_selection_ranges",
+            "prepare_type_hierarchy",
+        ] {
+            assert_eq!(
+                tools.iter().any(|t| t["name"] == name(excluded)),
+                profile == "full"
+            );
+            if profile != "full" {
+                let rejected = client.call_tool(&name(excluded), &json!({}))?;
+                assert!(rejected.get("error").is_some(), "{rejected}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -196,7 +243,7 @@ fn test_e2e_list_tools() -> Result<()> {
         .as_array()
         .unwrap_or_else(|| panic!("tools should be an array"));
 
-    assert_eq!(tools.len(), 30, "Should have exactly 30 tools");
+    assert_eq!(tools.len(), 27, "Should have exactly 27 default tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
@@ -214,13 +261,10 @@ fn test_e2e_list_tools() -> Result<()> {
         "get_code_actions",
         "get_incoming_calls",
         "get_outgoing_calls",
-        "prepare_type_hierarchy",
         "get_supertypes",
         "get_subtypes",
         "get_document_highlights",
         "format_range",
-        "get_selection_ranges",
-        "get_folding_ranges",
         "get_cached_diagnostics",
         "get_server_logs",
         "get_server_messages",

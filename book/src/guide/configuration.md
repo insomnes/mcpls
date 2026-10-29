@@ -152,6 +152,8 @@ Here `pylsp` answers `get_diagnostics` and `get_cached_diagnostics`, and `pyrigh
 
 ## Customize how mcpls introduces itself
 
+The default `[mcp].tool_profile = "agent"` exposes 27 tools. Set `tool_profile = "full"` to restore all 30 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+
 The `[mcp]` section changes the text and tool names clients see. Use `tool_prefix` when you run several mcpls instances in one client:
 
 ```toml

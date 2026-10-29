@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Serialize, Serializer};
 
 use crate::bridge::{Capability, RouteSupport, ToolSupportSnapshot};
-use crate::config::{LanguageId, ToolKind, ToolPrefix};
+use crate::config::{LanguageId, ToolKind, ToolPrefix, ToolProfile};
 use crate::redaction::{Redactions, ServerText};
 
 /// Where a tool's request is served.
@@ -103,6 +103,15 @@ impl McpTool {
         Self::GoToDeclaration,
         Self::RestartServer,
     ];
+
+    /// Whether this tool belongs to the configured static catalog.
+    pub(super) const fn enabled(self, profile: ToolProfile) -> bool {
+        matches!(profile, ToolProfile::Full)
+            || !matches!(
+                self,
+                Self::GetFoldingRanges | Self::GetSelectionRanges | Self::PrepareTypeHierarchy
+            )
+    }
 
     /// Byte length of the longest unprefixed tool name.
     #[expect(
@@ -341,9 +350,11 @@ impl ToolSupportReport {
         snapshot: &ToolSupportSnapshot,
         languages: &[LanguageId],
         prefix: Option<&ToolPrefix>,
+        profile: ToolProfile,
     ) -> Self {
         let tools = McpTool::ALL
             .iter()
+            .filter(|tool| tool.enabled(profile))
             .map(|tool| {
                 let spec = tool.spec();
                 let (coverage, routes) = match spec.backend {

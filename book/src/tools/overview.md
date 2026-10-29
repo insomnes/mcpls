@@ -1,12 +1,12 @@
 # Tools Overview
 
-In this chapter you learn the conventions every mcpls tool shares: how code is addressed, what the advisory flags in results mean, and how to read errors. The next chapters then cover the 30 tools by task. Learn these rules once and every tool becomes predictable.
+In this chapter you learn the conventions every mcpls tool shares: how code is addressed, what the advisory flags in results mean, and how to read errors. The next chapters then cover the tools by task. Learn these rules once and every tool becomes predictable.
 
 ## Prerequisites
 
 - A [connected client](../getting-started/connect-client.md).
 
-## The 30 tools at a glance
+## Tools at a glance
 
 | Task | Tools |
 |------|-------|
@@ -19,6 +19,10 @@ In this chapter you learn the conventions every mcpls tool shares: how code is a
 Every tool is read-only except `restart_server`, which stops and starts language server processes. Tools that produce edits (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) return them without applying them.
 
 If you set `mcp.tool_prefix`, every name above gains the prefix, as in `{tool_prefix}_get_hover`.
+
+The table includes full-profile-only tools: `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`.
+
+The default `[mcp].tool_profile = "agent"` exposes 27 tools. Set `tool_profile = "full"` to restore all 30 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 ## Addressing code
 
@@ -33,7 +37,7 @@ Range tools take `start_line`, `start_character`, `end_line` and `end_character`
 
 ### Addressing a symbol by name
 
-`get_hover`, `get_definition`, `get_references`, `go_to_implementation`, `go_to_type_definition`, `get_incoming_calls`, `get_outgoing_calls` and `rename_symbol` accept a symbol name instead of a position:
+`get_hover`, `get_definition`, `get_references`, `go_to_implementation`, `go_to_type_definition`, `get_incoming_calls`, `get_outgoing_calls`, `get_supertypes`, `get_subtypes` and `rename_symbol` accept a symbol name instead of a position:
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -70,7 +74,7 @@ List-returning tools are capped at a fixed maximum. When more exist, the result 
 
 ### Advisory flags
 
-These flags describe locations and position reliability. Direct call queries stop before automatic traversal when preparation reports degraded positions.
+These flags describe locations and position reliability. Direct call and type queries stop before automatic traversal when preparation reports degraded positions.
 
 - **`out_of_workspace`** is set on each location that falls outside every workspace root, such as the standard library or a dependency. The location is valid; it is simply not under your roots.
 - **`positions_degraded`** appears when a column could not be converted exactly for a server that does not use UTF-16. `"request"` means the position you sent reached the server unconverted, so the result may describe a different symbol and should not be trusted. `"response"` means only returned `character` offsets may be inexact. The flag is omitted when everything converted exactly.

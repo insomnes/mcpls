@@ -40,7 +40,7 @@ mcpls returns the edits; it does not write them. The assistant applies them with
 
 > Which types implement the `Storage` trait?
 
-`go_to_implementation` jumps from a trait method to its implementations; `prepare_type_hierarchy` with `get_subtypes` lists implementors for languages whose server supports type hierarchy. `go_to_type_definition` answers "what type is this value?" by jumping to the type itself.
+`go_to_implementation` jumps from a trait method to its implementations; `get_subtypes` with a direct file target lists implementors for languages whose server supports type hierarchy. `go_to_type_definition` answers "what type is this value?" by jumping to the type itself.
 
 ## Look up a symbol you cannot place
 

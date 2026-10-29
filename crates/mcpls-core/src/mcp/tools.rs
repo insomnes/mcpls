@@ -862,19 +862,6 @@ struct CallHierarchyCallsWire {
     container: Option<String>,
 }
 
-/// Wire form of [`TypeHierarchyWalkParams`].
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-#[schemars(
-    description = "Parameters for getting the supertypes or subtypes of a type hierarchy item."
-)]
-struct TypeHierarchyWalkWire {
-    #[schemars(
-        description = "The type hierarchy item, exactly as a prepare, supertypes or subtypes result gave it."
-    )]
-    item: HierarchyItemInput,
-}
-
 /// Parameters for the `get_incoming_calls` and `get_outgoing_calls` tools.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(try_from = "CallHierarchyCallsWire")]
@@ -923,22 +910,8 @@ impl TryFrom<CallHierarchyCallsWire> for CallHierarchyCallsParams {
     }
 }
 
-/// Parameters for the `get_supertypes` and `get_subtypes` tools.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(from = "TypeHierarchyWalkWire")]
-#[schemars(with = "TypeHierarchyWalkWire")]
-pub struct TypeHierarchyWalkParams {
-    /// The type hierarchy item to walk from (from a prepare, supertypes or subtypes response).
-    pub item: HierarchyItem,
-}
-
-impl From<TypeHierarchyWalkWire> for TypeHierarchyWalkParams {
-    fn from(wire: TypeHierarchyWalkWire) -> Self {
-        Self {
-            item: wire.item.into(),
-        }
-    }
-}
+/// Parameters for direct type queries or unchanged item traversal.
+pub type TypeHierarchyWalkParams = CallHierarchyCallsParams;
 
 range_wire! {
     /// Wire form of [`FormatRangeParams`].
@@ -1450,7 +1423,13 @@ mod tests {
 
         let schema = schemars::schema_for!(TypeHierarchyWalkParams);
         let item = &schema.as_object().unwrap()["properties"]["item"];
-        assert!(item.get("$ref").is_some());
+        assert!(
+            item["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|schema| schema.get("$ref").is_some())
+        );
     }
 
     /// The generated JSON schema must expose `PositionParams`/`RangeParams`

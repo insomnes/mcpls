@@ -118,7 +118,7 @@ pub struct ServerConfig {
 
 /// Optional overrides for the text mcpls reports about itself over MCP.
 ///
-/// Every field is `None` by default, which keeps today's hardcoded
+/// Presentation fields are `None` by default, which keeps the hardcoded
 /// `serverInfo.title`/`description` and built-in capability blurb
 /// unchanged. `serverInfo.name`, `version`, and `website_url` are not
 /// configurable here: `name` is the MCP-spec machine identifier asserted in
@@ -155,6 +155,10 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
+    /// Static tool catalog. Omission selects the smaller agent catalog.
+    #[serde(default)]
+    pub tool_profile: ToolProfile,
+
     /// Overrides `serverInfo.title`. Omit to keep the built-in title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<McpTitle>,
@@ -177,6 +181,17 @@ pub struct McpConfig {
     /// names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_prefix: Option<ToolPrefix>,
+}
+
+/// Static MCP tool catalog, fixed when a session starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProfile {
+    /// Common agent operations (27 tools).
+    #[default]
+    Agent,
+    /// All supported operations (30 tools).
+    Full,
 }
 
 /// Maximum byte length of a configured [`McpConfig::title`].
@@ -3634,6 +3649,28 @@ mod tests {
                 temp_roots_config(roots.path())
                     .ensure_outside_workspace(&file, ConfigOrigin::Environment)
                     .is_ok()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tool_profile_tests {
+    use super::*;
+
+    #[test]
+    fn config_accepts_only_known_profiles_and_defaults_to_agent() {
+        for (text, profile) in [
+            ("", ToolProfile::Agent),
+            ("[mcp]\ntool_profile = \"agent\"", ToolProfile::Agent),
+            ("[mcp]\ntool_profile = \"full\"", ToolProfile::Full),
+        ] {
+            let config: ServerConfig = toml::from_str(text).unwrap();
+            assert_eq!(config.mcp.tool_profile, profile);
+        }
+        for value in ["\"unknown\"", "1", "true", "[]", "{}"] {
+            assert!(
+                toml::from_str::<ServerConfig>(&format!("[mcp]\ntool_profile = {value}")).is_err()
             );
         }
     }

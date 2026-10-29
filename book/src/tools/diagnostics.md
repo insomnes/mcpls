@@ -84,6 +84,8 @@ Not every server supports range formatting; rust-analyzer does not advertise it.
 
 ## get_selection_ranges
 
+Available with `[mcp].tool_profile = "full"`.
+
 Returns the ranges that enclose a position, innermost first (expression, statement, block, function, and so on). Pass one of them to `get_code_actions` or `format_range`.
 
 ```json
@@ -91,6 +93,8 @@ Returns the ranges that enclose a position, innermost first (expression, stateme
 ```
 
 ## get_folding_ranges
+
+Available with `[mcp].tool_profile = "full"`.
 
 Returns the foldable regions of a file with 1-based lines, a `kind` and collapsed text, sorted by start line with the longest first. Argument `kind` is `all` (default), `comment`, `imports` or `region`, in any case.
 
