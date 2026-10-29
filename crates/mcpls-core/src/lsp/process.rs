@@ -154,6 +154,9 @@ impl ServerProcess {
         if let Some(lifeline) = &mut self.lifeline {
             lifeline.warn_if_watchdog_lost();
         }
+        if status.is_some() {
+            self.dispatcher_pid = None;
+        }
         if status.is_some()
             && let Some(mut lifeline) = self.lifeline.take()
         {

@@ -1177,7 +1177,11 @@ impl LspServer {
                 deprecated,
                 reason = "`root_uri` is deprecated but the struct literal must still set it"
             )]
-            root_uri: None,
+            root_uri: if config.dispatcher_attempt.is_some() {
+                workspace_folders.first().map(|folder| folder.uri.clone())
+            } else {
+                None
+            },
             initialization_options: config.server_config().initialization_options.clone(),
             capabilities: Self::client_capabilities(
                 &config.position_encodings,

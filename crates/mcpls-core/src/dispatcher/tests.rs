@@ -94,6 +94,9 @@ impl Fixture {
         .unwrap();
     }
     fn server(&self, dispatcher: Arc<Dispatcher>) -> McplsServer {
+        self.static_server().with_dispatcher(dispatcher)
+    }
+    fn static_server(&self) -> McplsServer {
         McplsServer::new(
             Arc::new(crate::bridge::Translator::new()),
             Arc::new(tokio::sync::Mutex::new(
@@ -104,7 +107,6 @@ impl Fixture {
             self.config.project_config_status,
             self.config.mcp.clone(),
         )
-        .with_dispatcher(dispatcher)
     }
 }
 async fn connect(server: McplsServer) -> (Client, tokio::task::JoinHandle<()>) {
@@ -545,4 +547,217 @@ async fn http_sessions_share_one_worktree_backend() {
     task.abort();
     let _ = task.await;
     dispatcher.shutdown().await;
+}
+
+/// Canonical aliases select the same runtime and initialize with its selected roots.
+#[tokio::test]
+async fn canonical_alias_and_selected_initialize_root() {
+    let fixture = Fixture::new(4);
+    let alias = fixture.main.with_file_name("alias");
+    std::os::unix::fs::symlink(&fixture.main, &alias).unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let response = call(&client, "get_hover", hover(&alias)).await.unwrap();
+    assert!(response.to_string().contains("AUTHORED MAIN"));
+    call(&client, "get_hover", hover(&fixture.main))
+        .await
+        .unwrap();
+    let events = fixture.events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "start")
+            .count(),
+        1
+    );
+    let initialize = events
+        .iter()
+        .find(|event| event["event"] == "initialize")
+        .unwrap();
+    let expected = url::Url::from_directory_path(&fixture.main)
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        initialize["params"]["rootUri"]
+            .as_str()
+            .unwrap()
+            .trim_end_matches('/'),
+        expected.trim_end_matches('/')
+    );
+    assert_eq!(
+        initialize["params"]["workspaceFolders"][0]["uri"],
+        initialize["params"]["rootUri"]
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// A diagnostics-only backend cannot prevent a separately routed hover backend.
+#[tokio::test]
+async fn unrelated_backend_failure_does_not_block_hover() {
+    let fixture = Fixture::new(4);
+    let working = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(&fixture.profile, format!("[[lsp_servers]]\nname='diagnostics_backend'\nlanguage_id='python'\ncommand='/missing/diagnostics-backend'\nhandles=['diagnostics']\nfile_patterns=['*.py']\n{working}handles=['hover']\nname='hover_backend'\n")).unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    assert!(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("AUTHORED MAIN")
+    );
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":fixture.main}),
+    )
+    .await
+    .unwrap();
+    let servers = status["workspaces"][0]["servers"].as_array().unwrap();
+    assert_eq!(
+        servers
+            .iter()
+            .find(|server| server["server"] == "diagnostics_backend")
+            .unwrap()["state"],
+        "not_started"
+    );
+    assert_eq!(
+        servers
+            .iter()
+            .find(|server| server["server"] == "hover_backend")
+            .unwrap()["state"],
+        "ready"
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// Status observes a confirmed child exit without starting a retry or retaining its PID.
+#[tokio::test]
+async fn status_reports_reaped_child_failure_once() {
+    let mut fixture = Fixture::new(4);
+    fixture
+        .config
+        .dispatcher
+        .as_mut()
+        .unwrap()
+        .idle_timeout_seconds = std::num::NonZeroU64::new(60).unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    call(&client, "get_hover", hover(&fixture.main))
+        .await
+        .unwrap();
+    let pid = fixture
+        .events()
+        .iter()
+        .find(|event| event["event"] == "start")
+        .unwrap()["pid"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+            if status.as_ref().map_or(true, |status| {
+                status.rsplit_once(") ").unwrap().1.starts_with('Z')
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        let status = call(
+            &client,
+            "get_workspace_status",
+            json!({"workspace_path":fixture.main}),
+        )
+        .await
+        .unwrap();
+        let server = &status["workspaces"][0]["servers"][0];
+        assert_eq!(server["state"], "failed");
+        assert!(server["pid"].is_null());
+        assert_eq!(server["start_failures"], 1);
+        assert!(server["last_error"].is_string());
+        assert!(server["retry_after_ms"].as_u64().unwrap() <= 5000);
+    }
+    assert_eq!(
+        fixture
+            .events()
+            .iter()
+            .filter(|event| event["event"] == "start")
+            .count(),
+        1
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// Empty Git markers remain non-Git, while malformed metadata remains a boundary.
+#[test]
+fn explicit_non_git_empty_marker_and_malformed_boundary() {
+    let root = TempDir::new().unwrap();
+    let marker = root.path().join(".git");
+    std::fs::create_dir(&marker).unwrap();
+    assert!(
+        super::discovery::inspect(root.path(), true)
+            .unwrap()
+            .1
+            .is_none()
+    );
+    std::fs::write(marker.join("HEAD"), "malformed").unwrap();
+    assert!(super::discovery::inspect(root.path(), true).is_err());
+}
+
+/// Every mode/profile keeps its public catalog within the existing byte budget.
+#[tokio::test]
+async fn dispatcher_catalog_budget_and_static_null_support() {
+    for profile in [
+        crate::config::ToolProfile::Agent,
+        crate::config::ToolProfile::Full,
+    ] {
+        let mut fixture = Fixture::new(4);
+        fixture.config.mcp.tool_profile = profile;
+        let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+        let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+        assert_eq!(
+            call(&client, "get_tool_support", json!({})).await.unwrap(),
+            call(&client, "get_tool_support", json!({"file_path":null}))
+                .await
+                .unwrap()
+        );
+        let tools = client.peer().list_all_tools().await.unwrap();
+        let expected = if profile == crate::config::ToolProfile::Full {
+            31
+        } else {
+            28
+        };
+        assert_eq!(tools.len(), expected);
+        let size = serde_json::to_vec(&tools).unwrap().len();
+        assert!(size <= 140_000, "dispatcher catalog uses {size} bytes");
+        dispatcher.shutdown().await;
+        client.cancel().await.unwrap();
+        task.await.unwrap();
+
+        let (client, task) = connect(fixture.static_server()).await;
+        let omitted = call(&client, "get_tool_support", json!({})).await.unwrap();
+        let explicit_null = call(&client, "get_tool_support", json!({"file_path":null}))
+            .await
+            .unwrap();
+        assert_eq!(omitted, explicit_null);
+        client.cancel().await.unwrap();
+        task.await.unwrap();
+    }
 }

@@ -152,9 +152,24 @@ def preflight(binary: Path, parsed: dict, source_profiles: Path, args: argparse.
                     selector.register(child.stdout, selectors.EVENT_READ)
                     if not selector.select(args.readiness_timeout):
                         raise RuntimeError("candidate configuration preflight timed out")
-                    response = json.loads(child.stdout.readline())
+                    line = child.stdout.readline()
+                    if not line:
+                        raise RuntimeError("candidate exited before initialize response")
+                    response = json.loads(line)
                 if response.get("result", {}).get("serverInfo", {}).get("name") != "mcpls":
                     raise RuntimeError("candidate configuration preflight failed")
+            except (RuntimeError, ValueError, BrokenPipeError) as error:
+                # Keep bounded daemon diagnostics outside the temporary staging
+                # directory so configuration failures remain actionable.
+                errors.flush()
+                stderr = (stage / "stderr.log").read_bytes()[-8192:].decode(errors="replace")
+                evidence = Path(tempfile.mkdtemp(prefix="mcpls-install-preflight-failure-"))
+                evidence.chmod(0o700)
+                atomic_write(evidence / "stderr.log", stderr.encode())
+                raise RuntimeError(
+                    f"configuration preflight failed: {error}; stderr: {stderr.strip() or '(empty)'}; "
+                    f"diagnostic log: {evidence / 'stderr.log'}"
+                ) from error
             finally:
                 if child.poll() is None:
                     child.send_signal(signal.SIGTERM)
@@ -194,6 +209,8 @@ def install(args: argparse.Namespace) -> None:
         raise RuntimeError("profile inputs must be regular TOML files")
     config_path = args.config_path.expanduser().absolute()
     profiles_path = (args.profiles_path or config_path.parent / "profiles").expanduser().absolute()
+    if profiles_path.is_symlink():
+        raise RuntimeError(f"profile destination must not be a symlink: {profiles_path}")
     for entry in parsed["dispatcher"].get("repositories", []) + parsed["dispatcher"].get("workspaces", []):
         destination = Path(entry["profile"])
         supplied = source_profiles / destination.name

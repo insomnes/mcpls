@@ -73,11 +73,18 @@ pub(super) fn inspect(path: &Path, directory: bool) -> Result<(PathBuf, Option<I
             .parent()
             .ok_or_else(|| DispatchError::invalid(path))?
     };
-    // A .git entry in any ancestor establishes a repository boundary even
-    // when Git cannot read it. Such a boundary must never fall back to non-Git.
-    let boundary = dir
-        .ancestors()
-        .find(|ancestor| std::fs::symlink_metadata(ancestor.join(".git")).is_ok());
+    // An accessible empty directory is not Git metadata. Every other marker,
+    // including unreadable or malformed metadata, remains a fail-closed boundary.
+    let boundary = dir.ancestors().find(|ancestor| {
+        let marker = ancestor.join(".git");
+        match std::fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                std::fs::read_dir(marker).map_or(true, |mut entries| entries.next().is_some())
+            }
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        }
+    });
     let Some(_) = boundary else {
         return Ok((canonical, None));
     };

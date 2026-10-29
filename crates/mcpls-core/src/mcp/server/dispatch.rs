@@ -180,7 +180,6 @@ impl McplsServer {
                 | "get_tool_support"
         );
         let arguments = request.arguments.get_or_insert_default();
-        let file = selector(arguments, "file_path")?;
         let workspace = if scoped {
             selector(arguments, "workspace_path")?
         } else {
@@ -216,6 +215,13 @@ impl McplsServer {
                 .call(ToolCallContext::new(self, request, context))
                 .await;
         };
+        let file = if name == "get_tool_support"
+            && arguments.get("file_path").is_some_and(Value::is_null)
+        {
+            None
+        } else {
+            selector(arguments, "file_path")?
+        };
         if name == "get_workspace_status" {
             return self
                 .tool_router
@@ -229,6 +235,17 @@ impl McplsServer {
         let lease = self
             .select_tool_runtime(dispatcher, arguments, file.as_ref(), workspace.as_ref())
             .await?;
+        // Identity selection uses canonical paths; the scoped translator must
+        // receive that same spelling after approval, including symlink aliases.
+        let file = if let Some(file) = file {
+            let canonical = tokio::fs::canonicalize(&file)
+                .await
+                .map_err(|_| DispatchError::invalid(&file).wire())?;
+            arguments.insert("file_path".into(), json!(canonical));
+            Some(canonical)
+        } else {
+            None
+        };
         let resident = &lease.resident;
         if name == "get_document_outline" {
             let generation = arguments.remove("runtime_generation");
@@ -269,8 +286,16 @@ impl McplsServer {
                 name.as_str(),
                 "get_server_logs" | "get_server_messages" | "get_cached_diagnostics"
             );
+        let tool = super::McpTool::ALL
+            .iter()
+            .find(|tool| tool.name() == name)
+            .and_then(|tool| match tool.spec().backend {
+                super::super::tool_support::ToolBackend::Document(kind)
+                | super::super::tool_support::ToolBackend::Workspace(kind) => Some(kind),
+                super::super::tool_support::ToolBackend::Local => None,
+            });
         resident
-            .demand(dispatcher, file.as_deref(), local_only)
+            .demand(dispatcher, file.as_deref(), local_only, tool)
             .await
             .map_err(DispatchError::wire)?;
         let server = self.runtime_session(&lease).await?;
@@ -472,9 +497,17 @@ impl McplsServer {
             .acquire(selection)
             .await
             .map_err(DispatchError::wire)?;
+        let canonical = tokio::fs::canonicalize(path.as_path())
+            .await
+            .map_err(|_| DispatchError::invalid(path.as_path()).wire())?;
         lease
             .resident
-            .demand(dispatcher, Some(path.as_path()), false)
+            .demand(
+                dispatcher,
+                Some(&canonical),
+                false,
+                Some(crate::config::ToolKind::Diagnostics),
+            )
             .await
             .map_err(DispatchError::wire)?;
         let server = self.runtime_session(&lease).await?;

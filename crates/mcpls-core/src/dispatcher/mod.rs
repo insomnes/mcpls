@@ -38,7 +38,7 @@ impl DispatchError {
             retry: None,
         }
     }
-    fn invalid(path: &Path) -> Self {
+    pub(crate) fn invalid(path: &Path) -> Self {
         Self::new(
             "workspace_invalid",
             format!(
@@ -723,13 +723,22 @@ async fn workspace_status(selection: Selection, resident: Option<Arc<Resident>>)
                     .get()
                     .and_then(|s| s.iter().find(|s| s.config.server_config().id() == id))
                 {
-                    let start_state = start.state.lock().await;
+                    let mut start_state = start.state.lock().await;
+                    let dead = runtime
+                        .translator
+                        .dispatcher_server(&id)
+                        .is_some_and(|(alive, _)| !alive);
+                    if dead && !start_state.recovering && start_state.failed_at.is_none() {
+                        start_state.failed_at = Some(Instant::now());
+                        start_state.failures = start_state.failures.saturating_add(1);
+                    }
                     failures = start_state.failures;
                     if state != "ready" && start_state.launched {
                         state = "starting";
                     }
                     if let Some(at) = start_state.failed_at {
                         state = "failed";
+                        error = Some("language server failed to start".to_string());
                         retry = Some(5000u64.saturating_sub(
                             u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
                         ));
@@ -931,13 +940,18 @@ impl Resident {
         dispatcher: &Arc<Dispatcher>,
         file: Option<&Path>,
         local_only: bool,
+        tool: Option<crate::config::ToolKind>,
     ) -> Result<()> {
         let runtime = self.prepare(dispatcher).await?;
         if local_only {
             return Ok(());
         }
         let language = Self::demand_language(runtime, file).await?;
+        let selected = self.demand_route(language.as_ref(), tool)?;
         for start in self.servers.get().into_iter().flatten() {
+            if tool.is_some() && selected.as_ref() != Some(&start.config.server_config().id()) {
+                continue;
+            }
             if language
                 .as_ref()
                 .is_some_and(|language| &start.config.server_config().language_id != language)
@@ -1026,6 +1040,22 @@ impl Resident {
         }
         Ok(())
     }
+    fn demand_route(
+        &self,
+        language: Option<&crate::config::LanguageId>,
+        tool: Option<crate::config::ToolKind>,
+    ) -> Result<Option<crate::config::ServerId>> {
+        let router = crate::config::ToolRouter::from_configs(&self.selection.config.lsp_servers)
+            .map_err(|_| DispatchError::new("profile_invalid", "invalid server routing"))?;
+        Ok(tool
+            .and_then(|tool| {
+                language.map_or_else(
+                    || router.resolve_any(tool).ok(),
+                    |language| router.resolve(language.as_ref(), tool),
+                )
+            })
+            .cloned())
+    }
     async fn demand_language(
         runtime: &WorkspaceRuntime,
         file: Option<&Path>,
@@ -1113,4 +1143,5 @@ impl Resident {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests;

@@ -119,7 +119,7 @@ Normal static errors, language-server errors, and cancellation retain their exis
 
 On Linux with a systemd user service, use `scripts/install-shared-service.py`. It builds the selected exact commit with `transport-http`, retains the previous executable/configuration, installs an immutable release, updates a dedicated service override and CLI symlink, reloads systemd, restarts the service, and checks the MCP endpoint.
 
-Prepare the daemon configuration and profiles first. Preserve any extra daemon flags with repeated `--service-arg=VALUE` options. Their absolute profile paths must match the chosen destination. Preserve language settings, pinned server commands, environment settings, and repository-specific Rust manifest selections.
+Prepare the daemon configuration and profiles first. Preserve any extra daemon flags with repeated `--service-arg=VALUE` options. Their absolute profile paths must match the chosen destination. The destination profile directory must not be a symlink. Preserve language settings, pinned server commands, environment settings, and repository-specific Rust manifest selections.
 
 ```bash
 python3 scripts/install-shared-service.py \
@@ -130,7 +130,7 @@ python3 scripts/install-shared-service.py \
   --endpoint http://127.0.0.1:39287/mcp
 ```
 
-Add `--check` to build and validate the supplied configuration without changing the installed service. The script uses an isolated MCP handshake for this preflight and starts no language server.
+Add `--check` to build and validate the supplied configuration without changing the installed service. The script uses an isolated MCP handshake for this preflight and starts no language server. A failed preflight identifies the stage, displays bounded daemon stderr, and retains its diagnostic log.
 
 The script prints its backup directory and retained rollback command. Repeat invocation preserves immutable releases and takes a new configuration snapshot. A failed activation reports its stage and restores the saved service state. To restore a selected backup explicitly:
 

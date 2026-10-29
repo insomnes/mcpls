@@ -745,8 +745,45 @@ impl McplsServer {
         }
         for route in router.map.values_mut() {
             let name = self.unprefixed(&route.attr.name);
+            // Dispatcher selection is documented once here; retain all schema
+            // fields while avoiding repeated routing prose in each tool.
+            if name == "get_tool_support" {
+                route.attr.description = Some(Cow::Borrowed(
+                    "Tool support by language. No selector: configured support without startup. file_path or workspace_path: runtime support; both must select the same workspace. Coverage: all, some, none, unknown (initializing), always (local). Advertised support does not guarantee request success.",
+                ));
+            }
+            if name == "get_workspace_status" {
+                route.attr.description = Some(Cow::Borrowed(
+                    "Workspace identity, generation, lifecycle, limits, and server status. Starts no backend.",
+                ));
+            }
             if let Some(output) = &mut route.attr.output_schema {
                 let mut output_schema = (**output).clone();
+                if name == "get_tool_support"
+                    && let Some(route_shape) = output_schema
+                        .get_mut("$defs")
+                        .and_then(|defs| defs.get_mut("RouteShape"))
+                {
+                    // Each variant already describes its route. The repeated
+                    // server field means the same thing in every variant.
+                    if let Some(shape) = route_shape.as_object_mut() {
+                        shape.remove("description");
+                    }
+                    if let Some(variants) = route_shape
+                        .get_mut("oneOf")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for variant in variants {
+                            if let Some(server) = variant
+                                .get_mut("properties")
+                                .and_then(|p| p.get_mut("server"))
+                                .and_then(serde_json::Value::as_object_mut)
+                            {
+                                server.remove("description");
+                            }
+                        }
+                    }
+                }
                 if let Some(properties) = output_schema
                     .get_mut("properties")
                     .and_then(serde_json::Value::as_object_mut)
