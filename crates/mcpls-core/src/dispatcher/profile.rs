@@ -11,6 +11,7 @@ pub(super) fn read(
     path: &Path,
     root: &Path,
     daemon: &ServerConfig,
+    automatic: bool,
 ) -> Result<(ServerConfig, String)> {
     let bytes = crate::util::read_regular_file_bounded(
         path,
@@ -27,6 +28,9 @@ pub(super) fn read(
     }
     let mut config: ServerConfig =
         toml::from_str(text).map_err(|_| DispatchError::profile(path))?;
+    if automatic && !is_standalone(&config) {
+        return Err(DispatchError::profile(path));
+    }
     if config.workspace.roots.is_empty() {
         config
             .workspace
@@ -104,4 +108,16 @@ pub(super) fn read(
         .validate()
         .map_err(|_| DispatchError::profile(path))?;
     Ok((config, format!("{:x}", Sha256::digest(&bytes))))
+}
+
+fn is_standalone(config: &ServerConfig) -> bool {
+    let roots = &config.workspace.roots;
+    (roots.is_empty() || matches!(roots.as_slice(), [root] if root.as_path() == Path::new(".")))
+        && !config.lsp_servers.iter().any(|server| {
+            server.language_id.as_str() == "rust"
+                && server
+                    .initialization_options
+                    .as_ref()
+                    .is_some_and(|options| options.get("linkedProjects").is_some())
+        })
 }

@@ -129,7 +129,7 @@ def preflight(binary: Path, parsed: dict, source_profiles: Path, args: argparse.
         stage = Path(temporary)
         config = args.config.expanduser().resolve(strict=True).read_text()
         replacements = {}
-        for entries in (parsed["dispatcher"].get("repositories", []), parsed["dispatcher"].get("workspaces", [])):
+        for entries in (parsed["dispatcher"].get("repositories", []), parsed["dispatcher"].get("workspaces", []), parsed["dispatcher"].get("auto_workspaces", [])):
             for entry in entries:
                 original = entry["profile"]
                 destination = stage / Path(original).name
@@ -220,7 +220,7 @@ def install(args: argparse.Namespace) -> None:
     profiles_path = (args.profiles_path or config_path.parent / "profiles").expanduser().absolute()
     if profiles_path.is_symlink():
         raise RuntimeError(f"profile destination must not be a symlink: {profiles_path}")
-    for entry in parsed["dispatcher"].get("repositories", []) + parsed["dispatcher"].get("workspaces", []):
+    for entry in parsed["dispatcher"].get("repositories", []) + parsed["dispatcher"].get("workspaces", []) + parsed["dispatcher"].get("auto_workspaces", []):
         destination = Path(entry["profile"])
         supplied = source_profiles / destination.name
         if destination.parent != profiles_path or supplied not in profiles:

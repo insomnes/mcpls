@@ -61,6 +61,14 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.destination.is_symlink())
         self.assertEqual(profile.read_text(), "old profile bytes")
 
+    def test_automatic_profile_destination_is_validated(self):
+        self.config.write_text(self.config.read_text().replace("dispatcher.workspaces", "dispatcher.auto_workspaces")
+                               .replace(str(self.destination), str(self.root / "wrong")))
+        result = self.check()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("profile input does not match destination", result.stderr)
+        self.assertNotIn("Building", result.stdout)
+
     def test_preflight_eof_reports_stage_actual_stderr_and_retained_log(self):
         result = self.check()
         self.assertNotEqual(result.returncode, 0)

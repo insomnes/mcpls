@@ -95,6 +95,7 @@ pub struct Selection {
     profile: PathBuf,
     config: ServerConfig,
     digest: String,
+    temporary: bool,
 }
 impl Selection {
     pub(crate) fn root(&self) -> &Path {
@@ -110,6 +111,7 @@ pub struct Dispatcher {
     config: DispatcherConfig,
     daemon: ServerConfig,
     approvals: Vec<Approval>,
+    automatic: Vec<Approval>,
     entries: Mutex<BTreeMap<PathBuf, Entry>>,
     starts: Arc<Semaphore>,
     stop: CancellationToken,
@@ -189,7 +191,58 @@ pub fn config_is_inside_workspace(source: &Path, config: &DispatcherConfig) -> R
             }
         }
     }
+    for entry in &config.auto_workspaces {
+        let root =
+            std::fs::canonicalize(&entry.path).map_err(|_| DispatchError::invalid(&entry.path))?;
+        if canonical.starts_with(root) {
+            return Ok(true);
+        }
+    }
     Ok(false)
+}
+
+fn validate_limits(config: &DispatcherConfig) -> Result<()> {
+    if config.max_concurrent_starts.get() > Semaphore::MAX_PERMITS
+        || Instant::now()
+            .checked_add(Duration::from_secs(config.reconcile_interval_seconds.get()))
+            .is_none()
+        || Instant::now()
+            .checked_add(Duration::from_secs(config.idle_timeout_seconds.get()))
+            .is_none()
+    {
+        return Err(DispatchError::new(
+            "profile_invalid",
+            "dispatcher limits overflow runtime capacity",
+        ));
+    }
+    Ok(())
+}
+
+fn automatic_approvals(config: &DispatcherConfig) -> Result<Vec<Approval>> {
+    let mut automatic: Vec<Approval> = Vec::new();
+    for entry in &config.auto_workspaces {
+        if !entry.path.is_absolute() || !entry.profile.is_absolute() {
+            return Err(DispatchError::invalid(&entry.path));
+        }
+        let root =
+            std::fs::canonicalize(&entry.path).map_err(|_| DispatchError::invalid(&entry.path))?;
+        if !root.is_dir() {
+            return Err(DispatchError::invalid(&entry.path));
+        }
+        if automatic.iter().any(|prior| prior.root == root) {
+            return Err(DispatchError::new(
+                "profile_invalid",
+                "duplicate canonical automatic parent",
+            ));
+        }
+        automatic.push(Approval {
+            object: ObjectId::read(&root)?,
+            root,
+            common: None,
+            profile: entry.profile.clone(),
+        });
+    }
+    Ok(automatic)
 }
 
 impl Dispatcher {
@@ -199,19 +252,7 @@ impl Dispatcher {
             .clone()
             .filter(|d| d.enabled)
             .ok_or_else(|| DispatchError::new("profile_invalid", "dispatcher is not enabled"))?;
-        if config.max_concurrent_starts.get() > Semaphore::MAX_PERMITS
-            || Instant::now()
-                .checked_add(Duration::from_secs(config.reconcile_interval_seconds.get()))
-                .is_none()
-            || Instant::now()
-                .checked_add(Duration::from_secs(config.idle_timeout_seconds.get()))
-                .is_none()
-        {
-            return Err(DispatchError::new(
-                "profile_invalid",
-                "dispatcher limits overflow runtime capacity",
-            ));
-        }
+        validate_limits(&config)?;
         if !daemon.lsp_servers.is_empty()
             || serde_json::to_value(&daemon.workspace).ok()
                 != serde_json::to_value(crate::config::WorkspaceConfig::default()).ok()
@@ -249,7 +290,7 @@ impl Dispatcher {
                         "duplicate canonical dispatcher approval",
                     ));
                 }
-                let (profile_config, _) = profile::read(&entry.profile, &root, &daemon)?;
+                let (profile_config, _) = profile::read(&entry.profile, &root, &daemon, false)?;
                 configured_ids.extend(
                     profile_config
                         .lsp_servers
@@ -263,6 +304,17 @@ impl Dispatcher {
                     profile: entry.profile.clone(),
                 });
             }
+        }
+        let automatic = automatic_approvals(&config)?;
+        for approval in &automatic {
+            let (profile_config, _) =
+                profile::read(&approval.profile, &approval.root, &daemon, true)?;
+            configured_ids.extend(
+                profile_config
+                    .lsp_servers
+                    .iter()
+                    .map(|server| server.id().to_string()),
+            );
         }
         if let WorkspaceTrust::Untrusted(allowlist) = &daemon.workspace_trust
             && let Some(id) = allowlist
@@ -280,6 +332,7 @@ impl Dispatcher {
             config,
             daemon,
             approvals,
+            automatic,
             entries: Mutex::new(BTreeMap::new()),
             stop: CancellationToken::new(),
         }))
@@ -287,47 +340,104 @@ impl Dispatcher {
 
     fn discover(&self, path: &Path, directory: bool) -> Result<Selection> {
         let (canonical, git_identity) = discovery::inspect(path, directory)?;
-        let (identity, approval) = if let Some(id) = git_identity {
-            let approval = self
-                .approvals
-                .iter()
-                .find(|a| a.common == id.common && a.common.is_some())
-                .ok_or_else(|| DispatchError::not_approved(path))?;
-            if ObjectId::read(
-                id.common
-                    .as_ref()
-                    .ok_or_else(|| DispatchError::invalid(path))?,
-            )? != approval.object
-            {
+        // Explicit approvals keep their existing Git/non-Git priority and fail closed.
+        let explicit = git_identity.as_ref().map_or_else(
+            || {
+                self.approvals
+                    .iter()
+                    .filter(|a| a.common.is_none() && canonical.starts_with(&a.root))
+                    .max_by_key(|a| a.root.components().count())
+            },
+            |id| {
+                self.approvals
+                    .iter()
+                    .find(|a| a.common.is_some() && a.common == id.common)
+            },
+        );
+        if let Some(approval) = explicit {
+            let object_path = approval.common.as_ref().unwrap_or(&approval.root);
+            if ObjectId::read(object_path)? != approval.object {
                 return Err(DispatchError::not_approved(path));
             }
-            (id, approval)
+            let identity = git_identity.unwrap_or_else(|| Identity {
+                root: approval.root.clone(),
+                common: None,
+                git_dir: None,
+                objects: vec![approval.object.clone()],
+            });
+            let (config, digest) =
+                profile::read(&approval.profile, &identity.root, &self.daemon, false)?;
+            return Ok(Selection {
+                identity,
+                profile: approval.profile.clone(),
+                config,
+                digest,
+                temporary: false,
+            });
+        }
+        if self
+            .approvals
+            .iter()
+            .any(|approval| canonical.starts_with(&approval.root))
+        {
+            return Err(DispatchError::not_approved(path));
+        }
+        let approval = self
+            .automatic
+            .iter()
+            .filter(|a| canonical.starts_with(&a.root))
+            .max_by_key(|a| a.root.components().count())
+            .ok_or_else(|| DispatchError::not_approved(path))?;
+        if ObjectId::read(&approval.root)? != approval.object {
+            return Err(DispatchError::not_approved(path));
+        }
+        let (policy_config, _) =
+            profile::read(&approval.profile, &approval.root, &self.daemon, true)?;
+        let start = if canonical.is_dir() {
+            canonical.as_path()
         } else {
-            let approval = self
-                .approvals
-                .iter()
-                .filter(|a| a.common.is_none() && canonical.starts_with(&a.root))
-                .max_by_key(|a| a.root.components().count())
-                .ok_or_else(|| DispatchError::not_approved(path))?;
-            if ObjectId::read(&approval.root)? != approval.object {
-                return Err(DispatchError::not_approved(path));
-            }
-            (
-                Identity {
-                    root: approval.root.clone(),
-                    common: None,
-                    git_dir: None,
-                    objects: vec![approval.object.clone()],
-                },
-                approval,
-            )
+            canonical
+                .parent()
+                .ok_or_else(|| DispatchError::invalid(path))?
         };
-        let (config, digest) = profile::read(&approval.profile, &identity.root, &self.daemon)?;
+        let git_identity = git_identity.filter(|id| id.root.starts_with(&approval.root));
+        let boundary = git_identity
+            .as_ref()
+            .map_or(approval.root.as_path(), |id| id.root.as_path());
+        let root = start
+            .ancestors()
+            .take_while(|dir| dir.starts_with(boundary))
+            .find(|dir| {
+                policy_config
+                    .lsp_servers
+                    .iter()
+                    .filter_map(|server| server.heuristics.as_ref())
+                    .flat_map(|heuristics| &heuristics.project_markers)
+                    .any(|marker| dir.join(marker.as_str()).exists())
+            })
+            .unwrap_or_else(|| git_identity.as_ref().map_or(start, |id| id.root.as_path()))
+            .to_path_buf();
+        let mut objects = vec![approval.object.clone(), ObjectId::read(&root)?];
+        let (common, git_dir) = if let Some(id) = git_identity {
+            objects.extend(id.objects);
+            (id.common, id.git_dir)
+        } else {
+            (None, None)
+        };
+        let identity = Identity {
+            root,
+            common,
+            git_dir,
+            objects,
+        };
+        let (config, digest) =
+            profile::read(&approval.profile, &identity.root, &self.daemon, true)?;
         Ok(Selection {
             identity,
             profile: approval.profile.clone(),
             config,
             digest,
+            temporary: true,
         })
     }
 
@@ -341,7 +451,9 @@ impl Dispatcher {
         let result = crate::on_blocking_pool(move || dispatcher.discover(&path, directory))
             .await
             .map_err(|_| DispatchError::invalid(Path::new("selected workspace")))?;
-        if let Ok(selection) = &result {
+        if let Ok(selection) = &result
+            && !selection.temporary
+        {
             self.entries
                 .lock()
                 .await
@@ -423,16 +535,7 @@ impl Dispatcher {
                 victim.retire();
                 drop(entries);
                 victim.cleaned.cancelled().await;
-                let mut entries = self.entries.lock().await;
-                if let Some(entry) = entries.get_mut(&victim.selection.identity.root)
-                    && entry
-                        .resident
-                        .as_ref()
-                        .is_some_and(|r| Arc::ptr_eq(r, &victim))
-                {
-                    entry.resident = None;
-                }
-                drop(entries);
+                self.remove_cleaned(&victim).await;
                 continue;
             }
             let resident = Arc::new(Resident {
@@ -507,8 +610,13 @@ impl Dispatcher {
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, resident))
         {
-            entry.resident = None;
+            if entry.selection.temporary {
+                entries.remove(resident.root());
+            } else {
+                entry.resident = None;
+            }
         }
+        drop(entries);
     }
     async fn reconcile(self: &Arc<Self>) {
         // Reconciliation discovers registered additions without choosing a default workspace.
@@ -634,18 +742,26 @@ impl Dispatcher {
     pub(crate) fn configured_profiles(&self) -> Vec<ServerConfig> {
         self.approvals
             .iter()
-            .filter_map(|approval| {
-                profile::read(&approval.profile, &approval.root, &self.daemon)
+            .map(|approval| (approval, false))
+            .chain(self.automatic.iter().map(|approval| (approval, true)))
+            .filter_map(|(approval, automatic)| {
+                profile::read(&approval.profile, &approval.root, &self.daemon, automatic)
                     .ok()
                     .map(|(config, _)| config)
             })
             .collect()
     }
+
     pub(crate) async fn status(self: &Arc<Self>, path: Option<PathBuf>) -> Result<Value> {
         let selected = if let Some(path) = path {
             let selection = self.select(path, true).await?;
             let key = selection.identity.root.clone();
             let mut entries = self.entries.lock().await;
+            if selection.temporary && !entries.contains_key(&key) {
+                drop(entries);
+                let workspace = workspace_status(selection, None).await;
+                return Ok(self.status_response(&[workspace]));
+            }
             let entry = entries.entry(key.clone()).or_insert(Entry {
                 selection: selection.clone(),
                 resident: None,
@@ -694,9 +810,11 @@ impl Dispatcher {
         for (selection, resident) in snapshot {
             workspaces.push(workspace_status(selection, resident).await);
         }
-        Ok(
-            json!({"mode":"dispatcher","limits":{"max_resident_workspaces":self.config.max_resident_workspaces,"max_concurrent_starts":self.config.max_concurrent_starts,"idle_timeout_seconds":self.config.idle_timeout_seconds,"reconcile_interval_seconds":self.config.reconcile_interval_seconds},"workspaces":workspaces}),
-        )
+        Ok(self.status_response(&workspaces))
+    }
+
+    fn status_response(&self, workspaces: &[Value]) -> Value {
+        json!({"mode":"dispatcher","limits":{"max_resident_workspaces":self.config.max_resident_workspaces,"max_concurrent_starts":self.config.max_concurrent_starts,"idle_timeout_seconds":self.config.idle_timeout_seconds,"reconcile_interval_seconds":self.config.reconcile_interval_seconds},"workspaces":workspaces})
     }
 }
 
@@ -785,7 +903,7 @@ async fn workspace_status(selection: Selection, resident: Option<Arc<Resident>>)
     } else {
         0
     };
-    json!({"workspace_path":selection.identity.root,"identity":format!("{:x}",Sha256::digest(format!("{:?}",selection.identity))),"repository_common_dir":selection.identity.common,"git_dir":selection.identity.git_dir,"profile":selection.profile,"generation":resident.as_ref().map(|r|&r.generation),"state":state,"last_activity":last_activity,"active_requests":resident.as_ref().map_or(0,|r|r.active.load(Ordering::Acquire)),"subscriptions":subscriptions,"servers":servers})
+    json!({"temporary":selection.temporary,"workspace_path":selection.identity.root,"identity":format!("{:x}",Sha256::digest(format!("{:?}",selection.identity))),"repository_common_dir":selection.identity.common,"git_dir":selection.identity.git_dir,"profile":selection.profile,"generation":resident.as_ref().map(|r|&r.generation),"state":state,"last_activity":last_activity,"active_requests":resident.as_ref().map_or(0,|r|r.active.load(Ordering::Acquire)),"subscriptions":subscriptions,"servers":servers})
 }
 
 struct RuntimeValidity {
@@ -845,8 +963,14 @@ impl Resident {
     ) -> Result<&WorkspaceRuntime> {
         self.runtime
             .get_or_try_init(|| async {
+                let mut config = self.selection.config.clone();
+                if self.selection.temporary {
+                    for server in &mut config.lsp_servers {
+                        server.heuristics = None;
+                    }
+                }
                 let mut runtime = WorkspaceRuntime::prepare_scoped(
-                    &self.selection.config,
+                    &config,
                     Some(self.selection.identity.root.clone()),
                 )
                 .await

@@ -30,7 +30,7 @@ A repository approval captures the canonical Git common-directory identity at st
 
 An explicit non-Git approval covers that directory and its ordinary descendants. A nested Git repository does not inherit it. Converting the approved directory into a Git repository also requires a repository approval. Symlink aliases resolve to the same canonical workspace. Missing, inaccessible, replaced, and moved identities fail closed.
 
-Entry paths and profile paths must be absolute. Limits and intervals must be positive and fit their runtime types. Duplicate canonical approvals, conflicting profiles, missing profiles, and unknown dispatcher keys are configuration errors. Empty approval lists authorize no workspace. Enabled dispatcher mode rejects top-level `[workspace]` and `[[lsp_servers]]`. Disabled dispatcher entries are not inspected or started.
+Entry paths and profile paths must be absolute. Limits and intervals must be positive and fit their runtime types. Duplicate canonical approvals, conflicting profiles, missing profiles, and unknown dispatcher keys are configuration errors. Empty explicit and automatic approval lists authorize no workspace. Enabled dispatcher mode rejects top-level `[workspace]` and `[[lsp_servers]]`. Disabled dispatcher entries are not inspected or started.
 
 A profile uses the existing workspace and LSP-server fields:
 
@@ -54,6 +54,28 @@ Trusted children run with the selected worktree as their current directory. Comm
 `--workspace-trust untrusted` preserves the existing safe child directory outside analyzed roots. Profile roots and `linkedProjects` still resolve from the selected worktree. Untrusted execution restrictions apply to initial starts and restarts, including relative executables and wrappers. Project-local mcpls configuration is never loaded during discovery. A service profile does not grant trust to worktree content.
 
 Approval entries and dispatcher limits change only after daemon restart. Profiles are checked during dispatch and reconciliation. A changed profile retires only its affected runtimes. Invalid profiles fail closed. Repairing a profile permits a fresh runtime on the next demand.
+
+## Automatic temporary workspaces
+
+Add optional parent policies to authorize projects without registering each checkout:
+
+```toml
+[[dispatcher.auto_workspaces]]
+path = "/srv/scratch"
+profile = "/home/user/.config/mcpls/profiles/automatic.toml"
+```
+
+The parent directory must exist. Paths and profiles must be absolute. mcpls captures each parent's canonical directory identity at startup and rejects duplicate canonical parents. Overlapping parents use the most specific policy. Policy changes require a daemon restart; new projects within a parent do not.
+
+Automatic profiles analyze the complete selected root. Omit `workspace.roots` or set it to exactly `["."]`. Rust `initialization_options.linkedProjects` is forbidden, including empty arrays and object values. Explicit profiles retain their existing roots and Rust manifest selections. Service trust, executable restrictions, and configuration-location checks also apply to automatic parents. Discovery never loads project-local `mcpls.toml`.
+
+Existing explicit repository and non-Git approvals take priority. An invalid explicit profile or replaced approved identity fails closed without using an automatic profile. An automatic policy authorizes actual canonical paths inside its parent. A symlink into an outside directory is rejected. A linked worktree outside the parent needs its own approval, even when its repository is inside the parent. Registered worktrees inside the parent can use Git metadata outside it; this does not authorize outside source files.
+
+For a file request, root selection starts at its containing directory. For `workspace_path`, selection starts at that directory. mcpls checks ancestors through the policy parent, stopping at the nearest valid Git boundary inside it. The nearest directory containing any `project_markers` from any server in the policy profile becomes the root. Without a marker, mcpls uses that Git root, or the starting directory when no Git root is inside the parent. Sibling directories cannot select a root. Discovery checks marker existence without reading manifests or recursively searching subtrees. Malformed Git boundaries fail closed.
+
+Markers select automatic roots; they do not suppress servers for the requested language. A standalone Python file can therefore start its configured server without a manifest. Explicit workspaces retain recursive marker filtering. Language servers can still require their own project configuration.
+
+Automatic contexts share the normal resident capacity, startup limits, backoff, idle timeout, subscription pins, and cleanup rules. Concurrent clients selecting the same canonical root share one runtime. Automatic registrations disappear after cleanup. A status-only discovery returns a transient snapshot and creates no lasting registration. Cleanup and recreation invalidate old continuation data.
 
 ## Select a workspace
 
@@ -80,7 +102,7 @@ The catalog is fixed by daemon mode, tool profile, and prefix. Dispatcher mode a
 
 Call `get_workspace_status` with `{}` for known entries, or with `workspace_path` to discover and inspect one identity. It starts no backend and does not refresh idle activity. Initialization, tool listing, unscoped support, and resource listing also start no backend.
 
-The status result includes `mode`, `limits`, and sorted `workspaces`. Each workspace reports its canonical path, opaque identity, Git common/admin paths or null, service profile, generation or null, state, last activity, active request count, subscription count, and servers. Activity timestamps use RFC3339 UTC. Servers follow profile declaration order and report their id, state, live PID or null, failure count, bounded redacted error, and retry delay in milliseconds or null. This is a point-in-time snapshot rather than an atomic OS census.
+The status result includes `mode`, `limits`, and sorted `workspaces`. Each workspace reports `temporary` (`true` for automatic contexts and `false` for explicit approvals), its canonical path, opaque identity, Git common/admin paths or null, service profile, generation or null, state, last activity, active request count, subscription count, and servers. Activity timestamps use RFC3339 UTC. Servers follow profile declaration order and report their id, state, live PID or null, failure count, bounded redacted error, and retry delay in milliseconds or null. This is a point-in-time snapshot rather than an atomic OS census.
 
 Workspace states are `discovered`, `starting`, `ready`, `draining`, and `failed`. Server states are `not_started`, `starting`, `ready`, `draining`, and `failed`. A discovered entry consumes no resident capacity. Starts and draining runtimes consume capacity until cleanup finishes.
 

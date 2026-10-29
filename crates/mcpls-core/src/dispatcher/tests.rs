@@ -1331,3 +1331,331 @@ async fn cold_subscribe_cancellation_preserves_survivors_and_committed_pins() {
         task.await.unwrap();
     }
 }
+
+fn automatic_fixture(fixture: &mut Fixture) -> PathBuf {
+    let zone = fixture.main.parent().unwrap().join("automatic");
+    std::fs::create_dir(&zone).unwrap();
+    fixture
+        .config
+        .dispatcher
+        .as_mut()
+        .unwrap()
+        .auto_workspaces
+        .push(crate::config::DispatcherEntry {
+            path: zone.clone(),
+            profile: fixture.profile.clone(),
+        });
+    zone
+}
+
+fn script_directory(path: &Path, marker: &str) {
+    std::fs::create_dir_all(path).unwrap();
+    std::fs::write(path.join("file.py"), "x = 1\n").unwrap();
+    std::fs::write(path.join("marker"), marker).unwrap();
+}
+
+/// Automatic status is transient, and markerless files start a shared backend despite heuristics.
+#[tokio::test]
+async fn automatic_markerless_demand_and_transient_status() {
+    let mut fixture = Fixture::new(4);
+    let zone = automatic_fixture(&mut fixture);
+    let script = zone.join("script");
+    script_directory(&script, "PLAIN SCRIPT");
+    let profile = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(
+        &fixture.profile,
+        format!("{profile}\n[lsp_servers.heuristics]\nproject_markers=['pyproject.toml']\n"),
+    )
+    .unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let reconciler = dispatcher.spawn_reconciler();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let (second, second_task) = connect(fixture.server(dispatcher.clone())).await;
+    for index in 0..5 {
+        let directory = zone.join(format!("status-{index}"));
+        std::fs::create_dir(&directory).unwrap();
+        let status = call(
+            &client,
+            "get_workspace_status",
+            json!({"workspace_path": directory}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status["workspaces"][0]["temporary"], true);
+        assert_eq!(status["workspaces"][0]["state"], "discovered");
+    }
+    let status = call(&client, "get_workspace_status", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        status["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["temporary"] == false)
+    );
+    assert_eq!(fixture.events().len(), 0);
+    let (first, other) = tokio::join!(
+        call(&client, "get_hover", hover(&script)),
+        call(&second, "get_hover", hover(&script))
+    );
+    assert!(first.unwrap().to_string().contains("PLAIN SCRIPT"));
+    assert!(other.unwrap().to_string().contains("PLAIN SCRIPT"));
+    assert_eq!(
+        fixture
+            .events()
+            .iter()
+            .filter(|event| event["event"] == "initialize")
+            .count(),
+        1
+    );
+    let outline = call(
+        &client,
+        "get_document_outline",
+        json!({"file_path":script.join("file.py"),"limit":1}),
+    )
+    .await
+    .unwrap();
+    let generation = outline["runtime_generation"].clone();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let status = call(&client, "get_workspace_status", json!({}))
+                .await
+                .unwrap();
+            if status["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["temporary"] == false)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        call(&client, "get_hover", hover(&script))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("PLAIN SCRIPT")
+    );
+    error_code(call(&client, "get_document_outline", json!({"file_path":script.join("file.py"),"limit":1,"offset":1,"runtime_generation":generation})).await.unwrap_err(), "stale_continuation");
+    dispatcher.shutdown().await;
+    reconciler.await.unwrap();
+    client.cancel().await.unwrap();
+    second.cancel().await.unwrap();
+    task.await.unwrap();
+    second_task.await.unwrap();
+}
+
+/// Only ancestors contribute markers; overlapping parents select their most specific profile.
+#[tokio::test]
+async fn automatic_ancestor_roots_and_policy_priority() {
+    let mut fixture = Fixture::new(4);
+    let zone = automatic_fixture(&mut fixture);
+    let root = zone.join("project");
+    let nested = root.join("nested");
+    script_directory(&root, "PROJECT ROOT");
+    script_directory(&nested, "NESTED ROOT");
+    std::fs::write(
+        root.join("pyproject.toml"),
+        "invalid manifest is still a marker",
+    )
+    .unwrap();
+    let profile = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(
+        &fixture.profile,
+        format!("{profile}\n[lsp_servers.heuristics]\nproject_markers=['pyproject.toml']\n"),
+    )
+    .unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    assert!(
+        call(&client, "get_hover", hover(&nested))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("PROJECT ROOT")
+    );
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":nested}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["workspaces"][0]["workspace_path"], json!(root));
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+
+    // A sibling marker cannot pull the selected root sideways or upward.
+    std::fs::remove_file(root.join("pyproject.toml")).unwrap();
+    std::fs::create_dir(root.join("sibling")).unwrap();
+    std::fs::write(root.join("sibling/pyproject.toml"), "").unwrap();
+    let specific_profile = fixture.profile.with_file_name("specific.toml");
+    std::fs::write(&specific_profile, std::fs::read(&fixture.profile).unwrap()).unwrap();
+    fixture
+        .config
+        .dispatcher
+        .as_mut()
+        .unwrap()
+        .auto_workspaces
+        .push(crate::config::DispatcherEntry {
+            path: root.clone(),
+            profile: specific_profile.clone(),
+        });
+
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    assert!(
+        call(&client, "get_hover", hover(&nested))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("NESTED ROOT")
+    );
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":nested}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["workspaces"][0]["profile"], json!(specific_profile));
+
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// Automatic profiles cannot reduce the selected root or inject explicit Rust projects.
+#[tokio::test]
+async fn automatic_profile_restrictions_and_duplicate_parents() {
+    for extra in [
+        "[workspace]\nroots=['sub']\n",
+        "[[lsp_servers]]\nlanguage_id='rust'\ncommand='rust-analyzer'\ninitialization_options={linkedProjects=[]}\n",
+        "[[lsp_servers]]\nlanguage_id='rust'\ncommand='rust-analyzer'\ninitialization_options={linkedProjects={}}\n",
+    ] {
+        let mut fixture = Fixture::new(4);
+        automatic_fixture(&mut fixture);
+        // Only automatic approval is needed for this startup validation.
+        fixture
+            .config
+            .dispatcher
+            .as_mut()
+            .unwrap()
+            .repositories
+            .clear();
+        std::fs::write(&fixture.profile, extra).unwrap();
+        let error = Dispatcher::new(fixture.config.clone()).err().unwrap();
+        assert_eq!(error.wire().data.unwrap()["code"], "profile_invalid");
+    }
+    let mut fixture = Fixture::new(4);
+    let zone = automatic_fixture(&mut fixture);
+    fixture
+        .config
+        .dispatcher
+        .as_mut()
+        .unwrap()
+        .auto_workspaces
+        .push(crate::config::DispatcherEntry {
+            path: zone.join("."),
+            profile: fixture.profile.clone(),
+        });
+    assert_eq!(
+        Dispatcher::new(fixture.config.clone())
+            .err()
+            .unwrap()
+            .wire()
+            .data
+            .unwrap()["code"],
+        "profile_invalid"
+    );
+}
+
+/// Explicit roots and profile errors cannot silently select an overlapping automatic policy.
+#[tokio::test]
+async fn automatic_preserves_explicit_priority() {
+    let mut fixture = Fixture::new(4);
+    let automatic_profile = fixture.profile.with_file_name("auto.toml");
+    std::fs::copy(&fixture.profile, &automatic_profile).unwrap();
+    fixture
+        .config
+        .dispatcher
+        .as_mut()
+        .unwrap()
+        .auto_workspaces
+        .push(crate::config::DispatcherEntry {
+            path: fixture.main.parent().unwrap().to_path_buf(),
+            profile: automatic_profile,
+        });
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    assert!(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("AUTHORED MAIN")
+    );
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":fixture.main}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["workspaces"][0]["temporary"], false);
+    assert_eq!(status["workspaces"][0]["profile"], json!(fixture.profile));
+    std::fs::write(&fixture.profile, "not valid TOML").unwrap();
+    error_code(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap_err(),
+        "profile_invalid",
+    );
+    assert_eq!(
+        fixture
+            .events()
+            .iter()
+            .filter(|event| event["event"] == "initialize")
+            .count(),
+        1
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// Canonical targets and the captured automatic parent identity bound source access.
+#[cfg(unix)]
+#[tokio::test]
+async fn automatic_symlink_escape_and_parent_replacement_fail_closed() {
+    let mut fixture = Fixture::new(4);
+    let zone = automatic_fixture(&mut fixture);
+    let outside = zone.with_file_name("outside");
+    script_directory(&outside, "OUTSIDE");
+    let alias = zone.join("alias");
+    std::os::unix::fs::symlink(&outside, &alias).unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    error_code(
+        call(&client, "get_hover", hover(&alias)).await.unwrap_err(),
+        "workspace_not_approved",
+    );
+    let previous = zone.with_file_name("previous");
+    std::fs::rename(&zone, &previous).unwrap();
+    script_directory(&zone, "REPLACEMENT");
+    error_code(
+        call(&client, "get_hover", hover(&zone)).await.unwrap_err(),
+        "workspace_not_approved",
+    );
+    assert_eq!(fixture.events().len(), 0);
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}

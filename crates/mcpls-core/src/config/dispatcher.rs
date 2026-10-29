@@ -33,6 +33,8 @@ pub struct DispatcherConfig {
     pub repositories: Vec<DispatcherEntry>,
     /// Approved explicit non-Git roots.
     pub workspaces: Vec<DispatcherEntry>,
+    /// Authorized parent directories for temporary, automatically selected roots.
+    pub auto_workspaces: Vec<DispatcherEntry>,
 }
 
 impl Default for DispatcherConfig {
@@ -45,6 +47,7 @@ impl Default for DispatcherConfig {
             reconcile_interval_seconds: NonZeroU64::MIN.saturating_add(29),
             repositories: Vec::new(),
             workspaces: Vec::new(),
+            auto_workspaces: Vec::new(),
         }
     }
 }
