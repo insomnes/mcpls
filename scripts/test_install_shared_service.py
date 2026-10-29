@@ -1,5 +1,7 @@
 """Exercise installer rejection and preflight through its command-line boundary."""
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 import os
 from pathlib import Path
 import re
@@ -70,6 +72,60 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(log.read_text(), "invalid dispatcher profile: forbidden mcp table\n")
         self.assertLessEqual(log.stat().st_size, 8192)
         self.assertFalse(self.destination.exists())
+
+
+    def test_install_readiness_skips_sse_priming_and_repeats_with_rollback_assets(self):
+        binary = self.target / "release/mcpls"
+        binary.write_text("#!/usr/bin/env python3\nimport json,sys,time\njson.loads(sys.stdin.readline())\nprint(json.dumps({'jsonrpc':'2.0','id':1,'result':{'serverInfo':{'name':'mcpls'}}}),flush=True)\ntime.sleep(30)\n")
+        observed = []
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                observed.append(request)
+                data = (': priming\n\ndata: \nid: 0\nretry: 3000\n\n'
+                        'event: ping\ndata: ignored-non-message\n\n'
+                        'data: {"jsonrpc":"2.0","method":"notifications/keepalive"}\n\n'
+                        'data: ' + json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': {'serverInfo': {'name': 'mcpls'}}}) + '\n\n').encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Mcp-Session-Id', 'fixture-session')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            def do_DELETE(self):
+                observed.append({'deleted': self.headers.get('Mcp-Session-Id')})
+                self.send_response(202)
+                self.end_headers()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        unit = self.root / 'existing.service'
+        unit.write_text('[Service]\nExecStart=/previous/mcpls\n')
+        release = self.root / 'releases' / ('0' * 40) / 'mcpls'
+        self.executable('systemctl', '#!/usr/bin/env python3\nimport sys\nif "--property=FragmentPath" in sys.argv: print(' + repr(str(unit)) + ')\nif "--property=ExecStart" in sys.argv: print(' + repr(str(release)) + ')\nif "is-active" in sys.argv: sys.exit(3)\n')
+        installed = self.root / 'installed.toml'
+        installed.write_text('# previous configuration\n')
+        cli = self.root / 'mcpls'
+        cli.write_text('previous executable')
+        environment = os.environ | {'PATH': str(self.bin) + os.pathsep + os.environ['PATH'], 'CARGO_TARGET_DIR': str(self.target), 'XDG_CONFIG_HOME': str(self.root / 'config')}
+        command = [sys.executable, '-B', str(SCRIPT), '--revision', '0' * 40,
+                   '--config', str(self.config), '--profiles-dir', str(self.profiles), '--profiles-path', str(self.destination),
+                   '--config-path', str(installed), '--cli-path', str(cli), '--release-root', str(self.root / 'releases'),
+                   '--backup-root', str(self.root / 'backups'), '--endpoint', f'http://127.0.0.1:{server.server_port}/mcp', '--readiness-timeout', '2']
+        for _ in range(2):
+            result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Rollback retained:', result.stdout)
+            self.assertEqual(cli.resolve(), release)
+        backups = sorted((self.root / 'backups').glob('*/state.json'))
+        self.assertEqual(len(backups), 2)
+        self.assertTrue(any((path.parent / 'daemon.toml').read_text() == '# previous configuration\n' for path in backups))
+        self.assertEqual(sum(item.get('method') == 'initialize' for item in observed), 2)
+        self.assertEqual(sum(item.get('deleted') == 'fixture-session' for item in observed), 2)
 
 
 if __name__ == "__main__":

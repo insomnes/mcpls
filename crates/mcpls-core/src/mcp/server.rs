@@ -293,8 +293,14 @@ impl ServerText for DirectTypesResult {
     }
 }
 
-type HierarchyContexts =
-    Arc<Mutex<std::collections::HashMap<String, (String, serde_json::Value, String)>>>;
+type HierarchyContexts = Arc<
+    Mutex<
+        std::collections::HashMap<
+            String,
+            (String, serde_json::Value, crate::config::ServerId, String),
+        >,
+    >,
+>;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1763,6 +1769,104 @@ impl McplsServer {
             })?
     }
 
+    async fn subscribe_resolved(
+        &self,
+        request: SubscribeRequestParams,
+        context: rmcp::service::RequestContext<RoleServer>,
+        resolved: Option<ResolvedResource>,
+    ) -> Result<(), McpError> {
+        contain_panic(
+            async {
+                let session = self.context.session.require_stateful(&context)?;
+
+                // Keyed by the canonical URI: the pump publishes canonical paths only.
+                let ResolvedResource {
+                    path: validated_path,
+                    uri: canonical_uri,
+                } = match resolved {
+                    Some(resolved) => resolved,
+                    None => self
+                        .resolve_resource(&request.uri)
+                        .await
+                        .map_err(|e| self.render_error(e))?,
+                };
+
+                // Record the subscription *before* checking the cache. This closes the race where
+                // a PublishDiagnostics notification lands between the cache check and the
+                // subscription being recorded: if diagnostics arrive before this point, the check
+                // below catches them; if they arrive after, `diagnostics_pump`'s own
+                // `subs.contains` check already sees this URI as subscribed and delivers the
+                // update through the normal push path.
+                //
+                // The raw request URI is recorded as an alias of the canonical one so a later
+                // `unsubscribe` for the same raw URI still resolves even if canonicalizing it then
+                // fails, e.g. because the file was deleted since subscribing (#499).
+                let newly_subscribed = session
+                    .subscribe(canonical_uri.clone(), request.uri.clone())
+                    .await
+                    .map_err(|e| self.render_error(e.into()))?;
+                let mut rollback = session.rollback_new(
+                    newly_subscribed,
+                    canonical_uri.clone(),
+                    request.uri.clone(),
+                );
+                if !newly_subscribed {
+                    tracing::debug!(
+                        "client re-subscribed to already-subscribed resource {canonical_uri}"
+                    );
+                }
+
+                // Resolved after recording, mirroring the settle publish in
+                // `lib.rs` (which mutates the translator, then snapshots the
+                // subscriptions): one side always observes the other, so the
+                // client sees either this error or exactly one update. A stray
+                // update for the rolled-back URI is harmless. A re-subscribe to
+                // an already-subscribed failed route errors too but keeps its
+                // earlier subscription; the settle publish already covered it.
+                if let Some(failure) = self
+                    .context
+                    .translator
+                    .diagnostics_route_for_path(&validated_path)
+                    .into_startup_failure()
+                {
+                    if newly_subscribed {
+                        session
+                            .unsubscribe(Some(&canonical_uri), &request.uri)
+                            .await;
+                    }
+                    return Err(
+                        self.render_error(crate::error::Error::ServerFailedToStart(failure))
+                    );
+                }
+
+                // Build the URI from the canonicalized path, matching `read_resource` and
+                // what `diagnostics_pump` stores from LSP notifications.
+                let lsp_uri = crate::bridge::path_to_uri(&validated_path)
+                    .map_err(|e| self.render_error(e))?;
+                let has_cached_diagnostics = {
+                    let cache = self.context.notification_cache.lock().await;
+                    cache.has_diagnostics(&lsp_uri)
+                };
+
+                if has_cached_diagnostics
+                    && let Err(e) = context
+                        .peer
+                        .notify_resource_updated(ResourceUpdatedNotificationParam::new(
+                            canonical_uri.as_str(),
+                        ))
+                        .await
+                {
+                    tracing::warn!("Failed to replay cached diagnostics for {canonical_uri}: {e}");
+                }
+
+                rollback.commit();
+                Ok(())
+            },
+            "subscribe",
+        )
+        .await
+    }
+
     /// [`render_error`] with the secrets of every live server.
     fn render_error(&self, error: crate::error::Error) -> McpError {
         render_error(error, &self.context.translator.server_text_redactions())
@@ -2028,6 +2132,14 @@ impl McplsServer {
         request: ReadResourceRequestParams,
     ) -> Result<ReadResourceResponse, McpError> {
         let path = parse_uri(&request.uri).map_err(client_input_error)?;
+        self.read_resource_path(request, path).await
+    }
+
+    async fn read_resource_path(
+        &self,
+        request: ReadResourceRequestParams,
+        path: ClientPath,
+    ) -> Result<ReadResourceResponse, McpError> {
         let response = self.resource_diagnostics_response(&path).await?;
 
         let json = serde_json::to_string(&response)
@@ -2287,8 +2399,10 @@ impl ServerHandler for McplsServer {
         _context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         if let Some(dispatcher) = &self.dispatcher {
-            let (lease, server) = self.resource_session(&request.uri).await?;
-            let result = server.read_resource_inner(request).await;
+            let (lease, server, resolved) = self.resource_session(&request.uri).await?;
+            let path = ClientPath::try_from(resolved.path)
+                .map_err(|error| server.render_error(error.into()))?;
+            let result = server.read_resource_path(request, path).await;
             dispatcher
                 .validate(&lease.resident)
                 .await
@@ -2327,7 +2441,7 @@ impl ServerHandler for McplsServer {
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
         if let Some(dispatcher) = &self.dispatcher {
-            let (lease, server) = self.resource_session(&request.uri).await?;
+            let (lease, server, resolved) = self.resource_session(&request.uri).await?;
             let ct = context.ct.clone();
             let invalid = lease.resident.cancel();
             #[allow(
@@ -2337,7 +2451,7 @@ impl ServerHandler for McplsServer {
             let result = tokio::select! {
                 ()=ct.cancelled()=>Err(McpError::new(ErrorCode(-32800),"subscription request cancelled",None)),
                 ()=invalid.cancelled()=>Err(McpError::new(ErrorCode(-32056),"workspace invalidated while subscribing",Some(serde_json::json!({"code":"workspace_invalidated","retryable":true})))),
-                result=Box::pin(server.subscribe(request,context))=>result,
+                result=server.subscribe_resolved(request,context,Some(resolved))=>result,
             };
             dispatcher
                 .validate(&lease.resident)
@@ -2345,93 +2459,7 @@ impl ServerHandler for McplsServer {
                 .map_err(crate::dispatcher::DispatchError::wire)?;
             return result;
         }
-        contain_panic(
-            async {
-                let session = self.context.session.require_stateful(&context)?;
-
-                // Keyed by the canonical URI: the pump publishes canonical paths only.
-                let ResolvedResource {
-                    path: validated_path,
-                    uri: canonical_uri,
-                } = self
-                    .resolve_resource(&request.uri)
-                    .await
-                    .map_err(|e| self.render_error(e))?;
-
-                // Record the subscription *before* checking the cache. This closes the race where
-                // a PublishDiagnostics notification lands between the cache check and the
-                // subscription being recorded: if diagnostics arrive before this point, the check
-                // below catches them; if they arrive after, `diagnostics_pump`'s own
-                // `subs.contains` check already sees this URI as subscribed and delivers the
-                // update through the normal push path.
-                //
-                // The raw request URI is recorded as an alias of the canonical one so a later
-                // `unsubscribe` for the same raw URI still resolves even if canonicalizing it then
-                // fails, e.g. because the file was deleted since subscribing (#499).
-                let newly_subscribed = session
-                    .subscribe(canonical_uri.clone(), request.uri.clone())
-                    .await
-                    .map_err(|e| self.render_error(e.into()))?;
-                let mut rollback = session.rollback_new(
-                    newly_subscribed,
-                    canonical_uri.clone(),
-                    request.uri.clone(),
-                );
-                if !newly_subscribed {
-                    tracing::debug!(
-                        "client re-subscribed to already-subscribed resource {canonical_uri}"
-                    );
-                }
-
-                // Resolved after recording, mirroring the settle publish in
-                // `lib.rs` (which mutates the translator, then snapshots the
-                // subscriptions): one side always observes the other, so the
-                // client sees either this error or exactly one update. A stray
-                // update for the rolled-back URI is harmless. A re-subscribe to
-                // an already-subscribed failed route errors too but keeps its
-                // earlier subscription; the settle publish already covered it.
-                if let Some(failure) = self
-                    .context
-                    .translator
-                    .diagnostics_route_for_path(&validated_path)
-                    .into_startup_failure()
-                {
-                    if newly_subscribed {
-                        session
-                            .unsubscribe(Some(&canonical_uri), &request.uri)
-                            .await;
-                    }
-                    return Err(
-                        self.render_error(crate::error::Error::ServerFailedToStart(failure))
-                    );
-                }
-
-                // Build the URI from the canonicalized path, matching `read_resource` and
-                // what `diagnostics_pump` stores from LSP notifications.
-                let lsp_uri = crate::bridge::path_to_uri(&validated_path)
-                    .map_err(|e| self.render_error(e))?;
-                let has_cached_diagnostics = {
-                    let cache = self.context.notification_cache.lock().await;
-                    cache.has_diagnostics(&lsp_uri)
-                };
-
-                if has_cached_diagnostics
-                    && let Err(e) = context
-                        .peer
-                        .notify_resource_updated(ResourceUpdatedNotificationParam::new(
-                            canonical_uri.as_str(),
-                        ))
-                        .await
-                {
-                    tracing::warn!("Failed to replay cached diagnostics for {canonical_uri}: {e}");
-                }
-
-                rollback.commit();
-                Ok(())
-            },
-            "subscribe",
-        )
-        .await
+        self.subscribe_resolved(request, context, None).await
     }
 
     async fn unsubscribe(

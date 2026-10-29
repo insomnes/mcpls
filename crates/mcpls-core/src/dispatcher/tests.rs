@@ -761,3 +761,289 @@ async fn dispatcher_catalog_budget_and_static_null_support() {
         task.await.unwrap();
     }
 }
+
+/// Effective marker filtering and settled fallback apply to lazy demand too.
+#[tokio::test]
+async fn demand_uses_marker_filtered_and_settled_routes() {
+    let fixture = Fixture::new(4);
+    let working = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(&fixture.profile, format!("{working}\n{working}name='absent'\n[lsp_servers.heuristics]\nproject_markers=['ABSENT-MARKER']\n")).unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    assert!(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("AUTHORED MAIN")
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+
+    std::fs::write(&fixture.profile, format!("{working}\n[[lsp_servers]]\nname='failed_hover'\nlanguage_id='python'\ncommand='/missing/hover-provider'\nhandles=['hover']\nfile_patterns=['*.py']\n")).unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    call(
+        &client,
+        "get_tool_support",
+        json!({"file_path":fixture.main.join("file.py")}),
+    )
+    .await
+    .unwrap_err();
+    // The support call settled the explicit failure and started the healthy catch-all.
+    assert!(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("AUTHORED MAIN")
+    );
+    assert!(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("AUTHORED MAIN")
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// Only the producing backend's restart invalidates a hierarchy continuation.
+#[tokio::test]
+async fn hierarchy_context_survives_unrelated_backend_start_and_restart() {
+    let fixture = Fixture::new(4);
+    let working = std::fs::read_to_string(&fixture.profile).unwrap();
+    let go = working
+        .replace("language_id='python'", "language_id='go'")
+        .replace("*.py", "*.go");
+    std::fs::write(&fixture.profile, format!("{working}\n{go}")).unwrap();
+    std::fs::write(fixture.main.join("other.go"), "package main\n").unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let initial = call(&client, "get_incoming_calls", hover(&fixture.main))
+        .await
+        .unwrap();
+    let item = initial["calls"][0]["from"].clone();
+    assert!(item["dispatcher_context"].is_string());
+    call(&client, "get_incoming_calls", json!({"item":item}))
+        .await
+        .unwrap();
+    call(
+        &client,
+        "get_hover",
+        json!({"file_path":fixture.main.join("other.go"),"line":1,"character":1}),
+    )
+    .await
+    .unwrap();
+    call(&client, "get_incoming_calls", json!({"item":item}))
+        .await
+        .unwrap();
+    call(
+        &client,
+        "restart_server",
+        json!({"workspace_path":fixture.main,"servers":["go"]}),
+    )
+    .await
+    .unwrap();
+    call(&client, "get_incoming_calls", json!({"item":item}))
+        .await
+        .unwrap();
+    let mut tampered = item.clone();
+    tampered["name"] = json!("forged");
+    error_code(
+        call(&client, "get_incoming_calls", json!({"item":tampered}))
+            .await
+            .unwrap_err(),
+        "stale_continuation",
+    );
+    call(
+        &client,
+        "restart_server",
+        json!({"workspace_path":fixture.main,"servers":["python"]}),
+    )
+    .await
+    .unwrap();
+    error_code(
+        call(&client, "get_incoming_calls", json!({"item":item}))
+            .await
+            .unwrap_err(),
+        "stale_continuation",
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// Targeted restart and local cache/log reads never demand an unused missing backend.
+#[tokio::test]
+async fn targeted_restart_preserves_unrelated_lazy_backend() {
+    let fixture = Fixture::new(4);
+    let working = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(&fixture.profile,format!("{working}\n[[lsp_servers]]\nlanguage_id='go'\ncommand='/missing/go'\nfile_patterns=['*.go']\n")).unwrap();
+    std::fs::write(fixture.main.join("other.go"), "package main\n").unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    call(&client, "get_hover", hover(&fixture.main))
+        .await
+        .unwrap();
+    call(
+        &client,
+        "restart_server",
+        json!({"workspace_path":fixture.main,"servers":["python"]}),
+    )
+    .await
+    .unwrap();
+    call(
+        &client,
+        "get_server_logs",
+        json!({"workspace_path":fixture.main}),
+    )
+    .await
+    .unwrap();
+    call(
+        &client,
+        "get_server_messages",
+        json!({"workspace_path":fixture.main}),
+    )
+    .await
+    .unwrap();
+    let _ = call(
+        &client,
+        "get_cached_diagnostics",
+        json!({"file_path":fixture.main.join("other.go")}),
+    )
+    .await;
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":fixture.main}),
+    )
+    .await
+    .unwrap();
+    let go = status["workspaces"][0]["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|server| server["server"] == "go")
+        .unwrap();
+    assert_eq!(go["state"], "not_started");
+    assert!(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("AUTHORED MAIN")
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// A corrupt nested repository cannot borrow its approved parent's Git authority.
+#[tokio::test]
+async fn corrupt_nested_git_does_not_fall_back_to_approved_parent() {
+    let fixture = Fixture::new(4);
+    let nested = fixture.main.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    assert!(
+        Command::new("git")
+            .arg("init")
+            .arg(&nested)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    std::fs::write(nested.join("file.py"), "x=2\n").unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    error_code(
+        call(&client, "get_hover", hover(&nested))
+            .await
+            .unwrap_err(),
+        "workspace_not_approved",
+    );
+    std::fs::rename(nested.join(".git/HEAD"), nested.join(".git/HEAD.saved")).unwrap();
+    error_code(
+        call(&client, "get_hover", hover(&nested))
+            .await
+            .unwrap_err(),
+        "workspace_not_approved",
+    );
+    assert!(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("AUTHORED MAIN")
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// Diagnostic resources accept an approved root alias and release its subscription pin.
+#[tokio::test]
+#[allow(
+    deprecated,
+    reason = "exercises legacy stateful resource subscriptions"
+)]
+async fn diagnostic_resources_use_approved_canonical_alias() {
+    let fixture = Fixture::new(1);
+    let alias = fixture.main.parent().unwrap().join("alias");
+    std::os::unix::fs::symlink(&fixture.main, &alias).unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    call(&client, "get_hover", hover(&alias)).await.unwrap();
+    fixture.wait_event("request", 3).await;
+    let uri = crate::bridge::resources::make_uri(&alias.join("file.py")).unwrap();
+    let read = client
+        .peer()
+        .read_resource(rmcp::model::ReadResourceRequestParams::new(uri.clone()))
+        .await
+        .unwrap();
+    assert!(
+        serde_json::to_string(&read)
+            .unwrap()
+            .contains("AUTHORED MAIN")
+    );
+    client
+        .peer()
+        .subscribe(rmcp::model::SubscribeRequestParams::new(uri.clone()))
+        .await
+        .unwrap();
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":alias}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["workspaces"][0]["subscriptions"], 1);
+    client
+        .peer()
+        .unsubscribe(rmcp::model::UnsubscribeRequestParams::new(uri))
+        .await
+        .unwrap();
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":alias}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["workspaces"][0]["subscriptions"], 0);
+    assert!(
+        call(&client, "get_hover", hover(&fixture.linked))
+            .await
+            .unwrap()
+            .to_string()
+            .contains("AUTHORED LINKED")
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}

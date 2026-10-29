@@ -30,8 +30,8 @@ use tracing::{debug, warn};
 
 use crate::bridge::WorkspaceRoots;
 use crate::bridge::resources::{
-    DiagnosticsResourceUri, MAX_LISTEN_STREAMS, MAX_SUBSCRIPTIONS, ResourceSubscriptions,
-    SubscriptionError, parse_uri,
+    DiagnosticsResourceUri, MAX_LISTEN_STREAMS, MAX_SUBSCRIPTIONS, ResolvedResource,
+    ResourceSubscriptions, SubscriptionError, parse_uri,
 };
 use crate::util::lock_std;
 
@@ -515,15 +515,21 @@ impl ListenUris {
     ///
     /// Touches the filesystem; call from a blocking context.
     pub(crate) fn resolve(accepted: &[String], roots: &WorkspaceRoots) -> Self {
+        let resolved = accepted.iter().filter_map(|raw| {
+            DiagnosticsResourceUri::resolve(raw, roots)
+                .ok()
+                .map(|resolved| (raw.clone(), resolved))
+        });
+        Self::from_resolved(resolved)
+    }
+
+    /// Groups already approved canonical sources while retaining each caller URI.
+    pub(crate) fn from_resolved(
+        resolved: impl IntoIterator<Item = (String, ResolvedResource)>,
+    ) -> Self {
         let mut map: HashMap<DiagnosticsResourceUri, ListenEntry> = HashMap::new();
-        let mut dropped = 0_usize;
-        for raw in accepted {
-            let resolved = DiagnosticsResourceUri::resolve(raw, roots).ok();
-            let Some((resolved, lsp_uri)) = resolved.and_then(|resolved| {
-                let lsp_uri = crate::bridge::try_path_to_uri(&resolved.path)?;
-                Some((resolved, lsp_uri))
-            }) else {
-                dropped = dropped.saturating_add(1);
+        for (raw, resolved) in resolved {
+            let Some(lsp_uri) = crate::bridge::try_path_to_uri(&resolved.path) else {
                 continue;
             };
             map.entry(resolved.uri)
@@ -532,10 +538,7 @@ impl ListenUris {
                     lsp_uri,
                 })
                 .raw
-                .insert(raw.clone());
-        }
-        if dropped > 0 {
-            debug!("subscriptions/listen dropped {dropped} URIs that no longer resolve");
+                .insert(raw);
         }
         Self(map)
     }

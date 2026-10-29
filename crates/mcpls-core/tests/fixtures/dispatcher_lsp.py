@@ -67,7 +67,11 @@ while True:
         result = [{"name": "entry", "kind": 12, "uri": params["textDocument"]["uri"], "data": {"marker": (root / "marker").read_text()},
                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
                    "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}]
-    elif method in ("workspace/symbol", "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"):
+    elif method == "callHierarchy/incomingCalls":
+        result = [{"from": params["item"], "fromRanges": [params["item"]["range"]]}]
+    elif method == "callHierarchy/outgoingCalls":
+        result = [{"to": params["item"], "fromRanges": [params["item"]["range"]]}]
+    elif method == "workspace/symbol":
         result = []
     else:
         result = None

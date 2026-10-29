@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use super::start_listen_lease;
 use super::{
     Arc, CallToolRequestParams, CallToolResponse, ErrorCode, ListenUris, McpError, McplsServer,
-    PathBuf, RoleServer, SubscriptionContext, Target, ToolCallContext, ToolRouter,
-    parse_client_path, parse_uri,
+    PathBuf, ResolvedResource, RoleServer, SubscriptionContext, Target, ToolCallContext,
+    ToolRouter, parse_client_path, parse_uri,
 };
 use crate::dispatcher::{DispatchError, Lease};
 
@@ -232,7 +232,7 @@ impl McplsServer {
             return self.configured_support(dispatcher);
         }
 
-        let lease = self
+        let (lease, origin) = self
             .select_tool_runtime(dispatcher, arguments, file.as_ref(), workspace.as_ref())
             .await?;
         // Identity selection uses canonical paths; the scoped translator must
@@ -261,12 +261,14 @@ impl McplsServer {
         if scoped {
             arguments.remove("workspace_path");
         }
-        self.invoke_tool(lease, file, name, request, context).await
+        self.invoke_tool(lease, origin, file, name, request, context)
+            .await
     }
 
     async fn invoke_tool(
         &self,
         lease: Lease,
+        origin: Option<crate::config::ServerId>,
         file: Option<PathBuf>,
         name: String,
         request: CallToolRequestParams,
@@ -284,7 +286,10 @@ impl McplsServer {
             .is_some_and(|arguments| arguments.contains_key("item"))
             || matches!(
                 name.as_str(),
-                "get_server_logs" | "get_server_messages" | "get_cached_diagnostics"
+                "get_server_logs"
+                    | "get_server_messages"
+                    | "get_cached_diagnostics"
+                    | "restart_server"
             );
         let tool = super::McpTool::ALL
             .iter()
@@ -299,6 +304,29 @@ impl McplsServer {
             .await
             .map_err(DispatchError::wire)?;
         let server = self.runtime_session(&lease).await?;
+        let origin = if let Some(origin) = origin {
+            Some(origin)
+        } else if let (Some(file), Some(tool)) = (&file, tool) {
+            let path = crate::bridge::ClientPath::try_from(file.clone())
+                .map_err(|_| DispatchError::invalid(file).wire())?;
+            let language = server
+                .context
+                .translator
+                .language_for_path(&path)
+                .await
+                .map_err(|error| server.render_error(error))?;
+            server
+                .context
+                .translator
+                .router_snapshot()
+                .resolve(language.as_ref(), tool)
+                .cloned()
+        } else {
+            None
+        };
+        let incarnation = origin
+            .as_ref()
+            .and_then(|origin| resident.incarnation(origin));
         let invalid = resident.cancel();
         let mut result = tokio::select! {
             ()=invalid.cancelled()=>return Err(McpError::new(ErrorCode(-32056),"workspace invalidated while request was pending",Some(json!({"code":"workspace_invalidated","retryable":true})))),
@@ -319,7 +347,12 @@ impl McplsServer {
             if name == "get_document_outline" {
                 value["runtime_generation"] = json!(resident.generation);
             }
-            self.bind_items(value, &lease).await;
+            if let (Some(origin), Some(incarnation)) = (&origin, &incarnation) {
+                if resident.incarnation(origin).as_ref() != Some(incarnation) {
+                    return Err(DispatchError::stale().wire());
+                }
+                self.bind_items(value, &lease, origin, incarnation).await;
+            }
             output.content = vec![rmcp::model::ContentBlock::text(value.to_string())];
         }
         Ok(result)
@@ -331,7 +364,7 @@ impl McplsServer {
         arguments: &mut serde_json::Map<String, Value>,
         file: Option<&PathBuf>,
         workspace: Option<&PathBuf>,
-    ) -> Result<Lease, McpError> {
+    ) -> Result<(Lease, Option<crate::config::ServerId>), McpError> {
         let continuation = if let Some(item) = arguments.get_mut("item") {
             let token = item
                 .get("dispatcher_context")
@@ -342,7 +375,7 @@ impl McplsServer {
                 .ok_or_else(|| DispatchError::stale().wire())?
                 .remove("dispatcher_context");
             let contexts = self.hierarchy_contexts.lock().await;
-            let (generation, original, incarnation) = contexts
+            let (generation, original, origin, incarnation) = contexts
                 .get(&token)
                 .cloned()
                 .ok_or_else(|| DispatchError::stale().wire())?;
@@ -350,11 +383,11 @@ impl McplsServer {
             if *item != original {
                 return Err(DispatchError::stale().wire());
             }
-            Some((generation, incarnation))
+            Some((generation, origin, incarnation))
         } else {
             None
         };
-        let lease = if let Some((generation, incarnation)) = continuation {
+        let (lease, origin) = if let Some((generation, origin, incarnation)) = continuation {
             let lease = dispatcher
                 .existing(&generation)
                 .await
@@ -363,10 +396,10 @@ impl McplsServer {
                 .validate(&lease.resident)
                 .await
                 .map_err(|_| DispatchError::stale().wire())?;
-            if lease.resident.incarnation() != incarnation {
+            if lease.resident.incarnation(&origin).as_ref() != Some(&incarnation) {
                 return Err(DispatchError::stale().wire());
             }
-            lease
+            (lease, Some(origin))
         } else {
             let selection = if let Some(file) = file {
                 let selected = dispatcher
@@ -397,12 +430,15 @@ impl McplsServer {
                     Some(json!({"code":"workspace_required","retryable":false})),
                 ));
             };
-            dispatcher
-                .acquire(selection)
-                .await
-                .map_err(DispatchError::wire)?
+            (
+                dispatcher
+                    .acquire(selection)
+                    .await
+                    .map_err(DispatchError::wire)?,
+                None,
+            )
         };
-        Ok(lease)
+        Ok((lease, origin))
     }
 
     pub(super) async fn dispatch_listen(
@@ -432,25 +468,25 @@ impl McplsServer {
             .map_err(|e| self.render_error(e.into()))?;
         let mut runtimes = std::collections::BTreeMap::new();
         for raw in accepted {
-            let (lease, server) = self.resource_session(raw).await?;
-            runtimes
+            let (lease, server, resolved) = self.resource_session(raw).await?;
+            let (_, _, uris) = runtimes
                 .entry(lease.resident.generation.clone())
-                .or_insert((lease, server));
+                .or_insert((lease, server, Vec::new()));
+            uris.push((raw.clone(), resolved));
         }
         #[cfg(feature = "transport-http")]
         start_listen_lease(&context);
         let mut registrations = Vec::new();
-        for (lease, server) in runtimes.values() {
-            let Some((permit, uris)) = server
-                .prepare_listen(requested, accepted)
-                .await
-                .map_err(|e| server.render_error(e))?
-            else {
-                continue;
-            };
-            let uris = Arc::new(uris);
+        for (lease, server, resolved) in runtimes.values_mut() {
+            let uris = Arc::new(ListenUris::from_resolved(std::mem::take(resolved)));
             let sink = context.sink().clone();
-            let registration = permit.register(uris.clone(), |uris| Target::Sink { sink, uris });
+            let registration = server
+                .context
+                .session
+                .registry()
+                .try_reserve_listen()
+                .map_err(|error| server.render_error(error.into()))?
+                .register(uris.clone(), |uris| Target::Sink { sink, uris });
             let registration = server
                 .settle_listen_startup_failures(registration, &uris)
                 .await?;
@@ -475,7 +511,7 @@ impl McplsServer {
         }
         let invalidations = runtimes
             .values()
-            .map(|(lease, _)| Box::pin(lease.resident.cancel().cancelled_owned()))
+            .map(|(lease, _, _)| Box::pin(lease.resident.cancel().cancelled_owned()))
             .collect::<Vec<_>>();
         let result = tokio::select! {
             ()=context.cancelled()=>Ok(()),
@@ -486,7 +522,10 @@ impl McplsServer {
         result
     }
 
-    pub(super) async fn resource_session(&self, uri: &str) -> Result<(Lease, Arc<Self>), McpError> {
+    pub(super) async fn resource_session(
+        &self,
+        uri: &str,
+    ) -> Result<(Lease, Arc<Self>, ResolvedResource), McpError> {
         let path = parse_uri(uri).map_err(|e| self.render_error(e.into()))?;
         let dispatcher = self.require_dispatcher()?;
         let selection = dispatcher
@@ -511,7 +550,13 @@ impl McplsServer {
             .await
             .map_err(DispatchError::wire)?;
         let server = self.runtime_session(&lease).await?;
-        Ok((lease, server))
+        let canonical_uri = crate::bridge::resources::make_uri(&canonical)
+            .map_err(|error| server.render_error(error.into()))?;
+        let resolved = server
+            .resolve_resource(&canonical_uri)
+            .await
+            .map_err(|error| server.render_error(error))?;
+        Ok((lease, server, resolved))
     }
 
     async fn runtime_session(&self, lease: &Lease) -> Result<Arc<Self>, McpError> {
@@ -533,7 +578,13 @@ impl McplsServer {
         Ok(server)
     }
 
-    async fn bind_items(&self, value: &mut Value, lease: &Lease) {
+    async fn bind_items(
+        &self,
+        value: &mut Value,
+        lease: &Lease,
+        origin: &crate::config::ServerId,
+        incarnation: &str,
+    ) {
         let mut pending = vec![value];
         while let Some(value) = pending.pop() {
             match value {
@@ -549,7 +600,8 @@ impl McplsServer {
                             (
                                 lease.resident.generation.clone(),
                                 Value::Object(object.clone()),
-                                lease.resident.incarnation(),
+                                origin.clone(),
+                                incarnation.to_owned(),
                             ),
                         );
                         object.insert("dispatcher_context".into(), Value::String(token));

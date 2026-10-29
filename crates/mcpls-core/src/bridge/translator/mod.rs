@@ -457,7 +457,7 @@ impl Translator {
 
     /// The routing table as of now. The `router` lock is released before it
     /// returns, so callers can then lock `servers` without holding both.
-    pub(super) fn router_snapshot(&self) -> Arc<ToolRouter> {
+    pub(crate) fn router_snapshot(&self) -> Arc<ToolRouter> {
         Arc::clone(&lock_std(&self.router))
     }
 

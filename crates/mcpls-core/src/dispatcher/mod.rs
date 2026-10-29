@@ -831,19 +831,13 @@ impl Resident {
     pub(crate) fn root(&self) -> &Path {
         &self.selection.identity.root
     }
-    pub(crate) fn incarnation(&self) -> String {
+    pub(crate) fn incarnation(&self, server: &crate::config::ServerId) -> Option<String> {
         self.runtime
-            .get()
-            .map(|r| {
-                self.selection
-                    .config
-                    .lsp_servers
-                    .iter()
-                    .map(|s| r.translator.dispatcher_server(&s.id()))
-                    .collect::<Vec<_>>()
-            })
-            .map(|v| format!("{v:?}"))
-            .unwrap_or_default()
+            .get()?
+            .translator
+            .dispatcher_server(server)
+            .filter(|(alive, _)| *alive)
+            .map(|(_, incarnation)| incarnation)
     }
     pub(crate) async fn prepare(
         self: &Arc<Self>,
@@ -947,7 +941,7 @@ impl Resident {
             return Ok(());
         }
         let language = Self::demand_language(runtime, file).await?;
-        let selected = self.demand_route(language.as_ref(), tool)?;
+        let selected = Self::demand_route(runtime, language.as_ref(), tool);
         for start in self.servers.get().into_iter().flatten() {
             if tool.is_some() && selected.as_ref() != Some(&start.config.server_config().id()) {
                 continue;
@@ -1041,20 +1035,18 @@ impl Resident {
         Ok(())
     }
     fn demand_route(
-        &self,
+        runtime: &WorkspaceRuntime,
         language: Option<&crate::config::LanguageId>,
         tool: Option<crate::config::ToolKind>,
-    ) -> Result<Option<crate::config::ServerId>> {
-        let router = crate::config::ToolRouter::from_configs(&self.selection.config.lsp_servers)
-            .map_err(|_| DispatchError::new("profile_invalid", "invalid server routing"))?;
-        Ok(tool
-            .and_then(|tool| {
-                language.map_or_else(
-                    || router.resolve_any(tool).ok(),
-                    |language| router.resolve(language.as_ref(), tool),
-                )
-            })
-            .cloned())
+    ) -> Option<crate::config::ServerId> {
+        let router = runtime.translator.router_snapshot();
+        tool.and_then(|tool| {
+            language.as_ref().map_or_else(
+                || router.resolve_any(tool).ok(),
+                |language| router.resolve(language.as_ref(), tool),
+            )
+        })
+        .cloned()
     }
     async fn demand_language(
         runtime: &WorkspaceRuntime,

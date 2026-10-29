@@ -85,10 +85,15 @@ pub(super) fn inspect(path: &Path, directory: bool) -> Result<(PathBuf, Option<I
             Err(error) => error.kind() != std::io::ErrorKind::NotFound,
         }
     });
-    let Some(_) = boundary else {
+    let Some(boundary) = boundary else {
         return Ok((canonical, None));
     };
     let root = git_path(dir, "--show-toplevel")?;
+    // Git can ignore corrupt nested metadata and discover an approved parent.
+    // The nearest nonempty marker remains authoritative even when Git rejects it.
+    if root != boundary {
+        return Err(DispatchError::not_approved(path));
+    }
     let common = git_path(dir, "--git-common-dir")?;
     let git_dir = git_path(dir, "--absolute-git-dir")?;
     let listed = git(&root, &["worktree", "list", "--porcelain", "-z"])?;

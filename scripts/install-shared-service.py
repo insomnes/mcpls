@@ -77,6 +77,7 @@ def readiness(endpoint: str, timeout: float) -> None:
         "clientInfo": {"name": "mcpls-install-readiness", "version": "1"}}}).encode()
     deadline = time.monotonic() + timeout
     while True:
+        session = None
         try:
             request = urllib.request.Request(endpoint, data=body, headers={
                 "Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
@@ -84,20 +85,28 @@ def readiness(endpoint: str, timeout: float) -> None:
                 payload = response.read(1024 * 1024).decode()
                 session = response.headers.get("Mcp-Session-Id")
             if payload.lstrip().startswith("{"):
-                message = json.loads(payload)
+                messages = [json.loads(payload)]
             else:
-                message = next(json.loads(line[5:].strip()) for line in payload.splitlines() if line.startswith("data:"))
+                messages = []
+                for event in payload.replace("\r\n", "\n").split("\n\n"):
+                    lines = event.splitlines()
+                    event_type = next((line[6:].strip() for line in lines if line.startswith("event:")), "message")
+                    data = "\n".join(line[5:].removeprefix(" ") for line in lines if line.startswith("data:"))
+                    if event_type == "message" and data.strip():
+                        messages.append(json.loads(data))
+            message = next(message for message in messages if isinstance(message, dict) and message.get("id") == 1)
             if message.get("result", {}).get("serverInfo", {}).get("name") != "mcpls":
                 raise RuntimeError("readiness response is not an mcpls initialize result")
-            if session:
-                delete = urllib.request.Request(endpoint, method="DELETE", headers={"Mcp-Session-Id": session})
-                with urllib.request.urlopen(delete, timeout=3):
-                    pass
             return
         except (OSError, urllib.error.URLError, ValueError, StopIteration, RuntimeError) as error:
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"MCP readiness failed at {endpoint}") from error
             time.sleep(0.25)
+        finally:
+            if session:
+                delete = urllib.request.Request(endpoint, method="DELETE", headers={"Mcp-Session-Id": session})
+                with urllib.request.urlopen(delete, timeout=3):
+                    pass
 
 
 def rollback(backup: Path) -> None:
