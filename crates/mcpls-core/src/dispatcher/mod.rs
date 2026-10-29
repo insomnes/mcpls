@@ -456,15 +456,26 @@ impl Dispatcher {
         let result = crate::on_blocking_pool(move || dispatcher.discover(&path, directory))
             .await
             .map_err(|_| DispatchError::invalid(Path::new("selected workspace")))?;
-        let result = if matches!(&result, Ok(selection) if selection.temporary)
-            && self.entries.lock().await.values().any(|entry| {
-                !entry.selection.temporary
-                    && matches!(&result, Ok(selection) if selection.root().starts_with(entry.selection.root()))
-            })
-        {
-            Err(DispatchError::not_approved(&selected_path))
-        } else {
-            result
+        let result = match result {
+            Ok(selection) if selection.temporary => {
+                match tokio::fs::canonicalize(&selected_path).await {
+                    Ok(canonical) => {
+                        let entries = self.entries.lock().await;
+                        let explicit = entries.values().any(|entry| {
+                            !entry.selection.temporary
+                                && canonical.starts_with(entry.selection.root())
+                        });
+                        drop(entries);
+                        if explicit {
+                            Err(DispatchError::not_approved(&selected_path))
+                        } else {
+                            Ok(selection)
+                        }
+                    }
+                    Err(_) => Err(DispatchError::invalid(&selected_path)),
+                }
+            }
+            other => other,
         };
         if let Ok(selection) = &result
             && !selection.temporary

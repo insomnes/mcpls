@@ -1665,7 +1665,12 @@ async fn automatic_symlink_escape_and_parent_replacement_fail_closed() {
 async fn automatic_does_not_replace_registered_explicit_linked_checkout() {
     let mut fixture = Fixture::new(4);
     let automatic_profile = fixture.profile.with_file_name("automatic.toml");
-    std::fs::copy(&fixture.profile, &automatic_profile).unwrap();
+    let automatic = std::fs::read_to_string(&fixture.profile).unwrap();
+    std::fs::write(
+        &automatic_profile,
+        format!("{automatic}\n[lsp_servers.heuristics]\nproject_markers=['pyproject.toml']\n"),
+    )
+    .unwrap();
     fixture
         .config
         .dispatcher
@@ -1703,6 +1708,20 @@ async fn automatic_does_not_replace_registered_explicit_linked_checkout() {
             "workspace_not_approved",
         );
     }
+    assert_eq!(fixture.events().len(), 0);
+    // A known explicit source remains closed if its Git registry also disappears,
+    // even when automatic markers would select an ancestor of that source root.
+    let parent_marker = fixture.linked.parent().unwrap().join("pyproject.toml");
+    std::fs::write(&parent_marker, "").unwrap();
+    std::fs::rename(fixture.main.join(".git"), fixture.main.join(".git-removed")).unwrap();
+    error_code(
+        call(&client, "get_hover", hover(&fixture.linked))
+            .await
+            .unwrap_err(),
+        "workspace_not_approved",
+    );
+    std::fs::rename(fixture.main.join(".git-removed"), fixture.main.join(".git")).unwrap();
+    std::fs::remove_file(parent_marker).unwrap();
     assert_eq!(fixture.events().len(), 0);
     dispatcher.shutdown().await;
     client.cancel().await.unwrap();
