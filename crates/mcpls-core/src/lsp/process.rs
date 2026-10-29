@@ -70,6 +70,7 @@ pub type ServerStderr = tokio::process::ChildStderr;
 /// through the watchdog; on Windows through the job).
 #[derive(Debug)]
 pub struct ServerProcess {
+    dispatcher_pid: Option<ObservedPid>,
     #[cfg(unix)]
     child: Option<tokio::process::Child>,
     #[cfg(unix)]
@@ -80,8 +81,35 @@ pub struct ServerProcess {
     child: Box<dyn process_wrap::tokio::ChildWrapper>,
 }
 
+#[derive(Debug)]
+struct ObservedPid {
+    pid: u32,
+    observer: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+impl Drop for ObservedPid {
+    fn drop(&mut self) {
+        let _ = self.observer.compare_exchange(
+            self.pid,
+            0,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+}
+impl ServerProcess {
+    pub(crate) fn observe_pid(&mut self, observer: std::sync::Arc<std::sync::atomic::AtomicU32>) {
+        if let Some(pid) = self.process_id() {
+            observer.store(pid, std::sync::atomic::Ordering::Release);
+            self.dispatcher_pid = Some(ObservedPid { pid, observer });
+        }
+    }
+}
+
 #[cfg(unix)]
 impl ServerProcess {
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(tokio::process::Child::id)
+    }
     /// Spawn `command` bound to a fresh per-server lifeline.
     ///
     /// If the lifeline cannot be started, the server is spawned unbound in its
@@ -93,6 +121,7 @@ impl ServerProcess {
     fn spawn_with(command: Command, options: &lifeline::Options) -> io::Result<Self> {
         let spawned = lifeline::spawn(command, options)?;
         Ok(Self {
+            dispatcher_pid: None,
             child: Some(spawned.child),
             stderr: Some(spawned.stderr),
             lifeline: spawned.lifeline,
@@ -182,6 +211,7 @@ impl ServerProcess {
     #[cfg(test)]
     pub(crate) const fn from_unbound(child: tokio::process::Child) -> Self {
         Self {
+            dispatcher_pid: None,
             child: Some(child),
             stderr: None,
             lifeline: None,
@@ -205,13 +235,19 @@ impl Drop for ServerProcess {
 
 #[cfg(windows)]
 impl ServerProcess {
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        self.child.id()
+    }
     /// Spawn `command` inside a fresh Job Object that kills on close.
     pub(crate) fn spawn(command: Command) -> io::Result<Self> {
         use process_wrap::tokio::{CommandWrap, JobObject, KillOnDrop};
 
         let mut wrapped = CommandWrap::from(command);
         wrapped.wrap(JobObject).wrap(KillOnDrop);
-        wrapped.spawn().map(|child| Self { child })
+        wrapped.spawn().map(|child| Self {
+            child,
+            dispatcher_pid: None,
+        })
     }
 
     pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
@@ -227,7 +263,11 @@ impl ServerProcess {
     }
 
     pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        self.child.try_wait()
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.dispatcher_pid = None;
+        }
+        Ok(status)
     }
 
     /// Wait for the leader process only: the job wrapper's own `wait` blocks

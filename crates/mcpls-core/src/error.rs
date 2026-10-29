@@ -1718,6 +1718,9 @@ impl fmt::Display for StdioStream {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigError {
+    /// Dispatcher configuration violates its service boundary.
+    #[error("invalid dispatcher configuration: {0}")]
+    Dispatcher(String),
     /// A server entry lists a `file_patterns` form that maps to no extension.
     #[error("lsp_servers entry '{server}'")]
     UnsupportedFilePattern {

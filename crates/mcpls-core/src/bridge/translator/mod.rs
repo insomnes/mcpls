@@ -339,6 +339,21 @@ impl Translator {
         lock_std(&self.servers).failure(id).cloned()
     }
 
+    pub(crate) fn dispatcher_expect(&self, id: ServerId) {
+        lock_std(&self.servers).dispatcher_expect(id);
+        self.rebind_router_to_settled();
+    }
+
+    pub(crate) fn dispatcher_server(&self, id: &ServerId) -> Option<(bool, String)> {
+        let mut slots = lock_std(&self.servers);
+        slots.server_mut(id).map(|server| {
+            (
+                !server.is_dead().unwrap_or(true),
+                server.dispatcher_connection(),
+            )
+        })
+    }
+
     /// Every recorded startup failure, ordered by routing identity.
     pub(crate) fn startup_failures(&self) -> Vec<ServerSpawnFailure> {
         lock_std(&self.servers).failures()

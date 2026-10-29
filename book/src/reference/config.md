@@ -328,3 +328,7 @@ checkOnSave.command = "clippy"
 ## What's Next
 
 If a configuration does not behave as you expect, see [Troubleshooting](../guide/troubleshooting.md).
+
+## Worktree dispatcher
+
+Explicit `[dispatcher]` mode uses approved Git repositories or non-Git roots and service-selected profiles. See [Shared Worktree Service](../advanced/worktree-service.md) for configuration, path interpretation, lifecycle limits, and reload behavior. Enabled dispatcher mode rejects top-level `[workspace]` and `[[lsp_servers]]`.

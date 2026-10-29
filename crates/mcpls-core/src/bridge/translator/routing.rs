@@ -2478,6 +2478,7 @@ mod tests {
         ];
 
         let config = crate::config::ServerConfig {
+            dispatcher: None,
             mcp: crate::config::McpConfig::default(),
             workspace: WorkspaceConfig {
                 roots: vec![crate::config::ConfiguredRoot::new("/tmp/test-workspace").unwrap()],

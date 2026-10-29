@@ -43,6 +43,7 @@
 
 pub mod bridge;
 pub mod config;
+mod dispatcher;
 pub mod error;
 pub mod lsp;
 pub mod mcp;
@@ -119,11 +120,22 @@ pub async fn serve(config: ServerConfig) -> Result<(), Error> {
 async fn plan_off_runtime(
     config: &ServerConfig,
     redactions: &Arc<redaction::Redactions>,
+    boundary: Option<std::path::PathBuf>,
 ) -> Result<(WorkspaceRoots, StartPlan), Error> {
     let (config, redactions) = (config.clone(), Arc::clone(redactions));
     on_blocking_pool(move || {
         let roots = WorkspaceRoots::from_configured(&config.workspace.roots)?;
-        let plan = plan_server_starts(&config, &roots, &redactions);
+        let plan = boundary.map_or_else(
+            || Ok(plan_server_starts(&config, &roots, &redactions)),
+            |boundary| {
+                runtime::untrusted::plan_server_starts_scoped(
+                    &config,
+                    &roots,
+                    &redactions,
+                    Some(&boundary),
+                )
+            },
+        )?;
         Ok((roots, plan))
     })
     .await
@@ -206,6 +218,10 @@ pub(crate) async fn on_blocking_pool<T: Send + 'static>(
 /// }
 /// ```
 pub async fn serve_with(config: ServerConfig, transport: Transport) -> Result<(), Error> {
+    Box::pin(serve_with_inner(config, transport)).await
+}
+
+async fn serve_with_inner(config: ServerConfig, transport: Transport) -> Result<(), Error> {
     info!("Starting MCPLS server...");
 
     // Registered before any other startup work -- including
@@ -223,69 +239,41 @@ pub async fn serve_with(config: ServerConfig, transport: Transport) -> Result<()
     // A programmatic `ServerConfig` skips the allowlist check the `load_*` functions run.
     config.validate()?;
 
-    let language_map = config.build_effective_language_map();
-
-    let startup_redactions = Arc::new(redaction::Redactions::for_servers(
-        &config.lsp_servers,
-        lsp::current_environment(),
-    ));
-    let (workspace_roots, plan) = plan_off_runtime(&config, &startup_redactions).await?;
-    let (applicable_configs, refused, refusals) = plan.into_parts();
-
-    info!(
-        "Attempting to spawn {} applicable LSP server(s)...",
-        applicable_configs.len()
-    );
-
-    // Built over the applicable (post-heuristics) configs only: this is where
-    // #174's workspace-scoped routing rules (duplicate ServerId, conflicting
-    // `handles` claims) are enforced -- a startup error naming the
-    // conflicting `[[lsp_servers]]` entries, not a silent drop.
-    let router = ToolRouter::from_configs(
-        applicable_configs
-            .iter()
-            .map(lsp::ServerInitConfig::server_config)
-            .chain(&refused),
-    )?;
-
-    // Built here (rather than alongside `subscription_registry` below) so
-    // it can be handed to the translator, which uses it to invalidate a
-    // respawned server's stale cached diagnostics -- see
-    // `Translator::with_notification_cache`. Independent of `translator`
-    // itself, which holds no outer lock: the pump only ever locks this
-    // cache, so it never contends with a request handler running an
-    // in-flight LSP round-trip.
-    let notification_cache = Arc::new(Mutex::new(NotificationCache::new()));
-
-    let mut translator = Translator::new()
-        .with_startup_redactions(Arc::clone(&startup_redactions))
-        .with_resource_limits(config.workspace.resource_limits())
-        .with_workspace_trust(config.workspace_trust.clone())
-        .with_extensions(language_map)
-        .with_file_patterns(
-            config
-                .lsp_servers
-                .iter()
-                .flat_map(|server| server.file_patterns.iter().cloned()),
+    if config.dispatcher.as_ref().is_some_and(|d| d.enabled) {
+        let dispatcher = dispatcher::Dispatcher::new(config.clone())
+            .map_err(|e| error::ConfigError::Dispatcher(e.wire().message.into_owned()))?;
+        let reconciler = dispatcher.spawn_reconciler();
+        let server = mcp::McplsServer::new(
+            Arc::new(Translator::new()),
+            Arc::new(Mutex::new(NotificationCache::new())),
+            WorkspaceRoots::default(),
+            SubscriptionRegistry::new(),
+            config.project_config_status,
+            config.mcp,
         )
-        .with_router(router)
-        .with_notification_cache(Arc::clone(&notification_cache))
-        .with_indexing_ready_timeout(config.workspace.indexing_ready_timeout_seconds);
-    // moved, not cloned -- `config`'s last use is above
+        .with_dispatcher(dispatcher.clone());
+        let result = match transport {
+            Transport::Stdio => run_stdio(server, shutdown_signal).await,
+            #[cfg(feature = "transport-http")]
+            Transport::Http(config) => run_http(server, config, shutdown_signal).await,
+        };
+        dispatcher.shutdown().await;
+        reconciler.abort();
+        let _ = reconciler.await;
+        return result;
+    }
+
+    let runtime = WorkspaceRuntime::prepare(&config).await?;
+    let WorkspaceRuntime {
+        translator,
+        notification_cache,
+        workspace_roots,
+        subscription_registry,
+        applicable_configs,
+        refused,
+    } = runtime;
     let (project_config_status, mcp) = (config.project_config_status, config.mcp);
     let max_concurrent_server_starts = config.workspace.max_concurrent_server_starts;
-    translator.set_workspace_roots(workspace_roots.clone());
-
-    // Mark applicable servers as "expected" so a tool call that arrives while
-    // its server is still initializing gets a clear "still initializing" error
-    // (instead of "no server configured"), telling the caller to wait and retry.
-    let expected_servers: HashSet<ServerId> = applicable_configs
-        .iter()
-        .map(|c| c.server_config().id())
-        .collect();
-    translator.set_expected_servers(expected_servers);
-    translator.record_refusals(&refusals);
-
     // Shared state, built BEFORE LSP initialization so the MCP server can answer
     // `initialize` immediately. LSP servers (which can take minutes to initialize
     // on a large solution, e.g. a 130-project Unity .sln via OmniSharp) are spawned
@@ -296,21 +284,19 @@ pub async fn serve_with(config: ServerConfig, transport: Transport) -> Result<()
     // so cache-only handlers (e.g. `get_cached_diagnostics`, `read_resource`)
     // validate a path from their own copy without locking `translator` below.
 
-    let translator = Arc::new(translator);
     // Shared across every session (one per HTTP session, or the sole stdio
     // session): each joins it on its first subscribe -- see
     // `SubscriptionRegistry`.
-    let subscription_registry = SubscriptionRegistry::new();
 
     // Cancels the pump and startup tasks; dropping `serve_with` cancels it too.
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
 
     let lsp_init_handle = if applicable_configs.is_empty() {
-        warn_protocol_only(if refusals.is_empty() {
-            ProtocolOnlyCause::NothingConfigured
-        } else {
+        warn_protocol_only(if refused {
             ProtocolOnlyCause::AllRefused
+        } else {
+            ProtocolOnlyCause::NothingConfigured
         });
         None
     } else {
@@ -360,6 +346,99 @@ pub async fn serve_with(config: ServerConfig, transport: Transport) -> Result<()
 
     info!("MCPLS server shutting down");
     result
+}
+
+/// Isolated semantic state for one workspace, before any child is started.
+pub(crate) struct WorkspaceRuntime {
+    pub translator: Arc<Translator>,
+    pub notification_cache: Arc<Mutex<NotificationCache>>,
+    pub workspace_roots: WorkspaceRoots,
+    pub subscription_registry: SubscriptionRegistry,
+    pub applicable_configs: Vec<lsp::ServerInitConfig>,
+    pub refused: bool,
+}
+
+impl WorkspaceRuntime {
+    pub(crate) async fn prepare(config: &ServerConfig) -> Result<Self, Error> {
+        Self::prepare_scoped(config, None).await
+    }
+
+    pub(crate) async fn prepare_scoped(
+        config: &ServerConfig,
+        boundary: Option<std::path::PathBuf>,
+    ) -> Result<Self, Error> {
+        let language_map = config.build_effective_language_map();
+
+        let startup_redactions = Arc::new(redaction::Redactions::for_servers(
+            &config.lsp_servers,
+            lsp::current_environment(),
+        ));
+        let (workspace_roots, plan) =
+            plan_off_runtime(config, &startup_redactions, boundary).await?;
+        let (applicable_configs, refused, refusals) = plan.into_parts();
+
+        info!(
+            "Attempting to spawn {} applicable LSP server(s)...",
+            applicable_configs.len()
+        );
+
+        // Built over the applicable (post-heuristics) configs only: this is where
+        // #174's workspace-scoped routing rules (duplicate ServerId, conflicting
+        // `handles` claims) are enforced -- a startup error naming the
+        // conflicting `[[lsp_servers]]` entries, not a silent drop.
+        let router = ToolRouter::from_configs(
+            applicable_configs
+                .iter()
+                .map(lsp::ServerInitConfig::server_config)
+                .chain(&refused),
+        )?;
+
+        // Built here (rather than alongside `subscription_registry` below) so
+        // it can be handed to the translator, which uses it to invalidate a
+        // respawned server's stale cached diagnostics -- see
+        // `Translator::with_notification_cache`. Independent of `translator`
+        // itself, which holds no outer lock: the pump only ever locks this
+        // cache, so it never contends with a request handler running an
+        // in-flight LSP round-trip.
+        let notification_cache = Arc::new(Mutex::new(NotificationCache::new()));
+
+        let mut translator = Translator::new()
+            .with_startup_redactions(Arc::clone(&startup_redactions))
+            .with_resource_limits(config.workspace.resource_limits())
+            .with_workspace_trust(config.workspace_trust.clone())
+            .with_extensions(language_map)
+            .with_file_patterns(
+                config
+                    .lsp_servers
+                    .iter()
+                    .flat_map(|server| server.file_patterns.iter().cloned()),
+            )
+            .with_router(router)
+            .with_notification_cache(Arc::clone(&notification_cache))
+            .with_indexing_ready_timeout(config.workspace.indexing_ready_timeout_seconds);
+        // moved, not cloned -- `config`'s last use is above
+
+        translator.set_workspace_roots(workspace_roots.clone());
+
+        // Mark applicable servers as "expected" so a tool call that arrives while
+        // its server is still initializing gets a clear "still initializing" error
+        // (instead of "no server configured"), telling the caller to wait and retry.
+        let expected_servers: HashSet<ServerId> = applicable_configs
+            .iter()
+            .map(|c| c.server_config().id())
+            .collect();
+        translator.set_expected_servers(expected_servers);
+        translator.record_refusals(&refusals);
+
+        Ok(Self {
+            translator: Arc::new(translator),
+            notification_cache,
+            workspace_roots,
+            subscription_registry: SubscriptionRegistry::new(),
+            applicable_configs,
+            refused: !refusals.is_empty(),
+        })
+    }
 }
 
 /// Why no LSP server is started.
@@ -436,6 +515,7 @@ mod tests {
             // transport/MCP error from the closed test connection, NOT a fail-fast
             // server-availability error.
             let config = ServerConfig {
+                dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
                     roots: vec![crate::config::ConfiguredRoot::new("/tmp/test-workspace").unwrap()],
@@ -500,6 +580,7 @@ mod tests {
             let pid_file = root.join("pid");
             let script = format!("echo $$ > {}; exec sleep 600", pid_file.display());
             let config = ServerConfig {
+                dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
                     roots: vec![crate::config::ConfiguredRoot::new(&root).unwrap()],
@@ -572,6 +653,7 @@ mod tests {
             // serve() blocks until the MCP transport closes, so it will error with a
             // connection/transport error — not AllServersFailedToInit.
             let config = ServerConfig {
+                dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
                     roots: vec![crate::config::ConfiguredRoot::new("/tmp/test-workspace").unwrap()],
@@ -631,6 +713,7 @@ mod tests {
             doomed_cwd.close().unwrap();
 
             let config = ServerConfig {
+                dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
                     roots: vec![crate::config::ConfiguredRoot::new(workspace_root).unwrap()],
@@ -685,6 +768,7 @@ mod tests {
             use crate::config::{LspServerConfig, ServerStartConcurrency, WorkspaceConfig};
 
             let config = ServerConfig {
+                dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
                     roots: vec![],

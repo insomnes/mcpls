@@ -2458,6 +2458,9 @@
             "string",
             "null"
           ]
+        },
+        "runtime_generation": {
+          "type": "string"
         }
       },
       "required": [
@@ -3018,6 +3021,9 @@
             "uri": {
               "description": "URI of the document.",
               "type": "string"
+            },
+            "dispatcher_context": {
+              "type": "string"
             }
           },
           "required": [
@@ -3208,6 +3214,9 @@
               "$ref": "#/$defs/Range"
             },
             "uri": {
+              "type": "string"
+            },
+            "dispatcher_context": {
               "type": "string"
             }
           },
@@ -3686,6 +3695,9 @@
             "uri": {
               "description": "URI of the document.",
               "type": "string"
+            },
+            "dispatcher_context": {
+              "type": "string"
             }
           },
           "required": [
@@ -3876,6 +3888,9 @@
               "$ref": "#/$defs/Range"
             },
             "uri": {
+              "type": "string"
+            },
+            "dispatcher_context": {
               "type": "string"
             }
           },
@@ -4804,6 +4819,9 @@
             }
           ],
           "description": "Minimum log level to include: error, warning, info, debug."
+        },
+        "workspace_path": {
+          "type": "string"
         }
       },
       "type": "object"
@@ -4892,6 +4910,9 @@
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "workspace_path": {
+          "type": "string"
         }
       },
       "type": "object"
@@ -5157,6 +5178,9 @@
             },
             "uri": {
               "type": "string"
+            },
+            "dispatcher_context": {
+              "type": "string"
             }
           },
           "required": [
@@ -5329,6 +5353,9 @@
               "$ref": "#/$defs/Range"
             },
             "uri": {
+              "type": "string"
+            },
+            "dispatcher_context": {
               "type": "string"
             }
           },
@@ -5559,6 +5586,9 @@
             },
             "uri": {
               "type": "string"
+            },
+            "dispatcher_context": {
+              "type": "string"
             }
           },
           "required": [
@@ -5731,6 +5761,9 @@
               "$ref": "#/$defs/Range"
             },
             "uri": {
+              "type": "string"
+            },
+            "dispatcher_context": {
               "type": "string"
             }
           },
@@ -5929,7 +5962,7 @@
   {
     "name": "get_tool_support",
     "title": "Tool Support",
-    "description": "Which tools are usable for which languages in this session, without making a failing call. Use it as an optional diagnostic aid. Per tool, `coverage` is `all`, `some`, `none`, `unknown` (a server is still initializing) or `always` (needs no language server); `routes` groups the languages (`languages`) that share a `status`: `supported`, `push_only` (no pull provider: `get_diagnostics` answers from the push cache), `capability_not_advertised`, `initializing` or `no_server`. `file_path` restricts the report to that file's language. `supported` means the call will be dispatched to a server advertising the capability, not that it will succeed: indexing, push-only diagnostics and respawn backoff can still fail it.",
+    "description": "Report tool support by language. file_path restricts the report to one language; workspace_path selects a workspace. Both must select the same workspace. In dispatcher mode, no selector returns basis:configured without starting a backend; a selector returns basis:runtime with workspace_path and runtime_generation. coverage is all, some, none, unknown, or always. unknown means initialization; always needs no LSP. Routes identify supported, push_only, capability_not_advertised, initializing, or no_server. Advertised support does not guarantee successful indexing, diagnostics, or requests.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -5940,6 +5973,9 @@
             "string",
             "null"
           ]
+        },
+        "workspace_path": {
+          "type": "string"
         }
       },
       "type": "object"
@@ -7944,6 +7980,9 @@
             "array",
             "null"
           ]
+        },
+        "workspace_path": {
+          "type": "string"
         }
       },
       "type": "object"
@@ -8244,6 +8283,9 @@
         },
         "query": {
           "description": "Search query for symbol names (supports partial matching).",
+          "type": "string"
+        },
+        "workspace_path": {
           "type": "string"
         }
       },

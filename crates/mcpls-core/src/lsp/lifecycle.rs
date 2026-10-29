@@ -323,6 +323,9 @@ pub struct ServerInitConfig {
     /// a respawn can tell a pin that went stale (the install moved) from the
     /// user's own `tsserver.path`, which is never second-guessed.
     auto_pin: Option<PathBuf>,
+    start_limits: Vec<Arc<tokio::sync::Semaphore>>,
+    dispatcher_attempt: Option<Arc<tokio::sync::Mutex<Option<Instant>>>>,
+    dispatcher_pid: Option<Arc<std::sync::atomic::AtomicU32>>,
     trust: SpawnTrust,
 }
 
@@ -374,6 +377,9 @@ impl ServerInitConfig {
             redactions,
             child_working_dir: ChildWorkingDir::Inherit,
             auto_pin: None,
+            start_limits: Vec::new(),
+            dispatcher_attempt: None,
+            dispatcher_pid: None,
             trust: SpawnTrust::Trusted,
         }
     }
@@ -467,6 +473,17 @@ impl ServerInitConfig {
     #[must_use]
     pub fn with_child_working_dir(mut self, dir: ChildWorkingDir) -> Self {
         self.child_working_dir = dir;
+        self
+    }
+
+    pub(crate) fn with_dispatcher_limits(
+        mut self,
+        limits: Vec<Arc<tokio::sync::Semaphore>>,
+        pid: Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
+        self.start_limits = limits;
+        self.dispatcher_attempt = Some(Arc::new(tokio::sync::Mutex::new(None)));
+        self.dispatcher_pid = Some(pid);
         self
     }
 
@@ -668,6 +685,10 @@ pub fn child_env_var(
 }
 
 impl LspServer {
+    pub(crate) fn dispatcher_connection(&self) -> String {
+        format!("{:?}", self.client.connection_id())
+    }
+
     /// The config this server was spawned from.
     pub(crate) const fn init_config(&self) -> &ServerInitConfig {
         &self.init_config
@@ -700,6 +721,31 @@ impl LspServer {
     /// - The `initialized` or `workspace/didChangeConfiguration` notification
     ///   cannot be written ([`Error::LspInitFailed`])
     pub async fn spawn(config: ServerInitConfig) -> Result<SpawnedServer> {
+        if let Some(attempt) = &config.dispatcher_attempt {
+            let mut last = attempt.lock().await;
+            if let Some(at) = *last
+                && let Some(delay) = Duration::from_secs(5).checked_sub(at.elapsed())
+            {
+                tokio::time::sleep(delay).await;
+            }
+            *last = Some(Instant::now());
+        }
+        let mut permits = Vec::with_capacity(config.start_limits.len());
+        for limit in &config.start_limits {
+            permits.push(
+                limit
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| Error::ServerTerminated)?,
+            );
+        }
+        let result = Box::pin(Self::spawn_admitted(config)).await;
+        drop(permits);
+        result
+    }
+
+    async fn spawn_admitted(config: ServerInitConfig) -> Result<SpawnedServer> {
         // Repeated on purpose: a workspace file can become executable between plan and spawn (#736).
         config.vet_arguments_off_runtime().await?;
         let own = Redactions::for_server(config.server_config(), current_environment());
@@ -738,6 +784,10 @@ impl LspServer {
 
         let mut child = ServerProcess::spawn(command)
             .map_err(|e| spawn_error(config.server_config.command.server_command().clone(), e))?;
+
+        if let Some(pid) = &config.dispatcher_pid {
+            child.observe_pid(pid.clone());
+        }
 
         let stdin = child
             .take_stdin()

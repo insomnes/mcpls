@@ -335,6 +335,7 @@ async fn run_delivery(
     pending: Arc<StdMutex<HashSet<DiagnosticsResourceUri>>>,
     doorbell: mpsc::Receiver<()>,
     state: Weak<SessionState>,
+    registry: SubscriptionRegistry,
 ) {
     let mut gate = Gate {
         pacer: target.is_paced().then(ListenPacer::new),
@@ -349,7 +350,7 @@ async fn run_delivery(
             let Some(uri) = take_one(&pending) else {
                 continue;
             };
-            if target.send(&uri, &mut gate).await.is_err() {
+            if !registry.is_valid().await || target.send(&uri, &mut gate).await.is_err() {
                 return;
             }
         }
@@ -439,6 +440,7 @@ impl SessionState {
         }
     }
 
+    #[cfg(test)]
     async fn subscribe(
         &self,
         canonical: DiagnosticsResourceUri,
@@ -559,6 +561,7 @@ impl ListenUris {
 
 #[derive(Debug)]
 struct RegistryInner {
+    validity: OnceLock<Arc<dyn ResourceValidity>>,
     sessions: StdMutex<Vec<Weak<SessionState>>>,
     listen_permits: Arc<Semaphore>,
 }
@@ -609,11 +612,37 @@ impl Default for SubscriptionRegistry {
     }
 }
 
+pub trait ResourceValidity: Send + Sync + std::fmt::Debug {
+    fn check(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>;
+}
+
 impl SubscriptionRegistry {
+    pub(crate) fn set_validity(&self, guard: Arc<dyn ResourceValidity>) {
+        let _ = self.0.validity.set(guard);
+    }
+    pub(crate) async fn is_valid(&self) -> bool {
+        match self.0.validity.get() {
+            Some(guard) => guard.check().await,
+            None => true,
+        }
+    }
+    pub(crate) async fn subscription_count(&self) -> usize {
+        let mut count: usize = 0;
+        for session in self.live_sessions() {
+            count = count.saturating_add(session.subs.len().await);
+        }
+        count
+    }
+    pub(crate) async fn invalidate(&self) {
+        for session in self.live_sessions() {
+            session.subs.clear().await;
+        }
+    }
     /// Create an empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self(Arc::new(RegistryInner {
+            validity: OnceLock::new(),
             sessions: StdMutex::new(Vec::new()),
             listen_permits: Arc::new(Semaphore::new(MAX_LISTEN_STREAMS)),
         }))
@@ -671,6 +700,9 @@ impl SubscriptionRegistry {
         &self,
         pred: impl Fn(&DiagnosticsResourceUri) -> bool + Sync,
     ) {
+        if !self.is_valid().await {
+            return;
+        }
         for session in self.live_sessions() {
             session.publish_matching(&pred).await;
         }
@@ -763,6 +795,7 @@ fn bind_delivery(
             Arc::clone(&pending),
             rx,
             Arc::downgrade(state),
+            registry.clone(),
         ));
         registry.register(state);
         Delivery {
@@ -866,7 +899,44 @@ pub struct StatefulSession<'a> {
     peer: Peer<RoleServer>,
 }
 
+pub struct SubscriptionRollback {
+    state: Arc<SessionState>,
+    uri: DiagnosticsResourceUri,
+    raw: String,
+    armed: bool,
+}
+impl SubscriptionRollback {
+    pub(crate) const fn commit(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for SubscriptionRollback {
+    fn drop(&mut self) {
+        if self.armed {
+            let state = self.state.clone();
+            let uri = self.uri.clone();
+            let raw = self.raw.clone();
+            tokio::spawn(async move {
+                state.unsubscribe(Some(&uri), &raw).await;
+            });
+        }
+    }
+}
+
 impl StatefulSession<'_> {
+    pub(crate) fn rollback_new(
+        &self,
+        armed: bool,
+        uri: DiagnosticsResourceUri,
+        raw: String,
+    ) -> SubscriptionRollback {
+        SubscriptionRollback {
+            state: self.handle.state.clone(),
+            uri,
+            raw,
+            armed,
+        }
+    }
     /// Records a subscription to `canonical` (reachable from the client as
     /// `raw`), binding delivery and registering the session first.
     ///
@@ -878,7 +948,11 @@ impl StatefulSession<'_> {
     ) -> Result<bool, SubscriptionError> {
         self.handle
             .ensure_delivery(|| Target::Peer(self.peer.clone()));
-        self.handle.state.subscribe(canonical, raw).await
+        let newly = self.handle.state.subs.subscribe(canonical.clone()).await?;
+        let mut rollback = self.rollback_new(newly, canonical.clone(), raw.clone());
+        self.handle.state.subs.record_alias(raw, &canonical).await;
+        rollback.commit();
+        Ok(newly)
     }
 
     /// Removes the subscription `canonical` or the recorded alias `raw`

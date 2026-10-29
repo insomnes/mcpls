@@ -29,6 +29,7 @@
 - [Language Server Lifecycle](advanced/lifecycle.md)
 - [Diagnostics and Resources](advanced/diagnostics.md)
 - [Transports: stdio and HTTP](advanced/transports.md)
+- [Shared Worktree Service](advanced/worktree-service.md)
 - [Security and Trust](advanced/security.md)
 - [Untrusted-Workspace Mode](advanced/untrusted-mode.md)
 - [TypeScript: tsserver Pinning and TypeScript 7](advanced/typescript.md)

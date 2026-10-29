@@ -3,6 +3,8 @@
 //! This module provides the MCP server that exposes LSP capabilities
 //! as MCP tools using the rmcp SDK.
 
+mod dispatch;
+
 use std::borrow::Cow;
 use std::future::Future;
 use std::path::PathBuf;
@@ -291,6 +293,15 @@ impl ServerText for DirectTypesResult {
     }
 }
 
+type HierarchyContexts =
+    Arc<Mutex<std::collections::HashMap<String, (String, serde_json::Value, String)>>>;
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceStatusParams {
+    workspace_path: Option<PathBuf>,
+}
+
 /// MCP server that exposes LSP capabilities as tools.
 ///
 /// Deliberately not `Clone` (#478): each HTTP session must get its own
@@ -299,7 +310,12 @@ impl ServerText for DirectTypesResult {
 /// builds a new value field by field instead (each field an `Arc` bump except
 /// `session`), so this costs nothing at the one production call site
 /// (`transport::run_http`'s per-session factory closure).
+///
+/// MCP server with isolated session subscriptions and optional worktree dispatch.
 pub struct McplsServer {
+    dispatcher: Option<Arc<crate::dispatcher::Dispatcher>>,
+    workspace_sessions: Mutex<std::collections::HashMap<String, Arc<Self>>>,
+    hierarchy_contexts: HierarchyContexts,
     context: Arc<BridgeContext>,
 
     /// `Arc`-wrapped so building a new session in `for_new_session` is a
@@ -691,10 +707,107 @@ impl McplsServer {
             mcp,
         ));
         Self {
+            dispatcher: None,
+            workspace_sessions: Mutex::new(std::collections::HashMap::new()),
+            hierarchy_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             context,
             tool_router,
             stop: CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn with_dispatcher(
+        mut self,
+        dispatcher: Arc<crate::dispatcher::Dispatcher>,
+    ) -> Self {
+        self.dispatcher = Some(dispatcher);
+        let mut router = Self::build_profile_tool_router(
+            self.context.mcp.tool_prefix.as_ref(),
+            self.context.mcp.tool_profile,
+        );
+        if let Some(mut route) = Self::declared_tool_router()
+            .map
+            .remove("get_workspace_status")
+        {
+            route.attr.name = Cow::Owned(prefixed_tool_name(
+                self.context.mcp.tool_prefix.as_ref(),
+                "get_workspace_status",
+            ));
+            let title = route.attr.title.clone();
+            route.attr.annotations = Some(ToolAnnotations::from_raw(
+                title,
+                Some(true),
+                Some(false),
+                Some(true),
+                None,
+            ));
+            router.add_route(route);
+        }
+        for route in router.map.values_mut() {
+            let name = self.unprefixed(&route.attr.name);
+            if let Some(output) = &mut route.attr.output_schema {
+                let mut output_schema = (**output).clone();
+                if let Some(properties) = output_schema
+                    .get_mut("properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    if name == "get_document_outline" {
+                        properties.insert(
+                            "runtime_generation".into(),
+                            serde_json::json!({"type":"string"}),
+                        );
+                    }
+                    if name == "get_tool_support" {
+                        properties.insert(
+                            "basis".into(),
+                            serde_json::json!({"enum":["configured","runtime"]}),
+                        );
+                        properties.insert(
+                            "workspace_path".into(),
+                            serde_json::json!({"type":"string"}),
+                        );
+                        properties.insert(
+                            "runtime_generation".into(),
+                            serde_json::json!({"type":"string"}),
+                        );
+                    }
+                }
+                *output = Arc::new(output_schema);
+            }
+        }
+        self.tool_router = Arc::new(router);
+        self
+    }
+
+    #[tool(
+        description = "Read discovered workspace identities, generations, lifecycle state, resource limits, and server status. Starts no language server.",
+        title = "Workspace Status"
+    )]
+    async fn get_workspace_status(
+        &self,
+        Parameters(params): Parameters<WorkspaceStatusParams>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let dispatcher = self
+            .dispatcher
+            .as_ref()
+            .ok_or_else(|| McpError::invalid_params("dispatcher mode is disabled", None))?;
+        dispatcher
+            .status(params.workspace_path)
+            .await
+            .map(Json)
+            .map_err(crate::dispatcher::DispatchError::wire)
+    }
+
+    fn unprefixed<'a>(&self, name: &'a str) -> &'a str {
+        self.context
+            .mcp
+            .tool_prefix
+            .as_ref()
+            .and_then(|prefix| {
+                name.strip_prefix(prefix.as_str())
+                    .and_then(|tail| tail.strip_prefix('_'))
+            })
+            .unwrap_or(name)
     }
 
     /// This server reporting `stop` as its shutdown signal: a tool call that
@@ -782,6 +895,9 @@ impl McplsServer {
             mcp: self.context.mcp.clone(),
         });
         Self {
+            dispatcher: self.dispatcher.clone(),
+            workspace_sessions: Mutex::new(std::collections::HashMap::new()),
+            hierarchy_contexts: self.hierarchy_contexts.clone(),
             context,
             tool_router: Arc::clone(&self.tool_router),
             stop: self.stop.clone(),
@@ -809,12 +925,14 @@ impl McplsServer {
     /// the schema-shaping tests can compare the two.
     pub(super) fn unshaped_tool_router() -> ToolRouter<Self> {
         let mut router = Self::declared_tool_router();
+        router.map.remove("get_workspace_status");
         for route in router.map.values_mut() {
             let title = route.attr.title.clone();
             route.attr.annotations.get_or_insert_with(|| {
                 ToolAnnotations::from_raw(title, Some(true), Some(false), Some(true), None)
             });
         }
+        dispatch::shape_workspace_schemas(&mut router);
         router
     }
 
@@ -831,9 +949,8 @@ impl McplsServer {
     /// mutating tool to write down an explicit classification rather than
     /// inherit this default silently.
     ///
-    /// With `prefix: None` this returns byte-for-byte what it always has --
-    /// `test_tool_surface_matches_golden_snapshot` pins that as the
-    /// backward-compatibility guarantee for the default, unprefixed surface.
+    /// With `prefix: None`, the golden snapshot pins the default unprefixed
+    /// surface, including optional workspace selectors and continuation fields.
     ///
     /// The rename re-keys `router.map` via [`ToolRouter::add_route`] rather
     /// than inserting directly, so it goes through rmcp's own
@@ -1550,7 +1667,7 @@ impl McplsServer {
 
     /// Report which tools are usable for which languages.
     #[tool(
-        description = "Which tools are usable for which languages in this session, without making a failing call. Use it as an optional diagnostic aid. Per tool, `coverage` is `all`, `some`, `none`, `unknown` (a server is still initializing) or `always` (needs no language server); `routes` groups the languages (`languages`) that share a `status`: `supported`, `push_only` (no pull provider: `get_diagnostics` answers from the push cache), `capability_not_advertised`, `initializing` or `no_server`. `file_path` restricts the report to that file's language. `supported` means the call will be dispatched to a server advertising the capability, not that it will succeed: indexing, push-only diagnostics and respawn backoff can still fail it.",
+        description = "Report tool support by language. file_path restricts the report to one language; workspace_path selects a workspace. Both must select the same workspace. In dispatcher mode, no selector returns basis:configured without starting a backend; a selector returns basis:runtime with workspace_path and runtime_generation. coverage is all, some, none, unknown, or always. unknown means initialization; always needs no LSP. Routes identify supported, push_only, capability_not_advertised, initializing, or no_server. Advertised support does not guarantee successful indexing, diagnostics, or requests.",
         title = "Tool Support"
     )]
     async fn get_tool_support(
@@ -2064,14 +2181,34 @@ impl ServerHandler for McplsServer {
     ) -> Result<ListResourcesResult, McpError> {
         contain_panic(
             async {
-                let mut open_paths = self.context.translator.open_document_paths();
+                let (mut open_paths, generation) = if let Some(dispatcher) = &self.dispatcher {
+                    let (paths, generation) = dispatcher.resource_paths().await;
+                    (paths, Some(generation))
+                } else {
+                    (self.context.translator.open_document_paths(), None)
+                };
                 // `open_document_paths()` is backed by a `HashMap`; sort so pagination
                 // cursors resume at a stable, deterministic position across calls.
                 open_paths.sort();
 
-                let cursor = request.and_then(|r| r.cursor);
+                let mut cursor = request.and_then(|r| r.cursor);
+                if let (Some(generation), Some(raw)) = (&generation, &cursor) {
+                    let (prefix, offset) = raw
+                        .split_once(':')
+                        .ok_or_else(|| crate::dispatcher::DispatchError::stale().wire())?;
+                    if prefix != generation {
+                        return Err(crate::dispatcher::DispatchError::stale().wire());
+                    }
+                    cursor = Some(offset.to_string());
+                }
                 let (page, next_cursor) =
                     paginate_resource_paths(&open_paths, cursor.as_deref(), RESOURCE_PAGE_SIZE)?;
+                let next_cursor = next_cursor.map(|offset| {
+                    generation.as_ref().map_or_else(
+                        || offset.clone(),
+                        |generation| format!("{generation}:{offset}"),
+                    )
+                });
 
                 let resources: Vec<_> = page
                     .iter()
@@ -2112,6 +2249,15 @@ impl ServerHandler for McplsServer {
         request: ReadResourceRequestParams,
         _context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
+        if let Some(dispatcher) = &self.dispatcher {
+            let (lease, server) = self.resource_session(&request.uri).await?;
+            let result = server.read_resource_inner(request).await;
+            dispatcher
+                .validate(&lease.resident)
+                .await
+                .map_err(crate::dispatcher::DispatchError::wire)?;
+            return result;
+        }
         contain_panic(self.read_resource_inner(request), "read_resource").await
     }
 
@@ -2122,8 +2268,7 @@ impl ServerHandler for McplsServer {
     ) -> Result<CallToolResponse, McpError> {
         let tool = request.name.clone();
         let (request_token, peer) = (context.ct.clone(), context.peer.clone());
-        let tcc = ToolCallContext::new(self, request, context);
-        let handler = contain_panic(self.tool_router.call(tcc), "tool call");
+        let handler = contain_panic(Box::pin(self.dispatch_tool(request, context)), "tool call");
         match run_cancellable(&request_token, &self.stop, peer_closed(&peer), handler).await {
             Ok(result) => result,
             Err(stop) => {
@@ -2144,6 +2289,25 @@ impl ServerHandler for McplsServer {
         request: SubscribeRequestParams,
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
+        if let Some(dispatcher) = &self.dispatcher {
+            let (lease, server) = self.resource_session(&request.uri).await?;
+            let ct = context.ct.clone();
+            let invalid = lease.resident.cancel();
+            #[allow(
+                deprecated,
+                reason = "delegates the legacy protocol method to its scoped runtime"
+            )]
+            let result = tokio::select! {
+                ()=ct.cancelled()=>Err(McpError::new(ErrorCode(-32800),"subscription request cancelled",None)),
+                ()=invalid.cancelled()=>Err(McpError::new(ErrorCode(-32056),"workspace invalidated while subscribing",Some(serde_json::json!({"code":"workspace_invalidated","retryable":true})))),
+                result=Box::pin(server.subscribe(request,context))=>result,
+            };
+            dispatcher
+                .validate(&lease.resident)
+                .await
+                .map_err(crate::dispatcher::DispatchError::wire)?;
+            return result;
+        }
         contain_panic(
             async {
                 let session = self.context.session.require_stateful(&context)?;
@@ -2171,6 +2335,11 @@ impl ServerHandler for McplsServer {
                     .subscribe(canonical_uri.clone(), request.uri.clone())
                     .await
                     .map_err(|e| self.render_error(e.into()))?;
+                let mut rollback = session.rollback_new(
+                    newly_subscribed,
+                    canonical_uri.clone(),
+                    request.uri.clone(),
+                );
                 if !newly_subscribed {
                     tracing::debug!(
                         "client re-subscribed to already-subscribed resource {canonical_uri}"
@@ -2220,6 +2389,7 @@ impl ServerHandler for McplsServer {
                     tracing::warn!("Failed to replay cached diagnostics for {canonical_uri}: {e}");
                 }
 
+                rollback.commit();
                 Ok(())
             },
             "subscribe",
@@ -2232,6 +2402,21 @@ impl ServerHandler for McplsServer {
         request: UnsubscribeRequestParams,
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
+        if self.dispatcher.is_some() {
+            parse_uri(&request.uri).map_err(|e| self.render_error(e.into()))?;
+            let servers: Vec<_> = self
+                .workspace_sessions
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .collect();
+            for server in servers {
+                let session = server.context.session.require_stateful(&context)?;
+                session.unsubscribe(None, &request.uri).await;
+            }
+            return Ok(());
+        }
         contain_panic(
             async {
                 let session = self.context.session.require_stateful(&context)?;
@@ -2299,6 +2484,9 @@ impl ServerHandler for McplsServer {
     /// the input with a stream open makes rmcp wait out its drain timeout
     /// (a few seconds) because it does not cancel request tokens at EOF.
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        if self.dispatcher.is_some() {
+            return self.dispatch_listen(context).await;
+        }
         let requested = context
             .requested()
             .resource_subscriptions
@@ -7746,7 +7934,7 @@ sleep 0.3
     /// registers, so the report can neither omit nor invent a tool.
     #[test]
     fn test_mcp_tool_catalogue_matches_declared_router() {
-        let mut declared: Vec<String> = McplsServer::declared_tool_router()
+        let mut declared: Vec<String> = McplsServer::unshaped_tool_router()
             .map
             .keys()
             .map(ToString::to_string)

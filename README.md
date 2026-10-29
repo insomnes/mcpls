@@ -29,6 +29,7 @@ The full documentation is the mcpls book: **<https://bug-ops.github.io/mcpls/>**
 | Configure language servers | [Configuration](https://bug-ops.github.io/mcpls/guide/configuration.html) |
 | Tool catalog | [Tools Overview](https://bug-ops.github.io/mcpls/tools/overview.html) |
 | Something does not work | [Troubleshooting](https://bug-ops.github.io/mcpls/guide/troubleshooting.html) |
+| Shared Git worktree service | [Worktree service](book/src/advanced/worktree-service.md) |
 | HTTP transport and allowlists | [Transports](https://bug-ops.github.io/mcpls/advanced/transports.html) |
 | Security model and untrusted workspaces | [Security and Trust](https://bug-ops.github.io/mcpls/advanced/security.html) |
 | Every flag and config key | [Reference](https://bug-ops.github.io/mcpls/reference/cli.html) |

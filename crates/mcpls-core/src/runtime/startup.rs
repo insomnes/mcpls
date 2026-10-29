@@ -55,12 +55,36 @@ pub fn spawn_lsp_servers_background(
             cancel,
             workspace_roots,
             max_concurrent_server_starts,
+            None,
         );
         if Box::pin(run_init_supervised(&translator, &applicable_configs, body)).await
             == InitOutcome::Panicked
         {
             publish_startup_failures(&translator, &settle_registry).await;
         }
+    })
+}
+
+pub fn spawn_dispatcher_server(
+    config: ServerInitConfig,
+    translator: Arc<Translator>,
+    shared: PumpShared,
+    cancel: CancellationToken,
+    configured: Vec<(ServerId, LanguageId)>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let configs = [config];
+        let body = init_lsp_servers(
+            &configs,
+            &translator,
+            shared.notification_cache.clone(),
+            shared.subs.clone(),
+            cancel,
+            shared.workspace_roots.clone(),
+            ServerStartConcurrency::default(),
+            Some((shared, configured)),
+        );
+        let _ = Box::pin(run_init_supervised(&translator, &configs, body)).await;
     })
 }
 
@@ -149,6 +173,10 @@ async fn next_start(pending: &mut Option<StartStream<'_>>) -> Option<ServerStart
 /// The start futures are polled on this (the supervised) task, so aborting it
 /// drops every not-yet-registered `Child`. Cancellation abandons whatever is
 /// still starting and registers nothing further.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "shared optional dispatcher state preserves the static startup path"
+)]
 async fn init_lsp_servers(
     configs: &[ServerInitConfig],
     translator: &Translator,
@@ -157,6 +185,7 @@ async fn init_lsp_servers(
     cancel: CancellationToken,
     workspace_roots: WorkspaceRoots,
     max_concurrent_starts: ServerStartConcurrency,
+    shared: Option<(PumpShared, Vec<(ServerId, LanguageId)>)>,
 ) {
     if configs.is_empty() {
         return;
@@ -165,12 +194,25 @@ async fn init_lsp_servers(
         .lock()
         .await
         .attach_documents(Arc::clone(translator.document_tracker()));
-    let pump_shared = PumpShared {
-        roles: crate::runtime::pump::DiagnosticsRoles::default(),
-        notification_cache: Arc::clone(&notification_cache),
-        subs: subscription_registry,
-        workspace_roots,
-    };
+    let (pump_shared, configured) = shared.unwrap_or_else(|| {
+        (
+            PumpShared {
+                roles: crate::runtime::pump::DiagnosticsRoles::default(),
+                notification_cache: Arc::clone(&notification_cache),
+                subs: subscription_registry,
+                workspace_roots,
+            },
+            configs
+                .iter()
+                .map(|config| {
+                    (
+                        config.server_config().id(),
+                        config.server_config().language_id.clone(),
+                    )
+                })
+                .collect(),
+        )
+    });
     // Installed before the first server settles, so every settled server can
     // be restarted and no init path leaves a registered server unwired.
     let mut startup = Some(translator.begin_startup());
@@ -183,15 +225,7 @@ async fn init_lsp_servers(
         notification_cache,
         pump_shared,
         cancel: cancel.clone(),
-        configured: configs
-            .iter()
-            .map(|config| {
-                (
-                    config.server_config().id(),
-                    config.server_config().language_id.clone(),
-                )
-            })
-            .collect(),
+        configured,
         languages: HashMap::new(),
         pumps: JoinSet::new(),
         tally: StartupTally::default(),
@@ -345,7 +379,7 @@ impl StartupSettler<'_> {
     /// Pending servers count toward the route count, so it equals the batch
     /// value once every server has settled.
     async fn recompute_roles(&self) {
-        for (id, language) in &self.languages {
+        for (id, language) in &self.configured {
             self.pump_shared
                 .roles
                 .set(id, self.diagnostics_role(language, id));

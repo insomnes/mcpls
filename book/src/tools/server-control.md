@@ -92,3 +92,7 @@ This tool is destructive: it kills processes the server started, including daemo
 ## What's Next
 
 If something does not work as described, go to [Troubleshooting](../guide/troubleshooting.md).
+
+## Shared worktree service
+
+In [dispatcher mode](../advanced/worktree-service.md), server logs, messages, symbol search, and restart require an absolute `workspace_path` directory. `restart_server(all=true)` affects only that runtime. `get_tool_support` accepts an optional file or workspace selector and distinguishes configured routes from actual runtime capabilities. `get_workspace_status` reports known identities, generations, capacity, pins, and server status without starting a backend.

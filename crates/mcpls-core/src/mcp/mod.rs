@@ -14,10 +14,6 @@ mod tool_support;
 mod tools;
 
 pub use server::McplsServer;
-pub use session::SubscriptionRegistry;
-#[cfg(test)]
-pub(crate) use session::{SessionHandle, Target};
-
 // `mcp::tools`'s param structs (e.g. `PositionParams`, `ReferencesParams`)
 // are intentionally not re-exported here: every tool handler in `server.rs`
 // extracts them via the bounded `Parameters<T>` from `super::tools` directly, and no
@@ -26,3 +22,7 @@ pub(crate) use session::{SessionHandle, Target};
 // published schema rather than depend on these internal Rust types -- don't
 // reintroduce a partial `pub use` list here without a documented reason (see
 // #320).
+pub(crate) use session::ResourceValidity;
+pub use session::SubscriptionRegistry;
+#[cfg(test)]
+pub(crate) use session::{SessionHandle, Target};

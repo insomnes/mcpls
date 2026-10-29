@@ -6,6 +6,7 @@
 mod bounded_number;
 mod bounded_secs;
 mod command_stem;
+mod dispatcher;
 mod host_os;
 mod language;
 mod language_id;
@@ -28,6 +29,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub use bounded_secs::{BoundedSecs, IndexingReadyTimeoutSecs, InvalidSecs, TimeoutSecs};
 pub use command_stem::CommandStem;
+pub use dispatcher::{DispatcherConfig, DispatcherEntry};
 pub use host_os::HostOs;
 pub use language::{base_language_id, react_variant_language_id};
 pub use language_id::{InvalidLanguageId, LanguageId};
@@ -83,6 +85,9 @@ pub struct LanguageExtensionMapping {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
+    /// Opt-in worktree dispatcher configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatcher: Option<DispatcherConfig>,
     /// MCP `serverInfo`/`initialize` presentation overrides.
     #[serde(default)]
     pub mcp: McpConfig,
@@ -983,7 +988,9 @@ impl ServerConfig {
         if let (WorkspaceTrust::Untrusted(_), Some((source, origin))) = (workspace, source) {
             self.ensure_outside_workspace(source, origin)?;
         }
-        Self::check_allowlist(workspace, &self.lsp_servers)?;
+        if !self.dispatcher.as_ref().is_some_and(|d| d.enabled) {
+            Self::check_allowlist(workspace, &self.lsp_servers)?;
+        }
         self.workspace_trust = workspace.clone();
         Ok(())
     }
@@ -1119,7 +1126,18 @@ impl ServerConfig {
         let mut config: Self = toml::from_str(&content)
             .map_err(|error| Error::TomlDe(TomlParseError::new(error, &content)))?;
 
-        rebase_relative_roots(&mut config.workspace.roots, path, relative_root_base)?;
+        if config.dispatcher.as_ref().is_some_and(|d| d.enabled) {
+            let raw: toml::Value = toml::from_str(&content)
+                .map_err(|error| Error::TomlDe(TomlParseError::new(error, &content)))?;
+            if raw.get("workspace").is_some() || raw.get("lsp_servers").is_some() {
+                return Err(ConfigError::Dispatcher(
+                    "dispatcher mode forbids top-level workspace and lsp_servers".into(),
+                )
+                .into());
+            }
+        } else {
+            rebase_relative_roots(&mut config.workspace.roots, path, relative_root_base)?;
+        }
 
         Ok(config)
     }
@@ -1174,6 +1192,9 @@ impl ServerConfig {
     /// assert!(config.validate().is_ok());
     /// ```
     pub fn validate(&self) -> Result<()> {
+        if self.dispatcher.as_ref().is_some_and(|d| d.enabled) {
+            return Ok(());
+        }
         Self::check_allowlist(&self.workspace_trust, &self.lsp_servers)
     }
 
@@ -1219,6 +1240,18 @@ impl ServerConfig {
             path: source.to_path_buf(),
             source: io,
         })?;
+        if let Some(dispatcher) = self
+            .dispatcher
+            .as_ref()
+            .filter(|dispatcher| dispatcher.enabled)
+        {
+            if crate::dispatcher::config_is_inside_workspace(source, dispatcher)
+                .map_err(|error| ConfigError::Dispatcher(error.wire().message.into_owned()))?
+            {
+                return Err(Error::ConfigInsideWorkspace { path: canonical });
+            }
+            return Ok(());
+        }
         let roots = WorkspaceRoots::from_configured(&self.workspace.roots)?;
         let home = trust::login_home_dir();
         let roots = roots.untrusted_boundary(&self.workspace.roots, home.as_deref());
@@ -1239,6 +1272,7 @@ impl ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            dispatcher: None,
             mcp: McpConfig::default(),
             workspace: WorkspaceConfig::default(),
             lsp_servers: vec![
@@ -2006,6 +2040,7 @@ mod tests {
             typescript.command =
                 LaunchCommand::auto(ServerCommand::new(command.to_string()).unwrap()).unwrap();
             let config = ServerConfig {
+                dispatcher: None,
                 lsp_servers: vec![typescript],
                 ..ServerConfig::default()
             };
@@ -2434,6 +2469,7 @@ mod tests {
     #[test]
     fn test_build_effective_language_map_overrides_with_file_patterns() {
         let config = ServerConfig {
+            dispatcher: None,
             mcp: McpConfig::default(),
             workspace: WorkspaceConfig::default(),
             lsp_servers: vec![LspServerConfig {
@@ -2466,6 +2502,7 @@ mod tests {
     #[test]
     fn test_build_effective_language_map_derives_tsx_language_id() {
         let config = ServerConfig {
+            dispatcher: None,
             mcp: McpConfig::default(),
             workspace: WorkspaceConfig::default(),
             lsp_servers: vec![LspServerConfig {
@@ -2502,6 +2539,7 @@ mod tests {
     #[test]
     fn test_build_effective_language_map_derives_jsx_language_id() {
         let config = ServerConfig {
+            dispatcher: None,
             mcp: McpConfig::default(),
             workspace: WorkspaceConfig::default(),
             lsp_servers: vec![LspServerConfig {
@@ -3517,6 +3555,7 @@ mod tests {
 
         fn config_with_servers(trust: WorkspaceTrust) -> ServerConfig {
             ServerConfig {
+                dispatcher: None,
                 workspace_trust: trust,
                 ..ServerConfig::default()
             }
