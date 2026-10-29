@@ -300,7 +300,7 @@ impl McplsServer {
     async fn invoke_tool(
         &self,
         lease: Lease,
-        origin: Option<crate::config::ServerId>,
+        origin: Option<(crate::config::ServerId, String)>,
         file: Option<PathBuf>,
         name: String,
         request: CallToolRequestParams,
@@ -336,7 +336,9 @@ impl McplsServer {
             .await
             .map_err(DispatchError::wire)?;
         let server = self.runtime_session(&lease).await?;
+        // Keep the token-checked connection through every dispatch await.
         let continuation = origin.is_some();
+        let (origin, expected_incarnation) = origin.unzip();
         let origin = if let Some(origin) = origin {
             Some(origin)
         } else if let (Some(file), Some(tool)) = (&file, tool) {
@@ -357,9 +359,11 @@ impl McplsServer {
         } else {
             None
         };
-        let incarnation = origin
-            .as_ref()
-            .and_then(|origin| resident.incarnation(origin));
+        let incarnation = expected_incarnation.or_else(|| {
+            origin
+                .as_ref()
+                .and_then(|origin| resident.incarnation(origin))
+        });
         if continuation {
             let authenticated = origin
                 .as_ref()
@@ -373,9 +377,8 @@ impl McplsServer {
                 .ok_or_else(|| DispatchError::stale().wire())?;
             context.extensions.insert(authenticated);
         }
-        let invalid = resident.cancel();
         let mut result = tokio::select! {
-            ()=invalid.cancelled()=>return Err(McpError::new(ErrorCode(-32056),"workspace invalidated while request was pending",Some(json!({"code":"workspace_invalidated","retryable":true})))),
+            ()=resident.cancel().cancelled_owned()=>return Err(McpError::new(ErrorCode(-32056),"workspace invalidated while request was pending",Some(json!({"code":"workspace_invalidated","retryable":true})))),
             result=server.tool_router.call(ToolCallContext::new(server.as_ref(),request,context))=>result?,
         };
         dispatcher
@@ -410,7 +413,7 @@ impl McplsServer {
         arguments: &mut serde_json::Map<String, Value>,
         file: Option<&PathBuf>,
         workspace: Option<&PathBuf>,
-    ) -> Result<(Lease, Option<crate::config::ServerId>), McpError> {
+    ) -> Result<(Lease, Option<(crate::config::ServerId, String)>), McpError> {
         let continuation = if let Some(item) = arguments.get_mut("item") {
             let token = item
                 .get("dispatcher_context")
@@ -445,7 +448,7 @@ impl McplsServer {
             if lease.resident.incarnation(&origin).as_ref() != Some(&incarnation) {
                 return Err(DispatchError::stale().wire());
             }
-            (lease, Some(origin))
+            (lease, Some((origin, incarnation)))
         } else {
             let selection = if let Some(file) = file {
                 let selected = dispatcher
@@ -659,5 +662,133 @@ impl McplsServer {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod connection_tests {
+    use std::process::Command;
+
+    use rmcp::ServiceExt as _;
+
+    use super::*;
+
+    fn init_repo(root: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir(root)?;
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg(root)
+                .output()?
+                .status
+                .success()
+        );
+        Ok(())
+    }
+
+    /// A completed MCP restart rejects old items without forwarding their opaque data.
+    #[tokio::test]
+    async fn hierarchy_continuation_rejects_replacement_connection() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root).unwrap();
+        std::fs::write(root.join("file.py"), "x=1\n").unwrap();
+        std::fs::write(root.join("marker"), "AUTHORED CONNECTION").unwrap();
+        let events = temp.path().join("events.jsonl");
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/dispatcher_lsp.py");
+        let profile = temp.path().join("profile.toml");
+        std::fs::write(&profile, format!("[[lsp_servers]]\nlanguage_id='python'\ncommand='/usr/bin/python3'\nargs=[{script:?},{events:?}]\nfile_patterns=['*.py']\n")).unwrap();
+        let config: crate::config::ServerConfig = toml::from_str(&format!("[dispatcher]\nenabled=true\n[[dispatcher.repositories]]\npath={root:?}\nprofile={profile:?}\n")).unwrap();
+        let dispatcher = crate::dispatcher::Dispatcher::new(config.clone()).unwrap();
+        let prototype = McplsServer::new(
+            Arc::new(crate::bridge::Translator::new()),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::bridge::NotificationCache::new(),
+            )),
+            crate::bridge::WorkspaceRoots::default(),
+            crate::mcp::SubscriptionRegistry::new(),
+            config.project_config_status,
+            config.mcp,
+        )
+        .with_dispatcher(dispatcher.clone());
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = prototype.for_new_session();
+        let task = tokio::spawn(async move {
+            let service = server.serve(tokio::io::split(server_io)).await.unwrap();
+            let _ = service.waiting().await;
+        });
+        let client = ().serve(tokio::io::split(client_io)).await.unwrap();
+        let prepared = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("get_incoming_calls").with_arguments(
+                    json!({"file_path":root.join("file.py"),"line":1,"character":1})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap()
+            .structured_content
+            .unwrap();
+        let item = prepared["calls"][0]["from"].clone();
+        assert!(item["dispatcher_context"].is_string());
+        let followed = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("get_incoming_calls")
+                    .with_arguments(json!({"item":item}).as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            followed.structured_content.unwrap()["calls"][0]["from"]["data"],
+            item["data"]
+        );
+        // Each operation crosses the complete MCP tools/call boundary.
+        client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("restart_server").with_arguments(
+                    json!({"workspace_path":root,"servers":["python"]})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let before = std::fs::read_to_string(&events).unwrap().lines().count();
+        let error = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("get_incoming_calls")
+                    .with_arguments(json!({"item":item}).as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap_err();
+        match error {
+            rmcp::ServiceError::McpError(error) => {
+                assert_eq!(error.data.unwrap()["code"], "stale_continuation");
+            }
+            other => panic!("expected stale_continuation, got {other:?}"),
+        }
+        let later: Vec<Value> = std::fs::read_to_string(&events)
+            .unwrap()
+            .lines()
+            .skip(before)
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            !later
+                .iter()
+                .any(|event| event["method"] == "callHierarchy/incomingCalls"),
+            "old opaque item reached the replacement: {later:?}"
+        );
+        dispatcher.shutdown().await;
+        client.cancel().await.unwrap();
+        task.await.unwrap();
     }
 }
