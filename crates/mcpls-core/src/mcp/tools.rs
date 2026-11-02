@@ -333,7 +333,6 @@ impl TryFrom<SymbolTargetWire> for SymbolTargetParams {
     }
 }
 
-#[cfg(test)]
 impl From<PositionParams> for SymbolTargetParams {
     fn from(position: PositionParams) -> Self {
         Self {
@@ -1591,5 +1590,60 @@ mod tests {
         let input: HierarchyItemInput = serde_json::from_value(wire.clone()).unwrap();
         let back = serde_json::to_value(HierarchyItem::from(input)).unwrap();
         assert_eq!(back, wire);
+    }
+}
+
+target_wire! {
+    /// Wire form of a symbol context request.
+    SymbolContextWire {
+        #[serde(default = "default_context_sections")]
+        #[schemars(extend("minItems" = 1, "uniqueItems" = true, "items" = {"type":"string", "enum":["source","hover","outgoing_calls","diagnostics","inlay_hints","highlights"]}))]
+        sections: Vec<String>,
+    }
+}
+
+fn default_context_sections() -> Vec<String> {
+    vec!["source".into(), "hover".into()]
+}
+
+/// One target and independently requested context sections.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(try_from = "SymbolContextWire")]
+#[schemars(with = "SymbolContextWire")]
+pub struct SymbolContextParams {
+    /// Validated addressing form.
+    pub target: SymbolTargetParams,
+    /// Unique requested sections.
+    pub sections: Vec<String>,
+}
+
+impl TryFrom<SymbolContextWire> for SymbolContextParams {
+    type Error = String;
+    fn try_from(mut wire: SymbolContextWire) -> Result<Self, Self::Error> {
+        let allowed = [
+            "source",
+            "hover",
+            "outgoing_calls",
+            "diagnostics",
+            "inlay_hints",
+            "highlights",
+        ];
+        if wire.sections.is_empty()
+            || wire.sections.iter().enumerate().any(|(i, section)| {
+                !allowed.contains(&section.as_str())
+                    || wire
+                        .sections
+                        .iter()
+                        .take(i)
+                        .any(|previous| previous == section)
+            })
+        {
+            return Err("sections must be nonempty, unique, and supported".into());
+        }
+        let target = wire.take_target().map_err(|error| error.to_string())?;
+        Ok(Self {
+            target,
+            sections: wire.sections,
+        })
     }
 }

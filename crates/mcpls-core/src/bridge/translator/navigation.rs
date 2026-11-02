@@ -330,7 +330,7 @@ async fn goto_response_to_locations<R: GotoResponse>(
 /// (and `marked_string_to_string`) carry a narrow, scoped allow rather than
 /// rewriting to `MarkupContent`-only.
 #[allow(deprecated, reason = "LSP servers still send this deprecated field")]
-fn extract_hover_contents(contents: lsp_types::Contents) -> String {
+pub(super) fn extract_hover_contents(contents: lsp_types::Contents) -> String {
     match contents {
         lsp_types::Contents::MarkedString(marked_string) => marked_string_to_string(marked_string),
         lsp_types::Contents::MarkedStringList(marked_strings) => marked_strings

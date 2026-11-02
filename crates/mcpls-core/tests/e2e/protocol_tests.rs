@@ -169,7 +169,7 @@ fn test_e2e_get_tool_support_reports_every_tool() -> Result<()> {
     let tools = report["tools"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("tools should be an array: {report}"))?;
-    assert_eq!(tools.len(), 27, "{report}");
+    assert_eq!(tools.len(), 28, "{report}");
     let logs = tools
         .iter()
         .find(|tool| tool["name"] == "get_server_logs")
@@ -183,7 +183,7 @@ fn test_e2e_get_tool_support_reports_every_tool() -> Result<()> {
 #[test]
 #[ignore = "Requires mcpls binary built"]
 fn test_e2e_tool_profiles() -> Result<()> {
-    for (profile, count) in [("", 27), ("agent", 27), ("full", 30)] {
+    for (profile, count) in [("", 28), ("agent", 28), ("full", 31)] {
         let temp = TempDir::new()?;
         let config = temp.path().join("profile.toml");
         let mcp = if profile.is_empty() {
@@ -246,7 +246,7 @@ fn test_e2e_list_tools() -> Result<()> {
         .as_array()
         .unwrap_or_else(|| panic!("tools should be an array"));
 
-    assert_eq!(tools.len(), 27, "Should have exactly 27 default tools");
+    assert_eq!(tools.len(), 28, "Should have exactly 28 default tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 

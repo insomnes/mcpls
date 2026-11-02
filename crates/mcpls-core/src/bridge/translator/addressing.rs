@@ -92,6 +92,8 @@ pub enum SymbolTarget {
 /// The tools that accept a [`SymbolTarget`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressableTool {
+    /// Composite symbol context, resolved independently of section capabilities.
+    SymbolContext,
     /// `get_hover`.
     Hover,
     /// `get_definition`.
@@ -113,6 +115,7 @@ pub enum AddressableTool {
 impl AddressableTool {
     const fn capability(self) -> Capability {
         match self {
+            Self::SymbolContext => Capability::DocumentSymbols,
             Self::Hover => Capability::Hover,
             Self::Definition => Capability::Definition,
             Self::References => Capability::References,

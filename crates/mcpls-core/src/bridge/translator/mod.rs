@@ -61,6 +61,7 @@ mod save_support;
 mod selection_range;
 mod servers;
 mod support;
+mod symbol_context;
 mod symbols;
 #[cfg(test)]
 mod testing;

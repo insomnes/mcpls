@@ -6184,6 +6184,134 @@
     }
   },
   {
+    "name": "get_symbol_context",
+    "title": "Symbol Context",
+    "description": "Source and selected semantic context in one call. Address by position or symbol_name. Sections default to source and hover; optional outgoing_calls, diagnostics, inlay_hints, highlights. Independent section statuses preserve usable facts. Fixed aggregate limits; unknown freshness and non-atomic observations.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "character": {
+          "default": null,
+          "description": "Character/column number (1-based). Give with `line`, instead of `symbol_name`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "container": {
+          "default": null,
+          "description": "With `symbol_name`: keep only symbols inside a container (type, impl, class, module) of this name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "file_path": {
+          "description": "Absolute path to the file.",
+          "type": "string"
+        },
+        "line": {
+          "default": null,
+          "description": "Line number (1-based). Give with `character`, instead of `symbol_name`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sections": {
+          "default": [
+            "source",
+            "hover"
+          ],
+          "items": {
+            "enum": [
+              "source",
+              "hover",
+              "outgoing_calls",
+              "diagnostics",
+              "inlay_hints",
+              "highlights"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "symbol_kind": {
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "enum": [
+                    "file",
+                    "module",
+                    "namespace",
+                    "package",
+                    "class",
+                    "method",
+                    "property",
+                    "field",
+                    "constructor",
+                    "enum",
+                    "interface",
+                    "function",
+                    "variable",
+                    "constant",
+                    "string",
+                    "number",
+                    "boolean",
+                    "array",
+                    "object",
+                    "key",
+                    "null",
+                    "enummember",
+                    "struct",
+                    "event",
+                    "operator",
+                    "typeparameter"
+                  ]
+                },
+                {
+                  "pattern": "^[0-9]+$"
+                }
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "With `symbol_name`: keep only symbols of this kind, by name (function, method, class, struct, ...)"
+        },
+        "symbol_name": {
+          "default": null,
+          "description": "Name of a symbol defined in this file, instead of `line`/`character`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "file_path"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Symbol Context",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
     "name": "get_tool_support",
     "title": "Tool Support",
     "description": "Report tool support by language. file_path restricts the report to one language; workspace_path selects a workspace. Both must select the same workspace. In dispatcher mode, no selector returns basis:configured without starting a backend; a selector returns basis:runtime with workspace_path and runtime_generation. coverage is all, some, none, unknown, or always. unknown means initialization; always needs no LSP. Routes identify supported, push_only, capability_not_advertised, initializing, or no_server. Advertised support does not guarantee successful indexing, diagnostics, or requests.",

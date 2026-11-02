@@ -5,6 +5,7 @@
 
 mod diagnostics_batch;
 mod dispatch;
+mod symbol_context;
 
 use std::borrow::Cow;
 use std::future::Future;
@@ -1035,6 +1036,18 @@ impl McplsServer {
             }
         }
         router
+    }
+
+    /// Collect bounded context for one primary-file symbol.
+    #[tool(
+        description = "Source and selected semantic context in one call. Address by position or symbol_name. Sections default to source and hover; optional outgoing_calls, diagnostics, inlay_hints, highlights. Independent section statuses preserve usable facts. Fixed aggregate limits; unknown freshness and non-atomic observations.",
+        title = "Symbol Context"
+    )]
+    async fn get_symbol_context(
+        &self,
+        Parameters(params): Parameters<super::tools::SymbolContextParams>,
+    ) -> Result<rmcp::model::CallToolResult, McpError> {
+        self.symbol_context(params).await
     }
 
     /// Get hover information at a position in a file.
@@ -6023,6 +6036,7 @@ sleep 0.3
 
         // (tool name, read_only_hint, destructive_hint, idempotent_hint)
         let expected: &[(&str, bool, bool, bool)] = &[
+            ("get_symbol_context", true, false, true),
             ("get_hover", true, false, true),
             ("get_definition", true, false, true),
             ("get_references", true, false, true),
@@ -6879,9 +6893,9 @@ sleep 0.3
                 assert_eq!(
                     tools.len(),
                     if profile == ToolProfile::Agent {
-                        27
+                        28
                     } else {
-                        30
+                        31
                     }
                 );
                 let supported = tools_call_over_the_wire(
@@ -6953,7 +6967,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 27);
+            assert_eq!(tools.len(), 28);
             assert!(
                 !tools
                     .iter()
@@ -6967,7 +6981,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 27);
+            assert_eq!(tools.len(), 28);
             assert!(
                 !tools
                     .iter()
@@ -8527,6 +8541,13 @@ sleep 0.3
             }
         };
         match tool {
+            McpTool::GetSymbolContext => server
+                .get_symbol_context(Parameters(crate::mcp::tools::SymbolContextParams {
+                    target: position().into(),
+                    sections: vec!["source".into()],
+                }))
+                .await
+                .map(|_| ()),
             McpTool::GetHover => server
                 .get_hover(Parameters(position().into()))
                 .await
@@ -8816,7 +8837,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 27);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 28);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");
@@ -9182,5 +9203,155 @@ sleep 0.3
 
         assert!(server.get_tool("p_get_hover").is_some());
         assert!(server.get_tool("get_hover").is_none());
+    }
+    /// Public MCP source bundles preserve original file bytes and independent statuses.
+    #[tokio::test]
+    async fn symbol_context_preserves_source_and_null_hover() {
+        use sha2::{Digest, Sha256};
+
+        use crate::test_lsp::{read_framed_message, write_response};
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let original = "// before\r\nfn main() {\r\n    run();\r\n}\r\n// after";
+        std::fs::write(&fixture.file, original).unwrap();
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let methods = seen.clone();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                methods
+                    .lock()
+                    .await
+                    .push(request["method"].as_str().unwrap().to_owned());
+                let response = match request["method"].as_str().unwrap() {
+                    "textDocument/documentSymbol" => serde_json::json!([{
+                        "name":"main","kind":12,
+                        "range":{"start":{"line":1,"character":0},"end":{"line":4,"character":0}},
+                        "selectionRange":{"start":{"line":1,"character":3},"end":{"line":1,"character":7}}
+                    }]),
+                    "textDocument/hover" => serde_json::Value::Null,
+                    method => panic!("unrequested semantic operation {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], response).await;
+            }
+        });
+        let response=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+            "name":"get_symbol_context","arguments":{"file_path":fixture.file,"symbol_name":"main"}
+        })).await;
+        let bundle = &response["result"]["structuredContent"];
+        assert_eq!(bundle["target"]["range_fidelity"], "symbol", "{response}");
+        assert_eq!(
+            bundle["sections"]["source"]["data"]["text"],
+            "fn main() {\r\n    run();\r\n}\r\n"
+        );
+        assert_eq!(
+            bundle["sections"]["source"]["data"]["sha256"],
+            format!("{:x}", Sha256::digest(original.as_bytes()))
+        );
+        assert_eq!(
+            bundle["sections"]["source"]["data"]["completeness"],
+            "complete_symbol"
+        );
+        assert_eq!(
+            bundle["sections"]["source"]["source_acquisition_bytes"],
+            original.len()
+        );
+        assert_eq!(bundle["sections"]["hover"]["status"], "empty");
+        assert_eq!(bundle["analysis_freshness"], "unknown");
+        assert_eq!(bundle["atomic_snapshot"], false);
+        assert_eq!(bundle["sections"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            *seen.lock().await,
+            vec![
+                "textDocument/documentSymbol",
+                "textDocument/documentSymbol",
+                "textDocument/hover"
+            ]
+        );
+        assert_eq!(std::fs::read_to_string(&fixture.file).unwrap(), original);
+        responder.abort();
+    }
+
+    /// Missing semantic capabilities leave source useful, with honest range uncertainty.
+    #[tokio::test]
+    async fn symbol_context_source_survives_unsupported_semantics_and_bounds_bytes() {
+        let fixture = support_fixture(
+            vec![("rust", "rust", lsp_types::ServerCapabilities::default())],
+            McpConfig::default(),
+        );
+        let source = format!("fn main() {{}}\n{}", "x".repeat(20_000));
+        std::fs::write(&fixture.file, &source).unwrap();
+        let response=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+            "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,
+                "sections":["highlights","hover","source","diagnostics","inlay_hints"]}
+        })).await;
+        let bundle = &response["result"]["structuredContent"];
+        assert_eq!(
+            bundle["sections"]["source"]["status"], "partial",
+            "{response}"
+        );
+        assert_eq!(bundle["sections"]["source"]["reason"], "text_budget");
+        assert_eq!(
+            bundle["sections"]["source"]["data"]["text"],
+            "fn main() {}\n"
+        );
+        assert_eq!(bundle["sections"]["hover"]["status"], "unsupported");
+        for name in ["diagnostics", "inlay_hints", "highlights"] {
+            assert_eq!(bundle["sections"][name]["status"], "unavailable");
+            assert_eq!(bundle["sections"][name]["reason"], "range_unavailable");
+        }
+        assert_eq!(bundle["target"]["range_fidelity"], "unknown");
+        assert_eq!(bundle["truncated"], true);
+        assert!(serde_json::to_vec(&response["result"]).unwrap().len() <= 131_072);
+        std::fs::write(&fixture.file, "x".repeat(1_048_577)).unwrap();
+        let oversized=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+            "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"sections":["source"]}
+        })).await;
+        assert_eq!(
+            oversized["result"]["structuredContent"]["sections"]["source"]["reason"],
+            "file_too_large"
+        );
+    }
+
+    /// Invalid section and targeting envelopes never invoke a provider.
+    #[tokio::test]
+    async fn symbol_context_rejects_invalid_public_requests() {
+        for extra in [
+            serde_json::json!({"sections":[]}),
+            serde_json::json!({"sections":["source","source"]}),
+            serde_json::json!({"sections":["unknown"]}),
+            serde_json::json!({"budget":100}),
+            serde_json::json!({"symbol_name":"main"}),
+        ] {
+            let mut arguments = serde_json::json!({"file_path":"/a.rs","line":1,"character":4});
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let result = tools_call_over_the_wire(
+                create_test_server(),
+                serde_json::json!({"name":"get_symbol_context","arguments":arguments}),
+            )
+            .await;
+            assert!(
+                result.get("error").is_some() || result["result"]["isError"] == true,
+                "{result}"
+            );
+        }
     }
 }

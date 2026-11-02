@@ -15,6 +15,7 @@
 - [Configuration](guide/configuration.md)
 - [Language Servers](guide/language-servers.md)
 - [Tools Overview](tools/overview.md)
+  - [Symbol Context](tools/symbol-context.md)
   - [Code Intelligence](tools/code-intelligence.md)
   - [Diagnostics and Formatting](tools/diagnostics.md)
   - [Refactoring](tools/refactoring.md)

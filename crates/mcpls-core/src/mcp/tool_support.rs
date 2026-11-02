@@ -37,6 +37,7 @@ pub(super) struct ToolSpec {
 /// Every MCP tool mcpls exposes, one variant per `#[tool]` handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum McpTool {
+    GetSymbolContext,
     GetHover,
     GetDefinition,
     GetReferences,
@@ -71,7 +72,8 @@ pub(super) enum McpTool {
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 30] = [
+    pub(super) const ALL: [Self; 31] = [
+        Self::GetSymbolContext,
         Self::GetHover,
         Self::GetDefinition,
         Self::GetReferences,
@@ -135,6 +137,7 @@ impl McpTool {
     pub(super) const fn spec(self) -> ToolSpec {
         use ToolBackend::{Document, Local, Workspace};
         let (name, backend) = match self {
+            Self::GetSymbolContext => ("get_symbol_context", Local),
             Self::GetHover => ("get_hover", Document(ToolKind::Hover)),
             Self::GetDefinition => ("get_definition", Document(ToolKind::Definition)),
             Self::GetReferences => ("get_references", Document(ToolKind::References)),
