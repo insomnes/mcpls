@@ -740,7 +740,7 @@ mod tests {
         assert!(result.result.truncated);
         assert_eq!(result.result.locations.len(), 10);
         for (index, item) in result.result.locations.iter().enumerate() {
-            assert_eq!(item.range.start.line, index as u32 + 1);
+            assert_eq!(item.range.start.line, u32::try_from(index).unwrap() + 1);
             assert!(item.source.is_none());
             assert!(item.enclosing_symbol.is_none());
         }
