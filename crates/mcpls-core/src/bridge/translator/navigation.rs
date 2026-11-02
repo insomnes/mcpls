@@ -1804,11 +1804,8 @@ mod tests {
         );
     }
 
-    /// Regression for #474/M4: `get_references`' tool description no longer
-    /// promises "all" references, since a response past
-    /// `MAX_NORMALIZED_LOCATIONS` is capped -- the client must be able to
-    /// detect that via `LocationsResult::truncated` rather than silently
-    /// receiving a partial result that looks complete.
+    /// A large provider response retains the default prefix and explicitly
+    /// reports omitted references instead of implying complete coverage.
     #[tokio::test]
     async fn test_handle_references_sets_truncated_flag_past_cap() {
         let dir = TempDir::new().unwrap();
@@ -1865,7 +1862,7 @@ mod tests {
             .unwrap()
             .result;
 
-        assert_eq!(result.locations.len(), 100);
+        assert_eq!(result.locations.len(), 10);
         assert!(
             result.truncated,
             "a references response past MAX_NORMALIZED_LOCATIONS must set truncated: true"

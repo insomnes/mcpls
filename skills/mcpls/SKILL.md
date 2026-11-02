@@ -71,6 +71,35 @@ Completion labels, details, and documentation are clipped at 512, 2048, and 4096
 
 The compact structured JSON is at most 65536 bytes, including escaping and metadata; the legacy text encodes the same result. The longest fitting provider prefix is returned. `omitted_count` counts excluded candidates. `truncated` means candidates were omitted or retained fields clipped; disabled documentation alone does not set it. `provider_is_incomplete` is the provider's explicit boolean, or null for bare arrays/null responses. Empty responses preserve this distinction. Provider incompleteness and local truncation are independent; false does not prove complete API coverage. Existing `positions_degraded` behavior is unchanged. Output bounds do not bound the original LSP response, provider work, process memory, or whole MCP envelope. The existing completion timeout remains 10 seconds.
 
+### Small reference queries
+
+`get_references` defaults to 10 locations and `include_source:false`. It preserves
+provider order and duplicates. Set `limit` (integer 1 through 10000) for a larger
+answer, and `include_source:true` for bounded source excerpts on returned locations.
+Use `"limit":100,"include_source":true` to request the previous default behavior.
+
+An absolute `path_filter` selects one file or a directory subtree by lexical path
+components before the limit. Relative filters fail; globs and symlink resolution
+are not supported. `matched_count` counts matching locations in the received
+provider array; `truncated` means matching locations were omitted. Only an
+originally empty provider array carries `index_coverage`. These results do not
+prove workspace coverage or provide a representative usage audit. Continuation
+is deferred; use a larger limit or narrower filter for follow-up queries.
+Smaller output does not guarantee less LSP backend work.
+
+With `context` omitted or `"none"`, default requests skip optional excerpt reads,
+copies, and enclosing-symbol enrichment. Required synchronization and position
+normalization still occur. Set `context:"enclosing_symbol"` for enclosing context.
+Source outcomes have status `text` or `unavailable`; text includes `start_line`
+(1-based), `origin` (`tracked` or `disk`), and `shortened`. Source snapshots and
+LSP locations are not atomic. External paths and symlink escapes disclose no source.
+
+Explicit source requests retain fixed limits: 100 candidate locations, 16 files,
+1 MiB per file, 4 MiB aggregate source read/copy allowance, 2 KiB per excerpt,
+64 KiB total excerpt text, and a two-second best-effort deadline. Exhausted limits
+preserve locations with unavailable reasons or shortened context. An in-flight
+OS call can exceed the deadline. See the book's `get_references` reference for details.
+
 ### Optional navigation source
 
 `get_definition`, `go_to_implementation`, `go_to_type_definition`, and

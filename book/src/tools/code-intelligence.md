@@ -108,8 +108,8 @@ and have no atomic consistency guarantee with LSP locations or later reads.
 Returns references reported by the language server, in server order, including duplicates.
 
 Arguments: addressing as above, `include_declaration` (default `false`), optional `context`,
-`limit` (default 100, integer 1 through 10000), optional absolute `path_filter`,
-and `include_source` (default `true`). Relative filters are rejected.
+`limit` (default 10, integer 1 through 10000), optional absolute `path_filter`,
+and `include_source` (default `false`). Relative filters are rejected.
 
 ```json
 {
@@ -128,6 +128,9 @@ It supports no globs. Non-file URIs do not match a filter.
 Filtering scans the complete received response before applying the limit.
 `matched_count` counts matching locations in that response, independently of `limit`.
 `truncated: true` means matching locations were omitted. Neither field guarantees workspace-wide coverage.
+The ordered prefix is not a representative usage audit. Continuation is deferred;
+there is no cursor or offset. Increase `limit` or narrow `path_filter` for follow-up queries.
+Smaller output does not guarantee less work by the LSP backend.
 
 Each location preserves `uri`, `range`, advisory `out_of_workspace`, and optional `enclosing_symbol`.
 With source enabled, `source` has one of these shapes:
@@ -146,7 +149,11 @@ Text includes the reference's starting line and up to two lines on either side.
 These snapshots are not atomic with the server's locations.
 External paths and symlink escapes disclose no source, regardless of `out_of_workspace`.
 Source enrichment does not open LSP documents or use a persistent cache.
-`include_source: false` omits `source` and source excerpt reads and copies.
+`include_source: true` opts into source for returned locations only.
+Omitted or false `include_source` omits `source` and source excerpt reads and copies.
+With `context` omitted or `"none"`, enclosing-symbol enrichment is also skipped.
+Necessary document synchronization and position normalization still occur.
+To request the previous defaults explicitly, use `"limit":100,"include_source":true`.
 
 Fixed source limits per request are 100 candidate locations, 16 distinct files,
 1 MiB per file, 4 MiB total read/copy allowance, 2 KiB per excerpt, and 64 KiB total excerpt text.

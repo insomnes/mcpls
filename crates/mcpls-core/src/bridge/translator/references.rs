@@ -31,9 +31,9 @@ pub struct ReferenceOptions {
 impl Default for ReferenceOptions {
     fn default() -> Self {
         Self {
-            limit: 100,
+            limit: 10,
             path_filter: None,
-            include_source: true,
+            include_source: false,
         }
     }
 }
@@ -723,6 +723,40 @@ mod tests {
         assert_eq!(result["locations"].as_array().unwrap().len(), 101);
     }
 
+    // Default requests retain a useful ordered prefix without optional source work.
+    #[tokio::test]
+    async fn reference_defaults_bound_locations_and_skip_source_work() {
+        let dir = TempDir::new().unwrap();
+        let path = canonical_dir(&dir).join("target.rs");
+        std::fs::write(&path, "usage\n".repeat(12)).unwrap();
+        let (result, work) = request(
+            &dir,
+            (0..12).map(|line| location(&path, line)).collect(),
+            ReferenceOptions::default(),
+            None,
+        )
+        .await;
+        assert_eq!(result.matched_count, 12);
+        assert!(result.result.truncated);
+        assert_eq!(result.result.locations.len(), 10);
+        for (index, item) in result.result.locations.iter().enumerate() {
+            assert_eq!(item.range.start.line, index as u32 + 1);
+            assert!(item.source.is_none());
+            assert!(item.enclosing_symbol.is_none());
+        }
+        assert_eq!(work.normalized, 10);
+        assert_eq!(
+            (
+                work.read_bytes,
+                work.tracked_bytes,
+                work.source_bytes,
+                work.files,
+                work.output_bytes
+            ),
+            (0, 0, 0, 0, 0)
+        );
+    }
+
     // A late filter match must survive the old normalization cap; discarded
     // references cause no normalization or excerpt work.
     #[tokio::test]
@@ -771,6 +805,7 @@ mod tests {
             vec![location(&path, 2); 101],
             ReferenceOptions {
                 limit: 101,
+                include_source: true,
                 ..Default::default()
             },
             None,
@@ -804,7 +839,11 @@ mod tests {
         let (result, work) = request(
             &dir,
             vec![location(&query, 0), location(&long, 1), location(&long, 0)],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
         )
         .await;
@@ -827,7 +866,17 @@ mod tests {
             std::fs::write(&path, "x").unwrap();
             response.push(location(&path, 0));
         }
-        let (result, work) = request(&dir, response, ReferenceOptions::default(), None).await;
+        let (result, work) = request(
+            &dir,
+            response,
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
+            None,
+        )
+        .await;
         assert_eq!(work.files, 16);
         assert_eq!(work.source_bytes, 16);
         assert_eq!(result.result.locations.len(), 17);
@@ -840,7 +889,11 @@ mod tests {
         let (result, work) = request(
             &dir,
             vec![location(&path, 0); 100],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
         )
         .await;
@@ -874,7 +927,11 @@ mod tests {
         let (result, work) = request(
             &dir,
             vec![location(&path, 0)],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             Some(clock),
         )
         .await;
@@ -897,7 +954,17 @@ mod tests {
             std::fs::write(&path, vec![b'x'; FILE_BYTES]).unwrap();
             response.push(location(&path, 0));
         }
-        let (result, work) = request(&dir, response, ReferenceOptions::default(), None).await;
+        let (result, work) = request(
+            &dir,
+            response,
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
+            None,
+        )
+        .await;
         assert_eq!(work.source_bytes, SOURCE_BYTES);
         assert_eq!(result.result.locations.len(), 5);
         let value = serde_json::to_value(result).unwrap();
@@ -914,7 +981,11 @@ mod tests {
                 location(&missing, 0),
                 location(&oversized, 0),
             ],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
         )
         .await;
@@ -937,7 +1008,11 @@ mod tests {
         let (result, _) = request(
             &dir,
             vec![location(&link, 0), location(&secret, 0)],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
         )
         .await;
@@ -964,7 +1039,11 @@ mod tests {
         let (result, work) = request_with_setup(
             &dir,
             vec![location(&path, 0)],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
             Some(setup),
         )
@@ -994,7 +1073,11 @@ mod tests {
         let (result, work) = request_with_setup(
             &dir,
             vec![location(&path, 0)],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
             Some(setup),
         )
@@ -1029,7 +1112,11 @@ mod tests {
         let (result, _) = request_with_setup(
             &dir,
             vec![location(&path, 0)],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
             Some(setup),
         )
@@ -1053,7 +1140,11 @@ mod tests {
         let (result, work) = request_with_setup(
             &dir,
             response,
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
             Some(setup),
         )
@@ -1091,7 +1182,11 @@ mod tests {
         let (result, work) = request_with_setup(
             &dir,
             response,
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
             Some(setup),
         )
@@ -1140,7 +1235,11 @@ mod tests {
             let (result, work) = request_with_setup(
                 &dir,
                 vec![location(&path, 0), location(&second, 0)],
-                ReferenceOptions::default(),
+                ReferenceOptions {
+                    limit: 100,
+                    include_source: true,
+                    path_filter: None,
+                },
                 None,
                 Some(clock),
             )
@@ -1165,7 +1264,11 @@ mod tests {
         let (result, work) = request_with_setup(
             &dir,
             vec![location(&oversized, 0); 32],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
             Some(setup),
         )
@@ -1179,7 +1282,11 @@ mod tests {
         let (result, work) = request_with_setup(
             &dir,
             vec![location(&short, 0); 100],
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
             Some(setup),
         )
@@ -1209,7 +1316,17 @@ mod tests {
             std::os::unix::fs::symlink(&path, &alias).unwrap();
             response.push(location(&alias, 0));
         }
-        let (result, work) = request(&dir, response, ReferenceOptions::default(), None).await;
+        let (result, work) = request(
+            &dir,
+            response,
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
+            None,
+        )
+        .await;
         assert_eq!(work.read_bytes, FILE_BYTES);
         assert_eq!(work.source_bytes, FILE_BYTES);
         assert_eq!(work.files, 1);
@@ -1252,7 +1369,11 @@ mod tests {
         let (result, work) = request_with_setup(
             &dir,
             response,
-            ReferenceOptions::default(),
+            ReferenceOptions {
+                limit: 100,
+                include_source: true,
+                path_filter: None,
+            },
             None,
             Some(setup),
         )

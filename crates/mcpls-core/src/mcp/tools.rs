@@ -349,14 +349,14 @@ target_wire! {
     /// Wire form of [`ReferencesParams`].
     #[schemars(description = "Parameters for finding all references to a symbol.")]
     ReferencesWire {
-        #[schemars(description = "Maximum matching references, 1 through 10000; default 100.", range(min = 1, max = 10000))]
+        #[schemars(description = "Maximum matching references, 1 through 10000; default 10.", range(min = 1, max = 10000))]
         #[serde(default = "reference_limit")]
         limit: usize,
         #[schemars(description = "Absolute file or directory path. Lexical component matching, no glob or symlink resolution.")]
         #[serde(default)]
         path_filter: Option<PathBuf>,
-        #[schemars(description = "Attach bounded source excerpts or explicit unavailable reasons; default true.")]
-        #[serde(default = "source_default")]
+        #[schemars(description = "Attach bounded source excerpts or explicit unavailable reasons; default false.")]
+        #[serde(default)]
         include_source: bool,
         #[schemars(description = "Whether to include the declaration in the results.")]
         #[serde(default)]
@@ -368,10 +368,7 @@ target_wire! {
 }
 
 const fn reference_limit() -> usize {
-    100
-}
-const fn source_default() -> bool {
-    true
+    10
 }
 
 /// Parameters for the `get_references` tool.
@@ -1235,6 +1232,8 @@ mod tests {
             }
         );
         assert!(!references.include_declaration);
+        assert_eq!(references.options.limit, 10);
+        assert!(!references.options.include_source);
 
         let json = serde_json::json!({
             "file_path": "/a.rs",
@@ -1487,6 +1486,8 @@ mod tests {
         assert!(properties.contains_key("symbol_kind"));
         assert!(properties.contains_key("container"));
         assert!(properties.contains_key("include_declaration"));
+        assert_eq!(properties["limit"]["default"], 10);
+        assert_eq!(properties["include_source"]["default"], false);
         assert!(!properties.contains_key("target"));
 
         let schema = schemars::schema_for!(InlayHintsParams);
