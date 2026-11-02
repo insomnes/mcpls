@@ -1136,6 +1136,16 @@ impl McplsServer {
         &self,
         Parameters(DiagnosticsParams { file_path, context }): Parameters<DiagnosticsParams>,
     ) -> Result<Json<DiagnosticsResponse>, McpError> {
+        self.diagnostics_for_context(file_path, context, false)
+            .await
+    }
+
+    async fn diagnostics_for_context(
+        &self,
+        file_path: PathBuf,
+        context: crate::bridge::ResultContext,
+        bundle: bool,
+    ) -> Result<Json<DiagnosticsResponse>, McpError> {
         let file_path = parse_client_path(file_path)?;
         // Resolved from the validated/canonicalized path (mirrors
         // `read_resource`), not the raw client-supplied path: a symlink
@@ -1168,7 +1178,12 @@ impl McplsServer {
             let path = validated?;
             self.context
                 .translator
-                .handle_validated_diagnostics(&path, context, &self.context.notification_cache)
+                .handle_validated_diagnostics_for_context(
+                    &path,
+                    context,
+                    &self.context.notification_cache,
+                    bundle,
+                )
                 .await
         }
         .await;
@@ -9353,6 +9368,137 @@ sleep 0.3
                 result.get("error").is_some() || result["result"]["isError"] == true,
                 "{result}"
             );
+        }
+    }
+    /// Unknown ranges use a clipped centered window, including short file edges.
+    #[tokio::test]
+    async fn symbol_context_clips_centered_source_at_file_edges() {
+        let fixture = support_fixture(
+            vec![("rust", "rust", lsp_types::ServerCapabilities::default())],
+            McpConfig::default(),
+        );
+        let source = format!("1\n2\n3\n4\n5\n{}\n7\n8\n9\n10", "x".repeat(20_000));
+        std::fs::write(&fixture.file, source).unwrap();
+        for (line, start, text) in [(1, 1, "1\n2\n3\n"), (10, 8, "8\n9\n10")] {
+            let response=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":line,"character":1,"sections":["source"]}
+            })).await;
+            let source = &response["result"]["structuredContent"]["sections"]["source"];
+            assert_eq!(source["status"], "partial", "{response}");
+            assert_eq!(source["reason"], "range_unavailable");
+            assert_eq!(source["data"]["start_line"], start);
+            assert_eq!(source["data"]["text"], text);
+        }
+    }
+
+    /// Bundles retain provider order and a published empty cache after a failed pull.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exercise bundle and unchanged standalone outcomes against the same provider and cache"
+    )]
+    async fn symbol_context_diagnostics_preserve_bundle_policy_and_standalone_compatibility() {
+        use crate::test_lsp::{read_framed_message, write_error_response, write_response};
+        for failed in [false, true] {
+            let mut fixture = support_fixture(
+                vec![(
+                    "rust",
+                    "rust",
+                    lsp_types::ServerCapabilities {
+                        document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(
+                            true,
+                        )),
+                        ..Default::default()
+                    },
+                )],
+                McpConfig::default(),
+            );
+            std::fs::write(&fixture.file, "fn main() {\n}\n").unwrap();
+            if failed {
+                let uri = crate::bridge::path_to_uri(&fixture.file).unwrap();
+                fixture
+                    .server
+                    .context
+                    .notification_cache
+                    .lock()
+                    .await
+                    .store_diagnostics(
+                        &crate::config::ServerId::from_static("rust"),
+                        &uri,
+                        Some(1),
+                        vec![],
+                    );
+            }
+            let mut fake = fixture.fake_servers.pop().unwrap();
+            let responder = tokio::spawn(async move {
+                let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+                loop {
+                    let request = read_framed_message(&mut wire).await;
+                    if request.get("id").is_none() {
+                        continue;
+                    }
+                    let response = match request["method"].as_str().unwrap() {
+                        "textDocument/documentSymbol" => {
+                            serde_json::json!([{"name":"main","kind":12,
+                            "range":{"start":{"line":0,"character":0},"end":{"line":1,"character":1}},
+                            "selectionRange":{"start":{"line":0,"character":3},"end":{"line":0,"character":7}}}])
+                        }
+                        "textDocument/diagnostic" if failed => {
+                            write_error_response(
+                                &mut fake.read_half_stdin,
+                                &request["id"],
+                                -32603,
+                                "failed pull",
+                            )
+                            .await;
+                            continue;
+                        }
+                        "textDocument/diagnostic" => serde_json::json!({"kind":"full","items":[
+                            {"message":"later-first","range":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}}},
+                            {"message":"earlier-second","range":{"start":{"line":0,"character":4},"end":{"line":0,"character":5}}}
+                        ]}),
+                        method => panic!("unexpected request {method}"),
+                    };
+                    write_response(&mut fake.read_half_stdin, &request["id"], response).await;
+                }
+            });
+            let response=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"sections":["diagnostics"]}
+            })).await;
+            let section = &response["result"]["structuredContent"]["sections"]["diagnostics"];
+            if failed {
+                assert_eq!(section["status"], "partial", "{response}");
+                assert_eq!(section["reason"], "pull_failed");
+                assert_eq!(section["data"]["origin"], "cache_after_failed_pull");
+                assert_eq!(section["data"]["availability"], "published");
+                assert_eq!(section["data"]["diagnostics"], serde_json::json!([]));
+            } else {
+                assert_eq!(section["status"], "ok", "{response}");
+                assert_eq!(section["data"]["diagnostics"][0]["message"], "later-first");
+                assert_eq!(
+                    section["data"]["diagnostics"][1]["message"],
+                    "earlier-second"
+                );
+            }
+            let standalone = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":"get_diagnostics","arguments":{"file_path":fixture.file}
+                }),
+            )
+            .await;
+            if failed {
+                assert!(
+                    standalone.get("error").is_some() || standalone["result"]["isError"] == true,
+                    "{standalone}"
+                );
+            } else {
+                assert_eq!(
+                    standalone["result"]["structuredContent"]["diagnostics"][0]["message"],
+                    "earlier-second"
+                );
+            }
+            responder.abort();
         }
     }
 }

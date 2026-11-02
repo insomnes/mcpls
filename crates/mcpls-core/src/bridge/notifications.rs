@@ -818,6 +818,11 @@ impl DiagnosticSources {
     /// ```
     #[must_use]
     pub fn merge(self) -> Option<DiagnosticInfo> {
+        self.merge_for_context(false)
+    }
+
+    /// Preserve source order for a context bundle; standalone diagnostics keep range order.
+    pub(crate) fn merge_for_context(self, bundle: bool) -> Option<DiagnosticInfo> {
         let Self { requested, entries } = self;
         let has_pulled = entries.iter().any(|entry| entry.origin.is_pulled());
         if entries.len() <= 1 && !has_pulled {
@@ -870,7 +875,9 @@ impl DiagnosticSources {
         drop(index);
         let mut merged = pulled;
         merged.extend(kept_pushed);
-        merged.sort_by_key(|d| (point(d.range.start), point(d.range.end)));
+        if !bundle {
+            merged.sort_by_key(|d| (point(d.range.start), point(d.range.end)));
+        }
         cap_diagnostics_entry_size(&requested, &mut merged);
 
         Some(DiagnosticInfo {

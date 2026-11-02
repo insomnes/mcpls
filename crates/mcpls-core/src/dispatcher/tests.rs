@@ -2028,3 +2028,40 @@ async fn diagnostics_batch_bounds_output_without_rewriting_retained_diagnostics(
     task.await.unwrap();
     dispatcher.shutdown().await;
 }
+
+#[tokio::test]
+async fn symbol_context_outgoing_items_continue_within_final_budget() {
+    let fixture = Fixture::new(4);
+    std::fs::write(fixture.main.join("marker"), "x".repeat(1000)).unwrap();
+    std::fs::write(fixture.main.join(".outgoing-count"), "125").unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let result = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("get_symbol_context").with_arguments(
+                json!({"file_path":fixture.main.join("file.py"),"line":1,"character":1,
+            "sections":["outgoing_calls"]})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(serde_json::to_vec(&result).unwrap().len() <= 131_072);
+    let bundle = result.structured_content.unwrap();
+    let calls = bundle["sections"]["outgoing_calls"]["data"]["calls"]
+        .as_array()
+        .unwrap();
+    assert_eq!(bundle["truncated"], true);
+    let item = &calls[0]["to"];
+    assert!(item["dispatcher_context"].is_string());
+    let followed = call(&client, "get_outgoing_calls", json!({"item":item}))
+        .await
+        .unwrap();
+    assert_eq!(followed["calls"][0]["to"]["data"], item["data"]);
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.abort();
+}

@@ -167,8 +167,10 @@ impl Translator {
         let target = position.line().get().saturating_sub(1) as usize;
         let (first, end) = range.map_or_else(
             || {
-                let first = target.saturating_sub(2).min(lines.len().saturating_sub(5));
-                (first, first.saturating_add(5).min(lines.len()))
+                (
+                    target.saturating_sub(2),
+                    target.saturating_add(3).min(lines.len()),
+                )
             },
             |range| {
                 (

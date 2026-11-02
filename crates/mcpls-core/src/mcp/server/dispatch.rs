@@ -297,6 +297,10 @@ impl McplsServer {
             .await
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "resident validation, producing-server binding and final response budget share one lifecycle boundary"
+    )]
     async fn invoke_tool(
         &self,
         lease: Lease,
@@ -339,9 +343,21 @@ impl McplsServer {
         // Keep the token-checked connection through every dispatch await.
         let continuation = origin.is_some();
         let (origin, expected_incarnation) = origin.unzip();
+        let bundle_calls = name == "get_symbol_context"
+            && request
+                .arguments
+                .as_ref()
+                .and_then(|args| args.get("sections"))
+                .and_then(Value::as_array)
+                .is_some_and(|sections| sections.iter().any(|section| section == "outgoing_calls"));
+        let binding_tool = if bundle_calls {
+            Some(crate::config::ToolKind::CallHierarchy)
+        } else {
+            tool
+        };
         let origin = if let Some(origin) = origin {
             Some(origin)
-        } else if let (Some(file), Some(tool)) = (&file, tool) {
+        } else if let (Some(file), Some(tool)) = (&file, binding_tool) {
             let path = crate::bridge::ClientPath::try_from(file.clone())
                 .map_err(|_| DispatchError::invalid(file).wire())?;
             let language = server
@@ -400,7 +416,20 @@ impl McplsServer {
                 if resident.incarnation(origin).as_ref() != Some(incarnation) {
                     return Err(DispatchError::stale().wire());
                 }
-                self.bind_items(value, &lease, origin, incarnation).await;
+                if bundle_calls {
+                    if let Some(data) = value
+                        .get_mut("sections")
+                        .and_then(|sections| sections.get_mut("outgoing_calls"))
+                        .and_then(|section| section.get_mut("data"))
+                    {
+                        self.bind_items(data, &lease, origin, incarnation).await;
+                    }
+                } else {
+                    self.bind_items(value, &lease, origin, incarnation).await;
+                }
+            }
+            if name == "get_symbol_context" {
+                super::symbol_context::enforce_response_budget(value);
             }
             output.content = vec![rmcp::model::ContentBlock::text(value.to_string())];
         }

@@ -380,6 +380,18 @@ impl Translator {
         context: ResultContext,
         notification_cache: &Mutex<NotificationCache>,
     ) -> Result<DiagnosticsAnswer> {
+        self.handle_validated_diagnostics_for_context(path, context, notification_cache, false)
+            .await
+    }
+
+    /// Bundle-only order and known-empty-cache semantics; other callers retain existing behavior.
+    pub(crate) async fn handle_validated_diagnostics_for_context(
+        &self,
+        path: &WorkspacePath,
+        context: ResultContext,
+        notification_cache: &Mutex<NotificationCache>,
+        bundle: bool,
+    ) -> Result<DiagnosticsAnswer> {
         let doc = self
             .prepare_document_for_path(path, ToolKind::Diagnostics)
             .await?;
@@ -390,7 +402,9 @@ impl Translator {
             failure,
             merged: diag_info,
             availability,
-        } = self.pull_round(&doc, notification_cache).await;
+        } = self
+            .pull_round_for_context(&doc, notification_cache, bundle)
+            .await;
 
         let merged = Self::diagnostics_from_cache_entry(
             diag_info.as_ref(),
@@ -400,6 +414,7 @@ impl Translator {
         .await;
         if let Some(e) = failure
             && merged.diagnostics.is_empty()
+            && !(bundle && availability == DiagnosticsAvailability::Published)
         {
             return Err(e);
         }
@@ -441,6 +456,16 @@ impl Translator {
         doc: &PreparedDocument,
         notification_cache: &Mutex<NotificationCache>,
     ) -> PullRound {
+        self.pull_round_for_context(doc, notification_cache, false)
+            .await
+    }
+
+    async fn pull_round_for_context(
+        &self,
+        doc: &PreparedDocument,
+        notification_cache: &Mutex<NotificationCache>,
+        bundle: bool,
+    ) -> PullRound {
         let (server_id, uri) = (doc.server_id(), doc.uri());
         let support = self.pull_support(server_id);
 
@@ -476,14 +501,22 @@ impl Translator {
             let mut cache = notification_cache.lock().await;
             self.settle_pull(&mut cache, doc, stamp, pulled, snapshot_before)
         };
-        let merged = sources.merge();
+        // Resource notifications retain the standalone normalized order.
+        let notification_merged = (bundle && wiring.is_some()).then(|| sources.clone().merge());
+        let merged = sources.merge_for_context(bundle);
 
         if let Some(wiring) = wiring {
             let outcome = match storage {
-                PullStorage::Stored(SlotChange::Replaced { before }) => before
-                    .map_or(ChangeOutcome::Changed, |before| {
-                        ChangeOutcome::of(before.merge().as_ref(), merged.as_ref())
-                    }),
+                PullStorage::Stored(SlotChange::Replaced { before }) => {
+                    before.map_or(ChangeOutcome::Changed, |before| {
+                        ChangeOutcome::of(
+                            before.merge().as_ref(),
+                            notification_merged
+                                .as_ref()
+                                .map_or(merged.as_ref(), Option::as_ref),
+                        )
+                    })
+                }
                 PullStorage::Stored(SlotChange::Identical) | PullStorage::NotStored => {
                     ChangeOutcome::Unchanged
                 }

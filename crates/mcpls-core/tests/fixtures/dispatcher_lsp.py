@@ -79,7 +79,8 @@ while True:
     elif method == "callHierarchy/incomingCalls":
         result = [{"from": params["item"], "fromRanges": [params["item"]["range"]]}]
     elif method == "callHierarchy/outgoingCalls":
-        result = [{"to": params["item"], "fromRanges": [params["item"]["range"]]}]
+        count = int((root / ".outgoing-count").read_text()) if (root / ".outgoing-count").exists() else 1
+        result = [{"to": params["item"], "fromRanges": [params["item"]["range"]]} for _ in range(count)]
     elif method in ("typeHierarchy/supertypes", "typeHierarchy/subtypes"):
         result = [params["item"]]
     elif method == "workspace/symbol":

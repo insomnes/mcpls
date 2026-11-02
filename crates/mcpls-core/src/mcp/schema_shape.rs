@@ -807,22 +807,26 @@ mod tests {
                         | "go_to_implementation"
                         | "go_to_type_definition"
                         | "go_to_declaration"
-                ) || schema_index == 1
-                    && matches!(
-                        before.name.as_ref(),
-                        "get_definition"
-                            | "go_to_implementation"
-                            | "go_to_type_definition"
-                            | "go_to_declaration"
-                            | "get_references"
-                            | "get_incoming_calls"
-                            | "get_outgoing_calls"
-                            | "rename_symbol"
-                            | "format_document"
-                            | "format_range"
-                            | "get_code_actions"
-                            | "get_diagnostics"
-                    )
+                ) || schema_index == 0 && before.name == "get_symbol_context"
+                    || schema_index == 1
+                        && matches!(
+                            before.name.as_ref(),
+                            "get_document_symbols"
+                                | "get_document_outline"
+                                | "get_document_highlights"
+                                | "get_definition"
+                                | "go_to_implementation"
+                                | "go_to_type_definition"
+                                | "go_to_declaration"
+                                | "get_references"
+                                | "get_incoming_calls"
+                                | "get_outgoing_calls"
+                                | "rename_symbol"
+                                | "format_document"
+                                | "format_range"
+                                | "get_code_actions"
+                                | "get_diagnostics"
+                        )
                 {
                     continue;
                 }

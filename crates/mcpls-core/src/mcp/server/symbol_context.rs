@@ -11,8 +11,8 @@ use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
 
 use super::{
-    AddressableTool, CallHierarchyCallsParams, DiagnosticsParams, HoverResult, Json, McpError,
-    McplsServer, Parameters, PathBuf, PositionParams, PositionRange, Serialize, client_input_error,
+    AddressableTool, CallHierarchyCallsParams, HoverResult, Json, McpError, McplsServer,
+    Parameters, PathBuf, PositionParams, PositionRange, Serialize, client_input_error,
     escape_bounded, parse_target,
 };
 use crate::bridge::{Indexed, InlayHintsResult, Position2D, Range, ResultContext};
@@ -294,6 +294,24 @@ fn result_bytes(bundle: &Value) -> usize {
         .map_or(usize::MAX, |bytes| bytes.len())
 }
 
+/// Dispatcher context tokens are output facts and must fit the same final response cap.
+pub(super) fn enforce_response_budget(bundle: &mut Value) {
+    for name in ORDER.into_iter().rev() {
+        while result_bytes(bundle) > 131_072 {
+            let Some(section) = bundle
+                .get_mut("sections")
+                .and_then(|sections| sections.get_mut(name))
+            else {
+                break;
+            };
+            if !shrink(section, "response_budget") {
+                break;
+            }
+            bundle["truncated"] = json!(true);
+        }
+    }
+}
+
 impl McplsServer {
     #[expect(
         clippy::too_many_lines,
@@ -375,11 +393,8 @@ impl McplsServer {
                     .await,
                 ),
                 "diagnostics" if range.is_some() => value(
-                    self.get_diagnostics(Parameters(DiagnosticsParams {
-                        file_path: filepath,
-                        context: ResultContext::None,
-                    }))
-                    .await,
+                    self.diagnostics_for_context(filepath, ResultContext::None, true)
+                        .await,
                 ),
                 "inlay_hints" if range.is_some() => {
                     let range = range
