@@ -192,7 +192,8 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
         shape_schema(Arc::make_mut(&mut tool.input_schema), &usage);
         if matches!(
             tool.name.as_ref(),
-            "get_supertypes"
+            "get_symbol_context"
+                | "get_supertypes"
                 | "get_subtypes"
                 | "get_completions"
                 | "get_definition"
@@ -236,7 +237,11 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
             shape_schema(Arc::make_mut(output), &usage);
             if matches!(
                 tool.name.as_ref(),
-                "get_definition"
+                "get_symbol_context"
+                    | "get_document_symbols"
+                    | "get_document_outline"
+                    | "get_document_highlights"
+                    | "get_definition"
                     | "go_to_implementation"
                     | "go_to_type_definition"
                     | "go_to_declaration"

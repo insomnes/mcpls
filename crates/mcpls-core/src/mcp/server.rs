@@ -979,6 +979,7 @@ impl McplsServer {
         }
         dispatch::shape_workspace_schemas(&mut router);
         diagnostics_batch::shape_schema(&mut router);
+        symbol_context::shape_schema(&mut router);
         router
     }
 
@@ -1040,7 +1041,7 @@ impl McplsServer {
 
     /// Collect bounded context for one primary-file symbol.
     #[tool(
-        description = "Source and selected semantic context in one call. Address by position or symbol_name. Sections default to source and hover; optional outgoing_calls, diagnostics, inlay_hints, highlights. Independent section statuses preserve usable facts. Fixed aggregate limits; unknown freshness and non-atomic observations.",
+        description = "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. Each requested section has an independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
         title = "Symbol Context"
     )]
     async fn get_symbol_context(

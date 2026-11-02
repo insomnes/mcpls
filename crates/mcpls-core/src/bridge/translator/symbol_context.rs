@@ -120,28 +120,15 @@ impl Translator {
             .collect();
         Ok((
             if let [symbol] = smallest.as_slice() {
-                let converter = crate::bridge::encoding::EncodingConverter::new(
-                    crate::bridge::encoding::PositionEncoding::Utf16,
+                let valid = self.document_tracker.valid_utf16_positions(
+                    fetched.doc.path(),
+                    &[
+                        symbol.range.start.clone(),
+                        symbol.range.end.clone(),
+                        symbol.selection_range.start.clone(),
+                        symbol.selection_range.end.clone(),
+                    ],
                 );
-                let valid = [
-                    &symbol.range.start,
-                    &symbol.range.end,
-                    &symbol.selection_range.start,
-                    &symbol.selection_range.end,
-                ]
-                .iter()
-                .all(|position| {
-                    self.document_tracker
-                        .line_text(fetched.doc.path(), position.line.saturating_sub(1))
-                        .is_some_and(|text| {
-                            converter
-                                .character_to_byte_offset(
-                                    &text,
-                                    position.character.saturating_sub(1),
-                                )
-                                .is_ok()
-                        })
-                });
                 valid.then(|| symbol.range.clone())
             } else {
                 None

@@ -5,6 +5,7 @@
 )]
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use rmcp::model::CallToolResult;
 use serde_json::{Value, json};
@@ -26,6 +27,28 @@ const ORDER: [&str; 6] = [
     "inlay_hints",
     "highlights",
 ];
+
+pub(super) fn shape_schema(router: &mut super::ToolRouter<McplsServer>) {
+    if let Some(route) = router.map.get_mut("get_symbol_context") {
+        let schema = json!({
+            "type":"object",
+            "required":["target","sections","truncated","analysis_freshness","atomic_snapshot"],
+            "properties":{
+                "target":{"type":"object","required":["file_path","position","range_fidelity"],
+                    "properties":{"file_path":{"type":"string"},"position":{"type":"object"},
+                        "range_fidelity":{"enum":["symbol","unknown"]}}},
+                "sections":{"type":"object","additionalProperties":{"type":"object","required":["status"],
+                    "properties":{"status":{"enum":["ok","empty","partial","unsupported","unavailable","error"]},
+                        "reason":{"type":"string"},"data":{"type":"object"}}}},
+                "truncated":{"type":"boolean"},"analysis_freshness":{"const":"unknown"},
+                "atomic_snapshot":{"const":false},"positions_degraded":{"enum":["request","response"]}
+            }
+        });
+        if let Value::Object(schema) = schema {
+            route.attr.output_schema = Some(Arc::new(schema));
+        }
+    }
+}
 
 fn outcome(status: &str, reason: &str) -> Value {
     json!({"status":status,"reason":reason})

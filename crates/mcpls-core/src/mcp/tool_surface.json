@@ -2483,15 +2483,12 @@
     "outputSchema": {
       "$defs": {
         "DocumentHighlightEntry": {
-          "description": "One occurrence of a symbol within a document.",
           "properties": {
             "kind": {
-              "$ref": "#/$defs/DocumentHighlightKind",
-              "description": "How the occurrence uses the symbol."
+              "$ref": "#/$defs/DocumentHighlightKind"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the occurrence."
+              "$ref": "#/$defs/Range"
             }
           },
           "required": [
@@ -2501,27 +2498,22 @@
           "type": "object"
         },
         "DocumentHighlightKind": {
-          "description": "How a document highlight occurrence uses its symbol.",
           "oneOf": [
             {
               "const": "text",
-              "description": "A textual occurrence; also what a server that omits the kind means.",
               "type": "string"
             },
             {
               "const": "read",
-              "description": "A read access, such as reading a variable.",
               "type": "string"
             },
             {
               "const": "write",
-              "description": "A write access, such as assigning a variable.",
               "type": "string"
             }
           ]
         },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -2529,7 +2521,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -2542,7 +2533,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -2555,15 +2545,12 @@
           ]
         },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -2576,18 +2563,15 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "highlights": {
-          "description": "Occurrences of the symbol at the position within the file.",
           "items": {
             "$ref": "#/$defs/DocumentHighlightEntry"
           },
           "type": "array"
         },
         "positions_degraded": {
-          "$ref": "#/$defs/PositionDegradation",
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          "$ref": "#/$defs/PositionDegradation"
         },
         "truncated": {
-          "description": "Whether `highlights` was capped below the server's full response.",
           "type": "boolean"
         }
       },
@@ -2695,24 +2679,20 @@
     "outputSchema": {
       "$defs": {
         "OutlineSymbol": {
-          "description": "One compact navigation entry.",
           "properties": {
             "kind": {
-              "description": "Numeric LSP symbol kind.",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
             },
             "name_path": {
-              "description": "Ancestor names followed by the symbol name.",
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
             "position": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Navigation position; approximate for flat responses."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -2723,7 +2703,6 @@
           "type": "object"
         },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -2731,7 +2710,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -2744,7 +2722,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -2757,7 +2734,6 @@
           ]
         },
         "SymbolFidelity": {
-          "description": "How much ancestry an [`EnclosingSymbol`] name path carries.",
           "oneOf": [
             {
               "const": "hierarchical",
@@ -2773,11 +2749,9 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "fidelity": {
-          "$ref": "#/$defs/SymbolFidelity",
-          "description": "Ancestry supplied by the server."
+          "$ref": "#/$defs/SymbolFidelity"
         },
         "next_offset": {
-          "description": "Next offset, or null when complete.",
           "format": "uint",
           "minimum": 0,
           "type": [
@@ -2786,18 +2760,15 @@
           ]
         },
         "positions_degraded": {
-          "$ref": "#/$defs/PositionDegradation",
-          "description": "Set when returned character offsets are inexact."
+          "$ref": "#/$defs/PositionDegradation"
         },
         "symbols": {
-          "description": "Matching navigation entries.",
           "items": {
             "$ref": "#/$defs/OutlineSymbol"
           },
           "type": "array"
         },
         "truncated": {
-          "description": "Further matching entries remain.",
           "type": "boolean"
         }
       },
@@ -2836,7 +2807,6 @@
     "outputSchema": {
       "$defs": {
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -2844,7 +2814,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -2857,7 +2826,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -2870,15 +2838,12 @@
           ]
         },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -2888,10 +2853,8 @@
           "type": "object"
         },
         "Symbol": {
-          "description": "A document symbol.",
           "properties": {
             "children": {
-              "description": "Child symbols.",
               "items": {
                 "$ref": "#/$defs/Symbol"
               },
@@ -2901,22 +2864,18 @@
               ]
             },
             "kind": {
-              "description": "LSP numeric symbol kind (e.g. 12 for Function).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selection_range": {
-              "$ref": "#/$defs/Range",
-              "description": "Selection range (identifier location)."
+              "$ref": "#/$defs/Range"
             }
           },
           "required": [
@@ -2931,11 +2890,9 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "positions_degraded": {
-          "$ref": "#/$defs/PositionDegradation",
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          "$ref": "#/$defs/PositionDegradation"
         },
         "symbols": {
-          "description": "List of symbols in the document.",
           "items": {
             "$ref": "#/$defs/Symbol"
           },
@@ -6443,14 +6400,13 @@
   {
     "name": "get_symbol_context",
     "title": "Symbol Context",
-    "description": "Source and selected semantic context in one call. Address by position or symbol_name. Sections default to source and hover; optional outgoing_calls, diagnostics, inlay_hints, highlights. Independent section statuses preserve usable facts. Fixed aggregate limits; unknown freshness and non-atomic observations.",
+    "description": "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. Each requested section has an independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "character": {
           "default": null,
-          "description": "Character/column number (1-based). Give with `line`, instead of `symbol_name`.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -6460,19 +6416,16 @@
         },
         "container": {
           "default": null,
-          "description": "With `symbol_name`: keep only symbols inside a container (type, impl, class, module) of this name.",
           "type": [
             "string",
             "null"
           ]
         },
         "file_path": {
-          "description": "Absolute path to the file.",
           "type": "string"
         },
         "line": {
           "default": null,
-          "description": "Line number (1-based). Give with `character`, instead of `symbol_name`.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -6544,12 +6497,10 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "With `symbol_name`: keep only symbols of this kind, by name (function, method, class, struct, ...)"
+          "default": null
         },
         "symbol_name": {
           "default": null,
-          "description": "Name of a symbol defined in this file, instead of `line`/`character`.",
           "type": [
             "string",
             "null"
@@ -6558,6 +6509,82 @@
       },
       "required": [
         "file_path"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "properties": {
+        "analysis_freshness": {
+          "const": "unknown"
+        },
+        "atomic_snapshot": {
+          "const": false
+        },
+        "positions_degraded": {
+          "enum": [
+            "request",
+            "response"
+          ]
+        },
+        "sections": {
+          "additionalProperties": {
+            "properties": {
+              "data": {
+                "type": "object"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "empty",
+                  "partial",
+                  "unsupported",
+                  "unavailable",
+                  "error"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          "type": "object"
+        },
+        "target": {
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "position": {
+              "type": "object"
+            },
+            "range_fidelity": {
+              "enum": [
+                "symbol",
+                "unknown"
+              ]
+            }
+          },
+          "required": [
+            "file_path",
+            "position",
+            "range_fidelity"
+          ],
+          "type": "object"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "target",
+        "sections",
+        "truncated",
+        "analysis_freshness",
+        "atomic_snapshot"
       ],
       "type": "object"
     },

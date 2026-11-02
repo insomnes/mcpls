@@ -894,6 +894,34 @@ impl DocumentTracker {
         documents.get(path)?.text.line(line).map(str::to_string)
     }
 
+    /// Validate context-range endpoints against borrowed tracked lines, without source copies.
+    pub(crate) fn valid_utf16_positions(
+        &self,
+        path: &Path,
+        positions: &[super::Position2D],
+    ) -> bool {
+        let documents = lock_std(&self.documents);
+        let Some(document) = documents.get(path) else {
+            return false;
+        };
+        let converter =
+            super::encoding::EncodingConverter::new(super::encoding::PositionEncoding::Utf16);
+        let valid = positions.iter().all(|position| {
+            position.line > 0
+                && position.character > 0
+                && document
+                    .text
+                    .line(position.line.saturating_sub(1))
+                    .is_some_and(|text| {
+                        converter
+                            .character_to_byte_offset(text, position.character.saturating_sub(1))
+                            .is_ok()
+                    })
+        });
+        drop(documents);
+        valid
+    }
+
     /// The content of `path` as last sent to a server, or `None` if the
     /// document is not open.
     #[must_use]
