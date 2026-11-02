@@ -34,9 +34,8 @@ fn source_lines(text: &str) -> Vec<&str> {
         lines.push(text.get(start..cursor).unwrap_or_default());
         start = cursor;
     }
-    if start < text.len() || lines.is_empty() {
-        lines.push(text.get(start..).unwrap_or_default());
-    }
+    // A trailing separator starts a final empty logical line.
+    lines.push(text.get(start..).unwrap_or_default());
     lines
 }
 
@@ -207,7 +206,8 @@ impl Translator {
         }
         let output_limited = result.len() < displayed.len();
         if output_limited
-            && (retained <= target || displayed_lines.len() != end.saturating_sub(first))
+            && (retained <= target
+                || redacted && displayed_lines.len() != source_lines(&selected).len())
         {
             return unavailable("text_budget");
         }

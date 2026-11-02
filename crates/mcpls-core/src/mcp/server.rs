@@ -9501,4 +9501,100 @@ sleep 0.3
             responder.abort();
         }
     }
+
+    /// Source windows preserve logical EOF lines without changing bytes or prefix budgets.
+    #[tokio::test]
+    async fn symbol_context_source_logical_line_boundary_matrix() {
+        use sha2::{Digest, Sha256};
+        let fixture = support_fixture(
+            vec![("rust", "rust", lsp_types::ServerCapabilities::default())],
+            McpConfig::default(),
+        );
+        let mut cases = vec![(String::new(), 1, 1, String::new(), "range_unavailable")];
+        for separator in ["\n", "\r\n", "\r"] {
+            let text = format!("α🦀{separator}b{separator}c{separator}");
+            for line in [1, 3] {
+                cases.push((text.clone(), line, 1, text.clone(), "range_unavailable"));
+            }
+            cases.push((
+                text,
+                4,
+                2,
+                format!("b{separator}c{separator}"),
+                "range_unavailable",
+            ));
+            let text = format!("α🦀{separator}b{separator}c");
+            cases.push((text.clone(), 3, 1, text, "range_unavailable"));
+            for line in [1, 2] {
+                cases.push((
+                    separator.to_owned(),
+                    line,
+                    1,
+                    separator.to_owned(),
+                    "range_unavailable",
+                ));
+            }
+            cases.push((
+                format!("a{separator}{}{separator}", "x".repeat(20_000)),
+                1,
+                1,
+                format!("a{separator}"),
+                "text_budget",
+            ));
+        }
+        for (text, line, start, expected, reason) in cases {
+            std::fs::write(&fixture.file, &text).unwrap();
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":"get_symbol_context","arguments":{"file_path":fixture.file,
+                        "line":line,"character":1,"sections":["source"]}
+                }),
+            )
+            .await;
+            let bundle = &response["result"]["structuredContent"];
+            let section = &bundle["sections"]["source"];
+            assert_eq!(
+                section["status"], "partial",
+                "line {line}, text {text:?}: {response}"
+            );
+            assert_eq!(section["reason"], reason);
+            assert_eq!(section["data"]["text"], expected);
+            assert_eq!(section["data"]["start_line"], start);
+            assert_eq!(section["data"]["completeness"], "excerpt");
+            assert_eq!(
+                section["data"]["sha256"],
+                format!("{:x}", Sha256::digest(text.as_bytes()))
+            );
+            assert_eq!(bundle["truncated"], reason == "text_budget");
+        }
+        let (client, _fake, _lanes) =
+            crate::test_lsp::fake_lsp_client_with_redactions(crate::redaction::Redactions::new([
+                ("TEST_TOKEN".to_owned(), "line-token-secret".to_owned()),
+            ]));
+        fixture
+            .server
+            .context
+            .translator
+            .register_client(crate::config::ServerId::from_static("rust"), client);
+        let text = format!("line-token-secret\n{}\n", "x".repeat(20_000));
+        std::fs::write(&fixture.file, &text).unwrap();
+        let response = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,
+                    "line":1,"character":1,"sections":["source"]}
+            }),
+        )
+        .await;
+        let source = &response["result"]["structuredContent"]["sections"]["source"];
+        assert_eq!(source["status"], "partial", "{response}");
+        assert_eq!(source["reason"], "text_budget");
+        assert_eq!(source["data"]["text"], "[redacted:TEST_TOKEN]\n");
+        assert_eq!(source["data"]["redacted"], true);
+        assert_eq!(
+            source["data"]["sha256"],
+            format!("{:x}", Sha256::digest(text.as_bytes()))
+        );
+    }
 }
