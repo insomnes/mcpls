@@ -53,6 +53,56 @@ Arguments: the same addressing as `get_hover`, plus optional `context` (see [enc
 
 A symbol with several definitions returns several locations; an unknown symbol returns an empty array.
 
+### Optional navigation source
+
+`get_definition`, `go_to_implementation`, `go_to_type_definition`, and
+`go_to_declaration` accept `include_source` (boolean, default `false`).
+Declaration remains position-only; the other three also accept symbol names.
+
+```json
+{"file_path":"/work/app/src/billing.rs","symbol_name":"process_payment","include_source":true}
+```
+
+Every retained location then has `source.status` equal to `text` or `unavailable`.
+Text includes `text`, `start_line` (1-based), `origin` (`tracked` or `disk`),
+`sha256`, and `shortened`. The lowercase SHA-256 identifies the complete unredacted
+observed file bytes, including bytes outside the excerpt. It does not identify
+an analyzed snapshot or prove current disk freshness. Tracked source takes
+precedence over a contained disk read; duplicate canonical files share one observation.
+
+The preferred window includes the location's starting line and up to two lines
+on each side. Columns and the location's ending line do not select source.
+Original UTF-8 and LF, CRLF, and CR separators remain, except configured secret
+redaction. No final newline is added. Empty source has line 1; a final separator
+permits a trailing empty line. File boundaries alone do not set `shortened`.
+When the window cannot fit, the whole target line is tried with `shortened:true`.
+The excerpt never guarantees a complete definition body.
+
+Limits per request are 100 candidate positions, 16 distinct attempted files,
+1 MiB per complete file, 4 MiB aggregate acquisition/copy allowance including
+charged growth lookahead, 2 KiB per excerpt, 64 KiB total finally redacted text,
+and 2 MiB added compact JSON. Failed reads can reserve allowance conservatively.
+The best-effort two-second deadline stops new acquisition and read chunks;
+an in-flight OS operation can overrun it. These limits do not bound the original
+LSP request or total response time. Final configured secret redaction preserves
+the same text limits, with whole-line fallback or an unavailable outcome.
+
+Unavailable outcomes contain only `status` and `reason`: `candidate_limit`,
+`file_limit`, `source_budget`, `text_budget`, `deadline`, `access_denied`,
+`read_failed`, `file_too_large`, `invalid_utf8`, or `line_unavailable`.
+They respectively mean the candidate cap, file cap, acquisition allowance,
+display allowance, deadline, containment authorization, file I/O, file size,
+UTF-8 decoding, or source line prevented text. Candidate positions beyond 100
+always report `candidate_limit`. Partial successes and failures coexist.
+
+The selected workspace context authorizes source; external paths, non-file URIs,
+and symlink escapes yield `access_denied`. Lexical `out_of_workspace` remains
+advisory. Source failures preserve locations, order, duplicates, ranges,
+`resolved_symbol`, enclosing context, `positions_degraded`, and `truncated`.
+Disabled source omits the field and additional acquisition, copying, and hashing.
+Source alone adds no LSP opens or semantic requests. Observations are read-only
+and have no atomic consistency guarantee with LSP locations or later reads.
+
 ## get_references
 
 Returns references reported by the language server, in server order, including duplicates.

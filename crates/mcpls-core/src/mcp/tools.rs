@@ -426,6 +426,9 @@ target_wire! {
         #[schemars(description = CONTEXT_DESCRIPTION)]
         #[serde(default)]
         context: ResultContext,
+        #[schemars(description = "Attach bounded source observations; default false.")]
+        #[serde(default)]
+        include_source: bool,
     }
 }
 
@@ -439,6 +442,8 @@ pub struct NavigationParams {
     pub target: SymbolTargetParams,
     /// Optional extra context for each returned item.
     pub context: ResultContext,
+    /// Attach bounded source observations; default false.
+    pub include_source: bool,
 }
 
 impl TryFrom<NavigationWire> for NavigationParams {
@@ -448,6 +453,7 @@ impl TryFrom<NavigationWire> for NavigationParams {
         Ok(Self {
             target: wire.take_target()?,
             context: wire.context,
+            include_source: wire.include_source,
         })
     }
 }
@@ -458,6 +464,7 @@ impl From<PositionParams> for NavigationParams {
         Self {
             target: position.into(),
             context: ResultContext::None,
+            include_source: false,
         }
     }
 }
@@ -469,6 +476,9 @@ position_wire! {
         #[schemars(description = CONTEXT_DESCRIPTION)]
         #[serde(default)]
         context: ResultContext,
+        #[schemars(description = "Attach bounded source observations; default false.")]
+        #[serde(default)]
+        include_source: bool,
     }
 }
 
@@ -481,6 +491,8 @@ pub struct DeclarationParams {
     pub position: PositionParams,
     /// Optional extra context for each returned item.
     pub context: ResultContext,
+    /// Attach bounded source observations; default false.
+    pub include_source: bool,
 }
 
 impl From<DeclarationWire> for DeclarationParams {
@@ -492,6 +504,7 @@ impl From<DeclarationWire> for DeclarationParams {
                 character: wire.character,
             },
             context: wire.context,
+            include_source: wire.include_source,
         }
     }
 }
@@ -502,6 +515,7 @@ impl From<PositionParams> for DeclarationParams {
         Self {
             position,
             context: ResultContext::None,
+            include_source: false,
         }
     }
 }

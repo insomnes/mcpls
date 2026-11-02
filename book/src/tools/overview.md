@@ -141,3 +141,6 @@ See [Troubleshooting](../guide/troubleshooting.md) for the fixes.
 ## What's Next
 
 Start with [Code Intelligence](code-intelligence.md), the tools you will use most.
+
+Navigation tools optionally attach bounded source with `include_source:true` (default false).
+See [Optional navigation source](code-intelligence.md#optional-navigation-source) for outcomes, limits, and observed-byte hashes.

@@ -192,14 +192,42 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
         shape_schema(Arc::make_mut(&mut tool.input_schema), &usage);
         if matches!(
             tool.name.as_ref(),
-            "get_supertypes" | "get_subtypes" | "get_completions"
+            "get_supertypes"
+                | "get_subtypes"
+                | "get_completions"
+                | "get_definition"
+                | "go_to_implementation"
+                | "go_to_type_definition"
+                | "go_to_declaration"
         ) {
             // The tool description explains addressing and completion options.
             // Retain the structural schema.
+            let conventions = tool.input_schema.get("properties").cloned();
             let mut schema = Schema::from(std::mem::take(Arc::make_mut(&mut tool.input_schema)));
             RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
                 .transform(&mut schema);
-            if let Value::Object(shaped) = Value::from(schema) {
+            if let Value::Object(mut shaped) = Value::from(schema) {
+                if matches!(
+                    tool.name.as_ref(),
+                    "get_definition"
+                        | "go_to_implementation"
+                        | "go_to_type_definition"
+                        | "go_to_declaration"
+                ) {
+                    // Keep absolute-path and coordinate conventions at the input boundary.
+                    for field in ["file_path", "line", "character"] {
+                        if let Some(description) = conventions
+                            .as_ref()
+                            .and_then(|p| p.get(field))
+                            .and_then(|p| p.get("description"))
+                            .cloned()
+                            && let Some(Value::Object(property)) =
+                                shaped.get_mut("properties").and_then(|p| p.get_mut(field))
+                        {
+                            property.insert("description".into(), description);
+                        }
+                    }
+                }
                 *Arc::make_mut(&mut tool.input_schema) = shaped;
             }
         }
@@ -208,7 +236,11 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
             shape_schema(Arc::make_mut(output), &usage);
             if matches!(
                 tool.name.as_ref(),
-                "get_references"
+                "get_definition"
+                    | "go_to_implementation"
+                    | "go_to_type_definition"
+                    | "go_to_declaration"
+                    | "get_references"
                     | "get_incoming_calls"
                     | "get_outgoing_calls"
                     | "get_supertypes"
@@ -762,11 +794,21 @@ mod tests {
                 // These rich output schemas use explicit dropping, not truncation.
                 if matches!(
                     before.name.as_ref(),
-                    "get_supertypes" | "get_subtypes" | "get_completions"
+                    "get_supertypes"
+                        | "get_subtypes"
+                        | "get_completions"
+                        | "get_definition"
+                        | "go_to_implementation"
+                        | "go_to_type_definition"
+                        | "go_to_declaration"
                 ) || schema_index == 1
                     && matches!(
                         before.name.as_ref(),
-                        "get_references"
+                        "get_definition"
+                            | "go_to_implementation"
+                            | "go_to_type_definition"
+                            | "go_to_declaration"
+                            | "get_references"
                             | "get_incoming_calls"
                             | "get_outgoing_calls"
                             | "rename_symbol"

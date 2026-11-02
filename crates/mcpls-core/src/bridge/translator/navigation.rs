@@ -562,6 +562,105 @@ impl Translator {
         Ok(self.contextualize_into(normalized, context).await)
     }
 
+    /// Navigate with optional bounded source, without changing native defaults.
+    ///
+    /// # Errors
+    /// Returns the existing navigation error if semantic navigation fails.
+    pub async fn handle_definition_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<super::dto::NavigationResult> {
+        let result = self.handle_definition(file_path, position, context).await?;
+        Ok(self.navigation_sources(result, include_source).await)
+    }
+
+    /// Navigate with optional bounded source, without changing native defaults.
+    ///
+    /// # Errors
+    /// Returns the existing navigation error if semantic navigation fails.
+    pub async fn handle_implementation_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<super::dto::NavigationResult> {
+        let result = self
+            .handle_implementation(file_path, position, context)
+            .await?;
+        Ok(self.navigation_sources(result, include_source).await)
+    }
+
+    /// Navigate with optional bounded source, without changing native defaults.
+    ///
+    /// # Errors
+    /// Returns the existing navigation error if semantic navigation fails.
+    pub async fn handle_type_definition_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<super::dto::NavigationResult> {
+        let result = self
+            .handle_type_definition(file_path, position, context)
+            .await?;
+        Ok(self.navigation_sources(result, include_source).await)
+    }
+
+    /// Navigate with optional bounded source, without changing native defaults.
+    ///
+    /// # Errors
+    /// Returns the existing navigation error if semantic navigation fails.
+    pub async fn handle_declaration_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<super::dto::NavigationResult> {
+        let result = self
+            .handle_declaration(file_path, position, context)
+            .await?;
+        Ok(self.navigation_sources(result, include_source).await)
+    }
+
+    async fn navigation_sources(
+        &self,
+        result: LocationsResult,
+        include_source: bool,
+    ) -> super::dto::NavigationResult {
+        let mut result = super::dto::NavigationResult::from(result);
+        if !include_source {
+            return result;
+        }
+        let mut locations: Vec<_> = result
+            .locations
+            .into_iter()
+            .map(|item| super::dto::ReferenceLocation {
+                location: item.location,
+                source: None,
+            })
+            .collect();
+        let hashes = self.source_excerpts(&mut locations, true).await;
+        result.locations = locations
+            .into_iter()
+            .map(|item| {
+                let hash = hashes.get(&item.uri).cloned().unwrap_or_default();
+                super::dto::NavigationLocation {
+                    location: item.location,
+                    source: item
+                        .source
+                        .map(|source| super::dto::NavigationSource::from_excerpt(source, hash)),
+                }
+            })
+            .collect();
+        result
+    }
+
     /// Handle references request.
     ///
     /// # Errors

@@ -1137,6 +1137,95 @@ pub struct LocationsResult {
     pub enrichment: Option<EnrichmentSummary>,
 }
 
+/// Navigation locations with optional bounded source observations.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NavigationResult {
+    /// Locations in server order, including duplicates.
+    pub locations: Vec<NavigationLocation>,
+    /// The server returned more locations than retained.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    /// Existing position-conversion warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions_degraded: Option<PositionDegradation>,
+    /// Existing enclosing-symbol lookup summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrichment: Option<EnrichmentSummary>,
+}
+
+/// A navigation location and its opt-in source outcome.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NavigationLocation {
+    /// Original location and enclosing context.
+    #[serde(flatten)]
+    pub location: ContextualLocation,
+    /// Absent unless `include_source` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<NavigationSource>,
+}
+
+/// Bounded observed source, independent of language-server analysis.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum NavigationSource {
+    /// At most five lines centered on the target starting line.
+    Text {
+        /// Source text with original separators and configured secret redaction.
+        text: String,
+        /// First source line, 1-based.
+        start_line: u32,
+        /// Source acquisition origin.
+        origin: SourceOrigin,
+        /// SHA-256 of complete unredacted observed bytes; not analyzed freshness.
+        sha256: String,
+        /// Only the whole target line fit the display allowance.
+        shortened: bool,
+    },
+    /// Source lookup failed without removing the location.
+    Unavailable {
+        /// Stable source lookup failure.
+        reason: SourceUnavailableReason,
+    },
+}
+
+impl NavigationSource {
+    pub(super) fn from_excerpt(source: ReferenceSource, sha256: String) -> Self {
+        match source {
+            ReferenceSource::Text {
+                text,
+                start_line,
+                origin,
+                shortened,
+            } => Self::Text {
+                text,
+                start_line,
+                origin,
+                shortened,
+                sha256,
+            },
+            ReferenceSource::Unavailable { reason } => Self::Unavailable { reason },
+        }
+    }
+}
+
+impl From<LocationsResult> for NavigationResult {
+    fn from(result: LocationsResult) -> Self {
+        Self {
+            locations: result
+                .locations
+                .into_iter()
+                .map(|location| NavigationLocation {
+                    location,
+                    source: None,
+                })
+                .collect(),
+            truncated: result.truncated,
+            positions_degraded: result.positions_degraded,
+            enrichment: result.enrichment,
+        }
+    }
+}
+
 /// What an empty references or workspace-symbol answer covers.
 ///
 /// A language server that indexes only documents sent with `didOpen` answers an empty list for
@@ -1756,6 +1845,40 @@ impl ServerText for LocationsResult {
             enrichment: _,
         } = self;
         locations.redact_server_text(redactions);
+    }
+}
+
+impl ServerText for NavigationResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        let mut remaining = super::references::OUTPUT_BYTES;
+        for item in &mut self.locations {
+            item.location.redact_server_text(redactions);
+            if matches!(item.source, Some(NavigationSource::Text { .. })) {
+                let Some(NavigationSource::Text {
+                    text,
+                    start_line,
+                    origin,
+                    shortened,
+                    sha256,
+                }) = item.source.take()
+                else {
+                    continue;
+                };
+                let mut reference = ReferenceLocation {
+                    location: item.location.clone(),
+                    source: Some(ReferenceSource::Text {
+                        text,
+                        start_line,
+                        origin,
+                        shortened,
+                    }),
+                };
+                super::references::redact_source(&mut reference, redactions, &mut remaining);
+                item.source = reference
+                    .source
+                    .map(|source| NavigationSource::from_excerpt(source, sha256));
+            }
+        }
     }
 }
 

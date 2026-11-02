@@ -54,11 +54,11 @@ use crate::bridge::{
     DiagnosticsOrigin, DiagnosticsResult, DocumentDiagnosticsResult, DocumentHighlightsResult,
     DocumentOpenState, DocumentOutlineResult, DocumentSymbolsResult, DocumentVersion,
     FoldingRangesResult, FormatDocumentResult, HierarchyItem, HoverResult, IncomingCallsResult,
-    Indexed, InlayHintsResult, KindFilter, KindFilterField, KindFilterInput, LocationsResult,
-    NotificationCache, OutgoingCallsResult, Position, PositionEncoding, PositionRange,
-    ReferencesResult, RenameResult, RestartServerResult, RouteSignals, SelectionRangesResult,
-    ServerLogsResult, ServerMessagesResult, SignatureHelpResult, SymbolTarget, Translator,
-    TypeHierarchyResult, WorkspaceRoots, WorkspaceSymbolResult,
+    Indexed, InlayHintsResult, KindFilter, KindFilterField, KindFilterInput, NotificationCache,
+    OutgoingCallsResult, Position, PositionEncoding, PositionRange, ReferencesResult, RenameResult,
+    RestartServerResult, RouteSignals, SelectionRangesResult, ServerLogsResult,
+    ServerMessagesResult, SignatureHelpResult, SymbolTarget, Translator, TypeHierarchyResult,
+    WorkspaceRoots, WorkspaceSymbolResult,
 };
 use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix, ToolProfile};
 use crate::redaction::{Redactions, ServerText};
@@ -1053,18 +1053,29 @@ impl McplsServer {
 
     /// Get the definition location of a symbol.
     #[tool(
-        description = concat!("Definition location of a symbol. Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Definition location of a symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Definition"
     )]
     async fn get_definition(
         &self,
-        Parameters(NavigationParams { target, context }): Parameters<NavigationParams>,
-    ) -> Result<Json<Addressed<LocationsResult>>, McpError> {
+        Parameters(NavigationParams {
+            target,
+            context,
+            include_source,
+        }): Parameters<NavigationParams>,
+    ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
         self.addressed(
             target,
             AddressableTool::Definition,
-            |file_path, position| translator.handle_definition(file_path, position, context),
+            |file_path, position| {
+                translator.handle_definition_with_source(
+                    file_path,
+                    position,
+                    context,
+                    include_source,
+                )
+            },
         )
         .await
     }
@@ -1725,43 +1736,65 @@ impl McplsServer {
 
     /// Go to implementation locations.
     #[tool(
-        description = concat!("Implementation locations of a trait method or interface member. Capped at a fixed maximum for an extremely common trait/interface; `truncated: true` on the result means more implementations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Implementation locations of a trait method or interface member. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Capped at a fixed maximum for an extremely common trait/interface; `truncated: true` on the result means more implementations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Implementation"
     )]
     async fn go_to_implementation(
         &self,
-        Parameters(NavigationParams { target, context }): Parameters<NavigationParams>,
-    ) -> Result<Json<Addressed<LocationsResult>>, McpError> {
+        Parameters(NavigationParams {
+            target,
+            context,
+            include_source,
+        }): Parameters<NavigationParams>,
+    ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
         self.addressed(
             target,
             AddressableTool::Implementation,
-            |file_path, position| translator.handle_implementation(file_path, position, context),
+            |file_path, position| {
+                translator.handle_implementation_with_source(
+                    file_path,
+                    position,
+                    context,
+                    include_source,
+                )
+            },
         )
         .await
     }
 
     /// Go to type definition location.
     #[tool(
-        description = concat!("Type definition location of an expression or symbol. Distinct from go-to-definition for variable bindings. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Type definition location of an expression or symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Distinct from go-to-definition for variable bindings. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Type Definition"
     )]
     async fn go_to_type_definition(
         &self,
-        Parameters(NavigationParams { target, context }): Parameters<NavigationParams>,
-    ) -> Result<Json<Addressed<LocationsResult>>, McpError> {
+        Parameters(NavigationParams {
+            target,
+            context,
+            include_source,
+        }): Parameters<NavigationParams>,
+    ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
         self.addressed(
             target,
             AddressableTool::TypeDefinition,
-            |file_path, position| translator.handle_type_definition(file_path, position, context),
+            |file_path, position| {
+                translator.handle_type_definition_with_source(
+                    file_path,
+                    position,
+                    context,
+                    include_source,
+                )
+            },
         )
         .await
     }
 
     /// Go to declaration location.
     #[tool(
-        description = concat!("Declaration location of the symbol at position. Differs from go-to-definition for languages that separate declaration from definition (C/C++ headers, interface members); servers without a declaration concept may return the definition. An empty result is valid. Capped at a fixed maximum; `truncated: true` on the result means more locations exist than are returned. ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Declaration location of the symbol at position. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Differs from go-to-definition for languages that separate declaration from definition (C/C++ headers, interface members); servers without a declaration concept may return the definition. An empty result is valid. Capped at a fixed maximum; `truncated: true` on the result means more locations exist than are returned. ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Declaration"
     )]
     async fn go_to_declaration(
@@ -1774,13 +1807,19 @@ impl McplsServer {
                     character,
                 },
             context,
+            include_source,
         }): Parameters<DeclarationParams>,
-    ) -> Result<Json<LocationsResult>, McpError> {
+    ) -> Result<Json<crate::bridge::NavigationResult>, McpError> {
         let file_path = parse_client_path(file_path)?;
         self.structured_result(
             self.context
                 .translator
-                .handle_declaration(file_path, parse_position(line, character)?, context)
+                .handle_declaration_with_source(
+                    file_path,
+                    parse_position(line, character)?,
+                    context,
+                    include_source,
+                )
                 .await,
         )
     }

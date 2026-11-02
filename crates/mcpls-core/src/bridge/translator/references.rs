@@ -15,7 +15,7 @@ use crate::redaction::Redactions;
 const FILE_BYTES: usize = 1024 * 1024;
 const SOURCE_BYTES: usize = 4 * FILE_BYTES;
 const EXCERPT_BYTES: usize = 2048;
-const OUTPUT_BYTES: usize = 64 * 1024;
+pub(super) const OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Selection and source options for a references request.
 #[derive(Debug, Clone)]
@@ -83,6 +83,17 @@ const fn unavailable(reason: Missing) -> ReferenceSource {
 
 impl Translator {
     pub(super) async fn reference_sources(&self, locations: &mut [ReferenceLocation]) {
+        self.source_excerpts(locations, false).await;
+    }
+
+    /// Reuse contained acquisition and excerpts; hash only navigation observations.
+    pub(super) async fn source_excerpts(
+        &self,
+        locations: &mut [ReferenceLocation],
+        hash: bool,
+    ) -> HashMap<String, String> {
+        let mut hashes = HashMap::new();
+        let mut identities = HashMap::new();
         let start = self.clock.now();
         let deadline = start.checked_add(Duration::from_secs(2)).unwrap_or(start);
         let mut sources: HashMap<PathBuf, Result<(String, SourceOrigin), Missing>> = HashMap::new();
@@ -132,7 +143,17 @@ impl Translator {
                         work.source_bytes += charge;
                         work.files += 1;
                     }
+                    if hash && let Ok((text, _)) = &source {
+                        use sha2::{Digest, Sha256};
+                        identities.insert(
+                            key.clone(),
+                            format!("{:x}", Sha256::digest(text.as_bytes())),
+                        );
+                    }
                     sources.insert(key.clone(), source);
+                }
+                if let Some(hash) = identities.get(&key) {
+                    hashes.insert(location.uri.clone(), hash.clone());
                 }
                 if self.clock.now() >= deadline {
                     unavailable(Missing::Deadline)
@@ -158,6 +179,7 @@ impl Translator {
         {
             crate::util::lock_std(&self.reference_work).output_bytes = OUTPUT_BYTES - output_left;
         }
+        hashes
     }
 
     pub(super) async fn bounded_source_file(
@@ -400,46 +422,54 @@ fn excerpt(
 pub(super) fn redact_sources(locations: &mut [ReferenceLocation], redactions: &Redactions) {
     let mut remaining = OUTPUT_BYTES;
     for item in locations {
-        let Some(ReferenceSource::Text { .. }) = &item.source else {
-            continue;
-        };
-        if let Some(ReferenceSource::Text {
-            text,
-            start_line,
-            origin,
-            shortened,
-        }) = item.source.take()
-        {
-            let mut final_text = text.clone();
-            redactions.redact_in_place(&mut final_text);
-            if final_text.len() <= EXCERPT_BYTES.min(remaining) {
-                remaining = remaining.saturating_sub(final_text.len());
-                item.source = Some(ReferenceSource::Text {
-                    text: final_text,
-                    start_line,
-                    origin,
-                    shortened,
-                });
-                continue;
-            }
-            let relative_line = item
-                .range
-                .start
-                .line
-                .saturating_sub(start_line)
-                .saturating_add(1);
-            let mut source = excerpt(&text, relative_line, origin, &mut remaining, redactions);
-            if let ReferenceSource::Text {
-                start_line: first,
-                shortened: short,
-                ..
-            } = &mut source
-            {
-                *first = first.saturating_add(start_line.saturating_sub(1));
-                *short |= shortened;
-            }
-            item.source = Some(source);
+        redact_source(item, redactions, &mut remaining);
+    }
+}
+
+pub(super) fn redact_source(
+    item: &mut ReferenceLocation,
+    redactions: &Redactions,
+    remaining: &mut usize,
+) {
+    let Some(ReferenceSource::Text { .. }) = &item.source else {
+        return;
+    };
+    if let Some(ReferenceSource::Text {
+        text,
+        start_line,
+        origin,
+        shortened,
+    }) = item.source.take()
+    {
+        let mut final_text = text.clone();
+        redactions.redact_in_place(&mut final_text);
+        if final_text.len() <= EXCERPT_BYTES.min(*remaining) {
+            *remaining = remaining.saturating_sub(final_text.len());
+            item.source = Some(ReferenceSource::Text {
+                text: final_text,
+                start_line,
+                origin,
+                shortened,
+            });
+            return;
         }
+        let relative_line = item
+            .range
+            .start
+            .line
+            .saturating_sub(start_line)
+            .saturating_add(1);
+        let mut source = excerpt(&text, relative_line, origin, remaining, redactions);
+        if let ReferenceSource::Text {
+            start_line: first,
+            shortened: short,
+            ..
+        } = &mut source
+        {
+            *first = first.saturating_add(start_line.saturating_sub(1));
+            *short |= shortened;
+        }
+        item.source = Some(source);
     }
 }
 
@@ -526,6 +556,171 @@ mod tests {
             .snapshot_copied_bytes
             .load(std::sync::atomic::Ordering::Relaxed);
         (result, work)
+    }
+
+    // These public handler requests prove positive enrichment and disabled work,
+    // without depending on the implementation's private call graph.
+    async fn navigation_request(
+        dir: &TempDir,
+        response: Vec<Value>,
+        tool: usize,
+        include_source: bool,
+    ) -> (Value, ReferenceWork) {
+        let caps = lsp_types::ServerCapabilities {
+            definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+            implementation_provider: Some(lsp_types::ImplementationProvider::Bool(true)),
+            type_definition_provider: Some(lsp_types::TypeDefinitionProvider::Bool(true)),
+            declaration_provider: Some(lsp_types::DeclarationProvider::Bool(true)),
+            ..Default::default()
+        };
+        let (translator, mut server) =
+            translator_with_capabilities(dir, &ServerId::from_static("rust"), caps);
+        let path = canonical_dir(dir).join("query.rs");
+        std::fs::write(&path, "fn query() {}\n").unwrap();
+        let translator = Arc::new(translator);
+        let handle = {
+            let translator = translator.clone();
+            tokio::spawn(async move {
+                let path = client_path(path.to_string_lossy().to_string());
+                let result = match tool {
+                    0 => {
+                        translator
+                            .handle_definition_with_source(
+                                path,
+                                pos(1, 1),
+                                ResultContext::None,
+                                include_source,
+                            )
+                            .await
+                    }
+                    1 => {
+                        translator
+                            .handle_implementation_with_source(
+                                path,
+                                pos(1, 1),
+                                ResultContext::None,
+                                include_source,
+                            )
+                            .await
+                    }
+                    2 => {
+                        translator
+                            .handle_type_definition_with_source(
+                                path,
+                                pos(1, 1),
+                                ResultContext::None,
+                                include_source,
+                            )
+                            .await
+                    }
+                    _ => {
+                        translator
+                            .handle_declaration_with_source(
+                                path,
+                                pos(1, 1),
+                                ResultContext::None,
+                                include_source,
+                            )
+                            .await
+                    }
+                }
+                .unwrap();
+                serde_json::to_value(result).unwrap()
+            })
+        };
+        let mut wire = BufReader::new(&mut server.write_stdout);
+        assert_eq!(
+            read_framed_message(&mut wire).await["method"],
+            "textDocument/didOpen"
+        );
+        let requested = read_framed_message(&mut wire).await;
+        assert_eq!(
+            requested["method"],
+            [
+                "textDocument/definition",
+                "textDocument/implementation",
+                "textDocument/typeDefinition",
+                "textDocument/declaration"
+            ][tool]
+        );
+        write_response(
+            &mut server.read_half_stdin,
+            &requested["id"],
+            json!(response),
+        )
+        .await;
+        let result = handle.await.unwrap();
+        let mut work = crate::util::lock_std(&translator.reference_work).clone();
+        work.tracked_bytes = translator
+            .document_tracker
+            .snapshot_copied_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        (result, work)
+    }
+
+    #[tokio::test]
+    async fn navigation_sources_preserve_locations_hash_full_bytes_and_default_work() {
+        use sha2::{Digest, Sha256};
+        let dir = TempDir::new().unwrap();
+        let target = canonical_dir(&dir).join("target.rs");
+        let text = "one\r\ntwo\rthree\nfour😀\nfive\nsix\n";
+        std::fs::write(&target, text).unwrap();
+        for tool in 0..4 {
+            let locations = vec![
+                location(&target, 0),
+                location(&target, 3),
+                location(&target, 50),
+            ];
+            let (disabled, work) = navigation_request(&dir, locations.clone(), tool, false).await;
+            assert_eq!(
+                (
+                    work.read_bytes,
+                    work.tracked_bytes,
+                    work.source_bytes,
+                    work.files
+                ),
+                (0, 0, 0, 0)
+            );
+            let (mut enabled, work) = navigation_request(&dir, locations, tool, true).await;
+            assert_eq!(work.read_bytes, text.len());
+            assert_eq!(work.files, 1);
+            let items = enabled["locations"].as_array_mut().unwrap();
+            assert_eq!(items[0]["source"]["text"], "one\r\ntwo\rthree\n");
+            assert_eq!(
+                items[1]["source"]["text"],
+                "two\rthree\nfour😀\nfive\nsix\n"
+            );
+            assert_eq!(items[1]["source"]["start_line"], 2);
+            assert_eq!(
+                items[1]["source"]["sha256"],
+                format!("{:x}", Sha256::digest(text.as_bytes()))
+            );
+            assert_eq!(items[2]["source"]["reason"], "line_unavailable");
+            for item in items {
+                item.as_object_mut().unwrap().remove("source");
+            }
+            assert_eq!(enabled, disabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn navigation_source_boundaries_fallback_and_candidate_outcomes() {
+        let dir = TempDir::new().unwrap();
+        let target = canonical_dir(&dir).join("target.rs");
+        let text = format!("{}\nsmall\n{}", "a".repeat(2048), "b".repeat(2049));
+        std::fs::write(&target, text).unwrap();
+        let mut locations = vec![location(&target, 1), location(&target, 2)];
+        locations.extend((2..101).map(|_| location(&target, 1)));
+        let (result, work) = navigation_request(&dir, locations, 0, true).await;
+        assert_eq!(result["locations"][0]["source"]["text"], "small\n");
+        assert_eq!(result["locations"][0]["source"]["shortened"], true);
+        assert_eq!(result["locations"][1]["source"]["reason"], "text_budget");
+        assert_eq!(
+            result["locations"][100]["source"]["reason"],
+            "candidate_limit"
+        );
+        assert_eq!(work.files, 1);
+        assert_eq!(result["locations"].as_array().unwrap().len(), 101);
     }
 
     // A late filter match must survive the old normalization cap; discarded
