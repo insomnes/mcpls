@@ -42,7 +42,7 @@ while True:
     event("request", method=method, params=params)
     if method == "exit":
         break
-    if method == "textDocument/didOpen":
+    if method == "textDocument/didOpen" and not (root / ".diagnostics.json").exists():
         uri = params["textDocument"]["uri"]
         send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
             "uri": uri, "diagnostics": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
@@ -57,6 +57,12 @@ while True:
             continue
         result = {"capabilities": {"hoverProvider": True, "definitionProvider": True, "documentSymbolProvider": True,
                                    "workspaceSymbolProvider": True, "callHierarchyProvider": True, "typeHierarchyProvider": True}}
+    elif method == "textDocument/diagnostic":
+        result = {"kind": "full", "items": [{"range": {"start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 1}},
+                    "message": "problem " + (root / "marker").read_text(), "severity": 1}]}
+        if (root / ".diagnostics.json").exists():
+            result["items"] = json.loads((root / ".diagnostics.json").read_text())
     elif method == "textDocument/hover":
         event("hover")
         wait_for_release(root / ".hold-response")

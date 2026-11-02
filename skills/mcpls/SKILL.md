@@ -59,6 +59,12 @@ Previews never write files, execute commands, or add language-server opens solel
 
 Do not apply proposals with non-empty `dropped` or unreliable positions.
 
+`get_diagnostics` accepts exactly one of `file_path` or `file_paths` (1 through 32 absolute paths in one authorized workspace). Null selectors and conflicts fail. Batch paths are limited to 4096 UTF-8 bytes each and 16384 compact JSON string bytes in total. Preflight checks all inputs before analysis starts. Missing or unsupported files produce item errors.
+
+Batch `results` preserve input order and duplicates. Each item has `input_index`, original `file_path`, `status`, and `truncated`; success adds `report` and exact `omitted_diagnostics`, while failure adds `error` with `code`, `message`, and `retryable`. Reports retain the single-file provenance and degradation fields. At most four reads, including optional `context: "enclosing_symbol"`, run concurrently. Cancellation stops queued work; invalidation rejects the whole batch.
+
+Batch output retains at most 100 diagnostics per file, 256 overall, 8192 compact JSON UTF-8 bytes per complete diagnostic, and 131072 bytes per structured result. Budgets allocate in input order and omit whole diagnostics. Error objects use at most 1024 bytes; shortening sets item `truncated`. Outer `truncated` means at least one item was shortened. An empty published report means clean only when untruncated; pending, evicted, failed, or truncated outcomes do not establish cleanliness. One batch call does not guarantee less backend work or stronger freshness. Existing single-file output stays compatible.
+
 `get_completions` returns API-discovery candidates in provider order, without insertion text or snippet edits. `limit` accepts integers 1 through 100 (default 20); `include_documentation` defaults to false. Null or invalid option values fail. Disabled or absent documentation is null; enabled empty documentation remains empty.
 
 Completion labels, details, and documentation are clipped at 512, 2048, and 4096 UTF-8 bytes after existing display redaction. Labels retain identifier-payload redaction semantics. Clipping keeps a Unicode-scalar prefix without an ellipsis; a clipped label is partial, not an exact source replacement. Each item lists clipped fields in `truncated_fields`, in label/detail/documentation order.

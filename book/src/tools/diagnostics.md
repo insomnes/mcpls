@@ -49,6 +49,45 @@ Read the extra fields before you trust an empty list:
 
 Diagnostics from the two sources are deduplicated by severity, code and proximity (within 3 lines), without comparing messages. Two distinct errors with the same code that start within 3 lines appear once, with the pulled message.
 
+### Several files in one request
+
+Use exactly one selector: `file_path` for the existing single-file response, or
+`file_paths` for 1 through 32 absolute paths in one authorized workspace.
+Null selectors, both selectors, and neither selector are invalid.
+Each batch path is at most 4096 UTF-8 bytes. Their compact JSON string encodings
+must total at most 16384 bytes. Selection checks every input before starting analysis.
+Missing or unsupported files inside the workspace produce individual errors.
+
+```json
+{ "file_paths": ["/work/app/src/main.rs", "/work/app/src/lib.rs"], "context": "enclosing_symbol" }
+```
+
+The response has `results` in input order and an outer `truncated` flag.
+Each occurrence, including duplicates, has `input_index`, the original `file_path`,
+`status` (`ok` or `error`), and `truncated`. Successful items have `report`, with the
+same fields as the single-file response, and `omitted_diagnostics`. Failed items
+have `error` with numeric `code`, string `message`, and boolean `retryable`.
+A failed item does not erase successful reports. Envelope and workspace-selection
+failures reject the whole call.
+
+At most four reads, including optional context work, run concurrently. Cancellation
+stops queued reads; runtime invalidation rejects the whole batch. Already-sent
+operations can finish. Batching reduces client calls; it does not guarantee less
+language-server work, fresher results, or a clean workspace.
+
+Batch output retains at most 100 diagnostics per file and 256 in total, allocated
+in input order. Each retained complete diagnostic uses at most 8192 compact JSON
+UTF-8 bytes. The complete structured result is at most 131072 bytes. Diagnostics
+that exceed a limit are omitted whole; later fitting diagnostics can remain.
+`omitted_diagnostics` counts all diagnostics removed from that report. Error objects
+are limited to 1024 bytes; shortened error messages also set `truncated`.
+The outer flag is true when any item is truncated. These limits apply to returned
+output, not language-server computation. Single-file output keeps its existing limits.
+
+An empty published report means clean only when the item is untruncated.
+Pending, evicted, failed, or truncated outcomes do not establish a clean file.
+Inspect origin and degradation fields for each report separately.
+
 ## get_cached_diagnostics
 
 Returns what mcpls already holds for a file, with no new analysis: the diagnostics the server pushed plus the last full report a `get_diagnostics` call stored. It is fast and takes only `file_path`.

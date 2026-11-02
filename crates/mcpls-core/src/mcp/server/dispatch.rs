@@ -191,7 +191,7 @@ impl McplsServer {
         ))
     }
 
-    pub(super) async fn dispatch_tool(
+    pub(super) async fn dispatch_single_tool(
         &self,
         mut request: CallToolRequestParams,
         context: rmcp::service::RequestContext<RoleServer>,
@@ -608,7 +608,7 @@ impl McplsServer {
         Ok((lease, server, resolved))
     }
 
-    async fn runtime_session(&self, lease: &Lease) -> Result<Arc<Self>, McpError> {
+    pub(super) async fn runtime_session(&self, lease: &Lease) -> Result<Arc<Self>, McpError> {
         let mut sessions = self.workspace_sessions.lock().await;
         if let Some(server) = sessions.get(&lease.resident.generation) {
             return Ok(server.clone());

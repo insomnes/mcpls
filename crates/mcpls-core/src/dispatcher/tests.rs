@@ -1912,3 +1912,119 @@ async fn automatic_untrusted_keeps_selected_analysis_root() {
     client.cancel().await.unwrap();
     task.await.unwrap();
 }
+
+/// Invalid batch envelopes and last-item authorization failures must not start LSP.
+#[tokio::test]
+async fn diagnostics_batch_preflight_rejects_before_start() {
+    let fixture = Fixture::new(4);
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let file = fixture.main.join("file.py");
+    for args in [
+        json!({}),
+        json!({"file_paths":null}),
+        json!({"file_path":null}),
+        json!({"file_paths":[]}),
+        json!({"file_paths":vec![file.clone();33]}),
+        json!({"file_paths":["relative.py"]}),
+        json!({"file_paths":[1]}),
+        json!({"file_path":file,"file_paths":[file]}),
+        json!({"file_paths":[file,fixture.linked.join("file.py")]}),
+        json!({"file_paths":[file,fixture.main.with_file_name("denied.py")]}),
+        json!({"file_paths":[file],"context":"invalid"}),
+    ] {
+        assert!(
+            call(&client, "get_diagnostics", args.clone())
+                .await
+                .is_err(),
+            "{args}"
+        );
+    }
+    assert_eq!(fixture.events(), [] as [Value; 0]);
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+    dispatcher.shutdown().await;
+}
+
+/// Batch errors do not erase ordered, duplicate successful file reports.
+#[tokio::test]
+async fn diagnostics_batch_preserves_order_duplicates_and_item_errors() {
+    let fixture = Fixture::new(4);
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let file = fixture.main.join("file.py");
+    let missing = fixture.main.join("missing.py");
+    let paths = json!([file, missing, file]);
+    let batch = call(&client, "get_diagnostics", json!({"file_paths":paths}))
+        .await
+        .unwrap();
+    assert_eq!(batch["results"].as_array().unwrap().len(), 3);
+    for index in 0..3 {
+        assert_eq!(batch["results"][index]["input_index"], index);
+        assert_eq!(batch["results"][index]["file_path"], paths[index]);
+    }
+    for index in [0, 2] {
+        assert_eq!(batch["results"][index]["status"], "ok", "{batch}");
+        assert_eq!(batch["results"][index]["report"]["origin"], "pull");
+        assert_eq!(batch["results"][index]["omitted_diagnostics"], 0);
+        assert!(
+            batch["results"][index]["report"]["diagnostics"]
+                .to_string()
+                .contains("AUTHORED MAIN")
+        );
+    }
+    assert_eq!(batch["results"][1]["status"], "error");
+    assert!(batch["results"][1]["error"]["code"].is_i64());
+    assert!(batch["results"][1]["error"]["retryable"].is_boolean());
+    assert_eq!(batch["truncated"], false);
+    let single = call(&client, "get_diagnostics", json!({"file_path":file}))
+        .await
+        .unwrap();
+    assert!(single.get("results").is_none());
+    assert_eq!(single["origin"], "pull");
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+    dispatcher.shutdown().await;
+}
+
+/// Public batch output omits complete diagnostics at both item and aggregate limits.
+#[tokio::test]
+async fn diagnostics_batch_bounds_output_without_rewriting_retained_diagnostics() {
+    let fixture = Fixture::new(4);
+    let diagnostics:Vec<Value>=(0..120).map(|index| json!({
+        "range":{"start":{"line":index*5,"character":0},"end":{"line":index*5,"character":1}},
+        "severity":1,"code":format!("E{index}"),"message":format!("problem {index}")
+    })).collect();
+    std::fs::write(
+        fixture.main.join(".diagnostics.json"),
+        serde_json::to_vec(&diagnostics).unwrap(),
+    )
+    .unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let file = fixture.main.join("file.py");
+    let batch = call(
+        &client,
+        "get_diagnostics",
+        json!({"file_paths":[file,file,file]}),
+    )
+    .await
+    .unwrap();
+    for (index, count) in [100, 100, 56].into_iter().enumerate() {
+        let item = &batch["results"][index];
+        assert_eq!(item["status"], "ok", "{batch}");
+        assert_eq!(
+            item["report"]["diagnostics"].as_array().unwrap().len(),
+            count
+        );
+        assert_eq!(item["omitted_diagnostics"], 120 - count);
+        assert_eq!(item["truncated"], true);
+        assert_eq!(item["report"]["diagnostics"][0]["message"], "problem 0");
+        assert_eq!(item["report"]["diagnostics"][0]["code"], "E0");
+    }
+    assert_eq!(batch["truncated"], true);
+    assert!(serde_json::to_vec(&batch).unwrap().len() <= 131_072);
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+    dispatcher.shutdown().await;
+}

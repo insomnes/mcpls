@@ -250,6 +250,7 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
                     | "format_range"
                     | "get_code_actions"
                     | "get_completions"
+                    | "get_diagnostics"
             ) {
                 // Bounded results add metadata whose descriptions repeat the tool guidance.
                 // Keep its structural contract; field meanings are in the tool description.
@@ -815,6 +816,7 @@ mod tests {
                             | "format_document"
                             | "format_range"
                             | "get_code_actions"
+                            | "get_diagnostics"
                     )
                 {
                     continue;

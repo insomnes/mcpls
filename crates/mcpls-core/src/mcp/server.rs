@@ -3,6 +3,7 @@
 //! This module provides the MCP server that exposes LSP capabilities
 //! as MCP tools using the rmcp SDK.
 
+mod diagnostics_batch;
 mod dispatch;
 
 use std::borrow::Cow;
@@ -976,6 +977,7 @@ impl McplsServer {
             });
         }
         dispatch::shape_workspace_schemas(&mut router);
+        diagnostics_batch::shape_schema(&mut router);
         router
     }
 
@@ -1113,7 +1115,7 @@ impl McplsServer {
 
     /// Get diagnostics for a file.
     #[tool(
-        description = concat!("Diagnostics for a file. Returns errors, warnings, and hints with severity and location. `origin`: `pull`, `push_cache` when the server has no pull provider, or `cache_after_failed_pull` when the pull failed and the cache answered. ", availability_note!(), " `indexing_in_progress: true` means the routed server was indexing at some point during this read, so results may be incomplete. `push_notifications_degraded: true` means the routed server crashed and was restarted, so push-only diagnostics (e.g. flycheck) are missing. ", positions_note_response!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Diagnostics for file_path or file_paths (1..32, same workspace). Batch: ordered results with report/error, truncated and omitted_diagnostics; max4 concurrent,100 diagnostics/file,256 total,8 KiB/diagnostic,128 KiB/result. No clean guarantee for pending/evicted/truncated outcomes. Returns errors, warnings, and hints with severity and location. `origin`: `pull`, `push_cache` when the server has no pull provider, or `cache_after_failed_pull` when the pull failed and the cache answered. ", availability_note!(), " `indexing_in_progress: true` means the routed server was indexing at some point during this read, so results may be incomplete. `push_notifications_degraded: true` means the routed server crashed and was restarted, so push-only diagnostics (e.g. flycheck) are missing. ", positions_note_response!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Diagnostics"
     )]
     async fn get_diagnostics(
