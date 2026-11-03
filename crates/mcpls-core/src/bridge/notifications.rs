@@ -2568,6 +2568,8 @@ impl NotificationCache {
             for key in stale {
                 self.evict_entry(&key);
             }
+            // A retained pull is not evidence for the publication the mailbox lost.
+            self.mark_delta_source_loss(&file);
             let marked = !self.has_diagnostics_for(&file)
                 && self
                     .eviction_marks
@@ -2594,6 +2596,7 @@ impl NotificationCache {
     /// Records that `owner` lost more publishes than the mailbox could name,
     /// as capacity eviction does.
     pub(crate) fn record_unnamed_loss(&mut self, owner: &ServerId) {
+        self.eviction_marks.delta_history_unknown = true;
         self.eviction_marks.restore_overflow(owner);
     }
 
@@ -4569,6 +4572,54 @@ mod tests {
 
         assert_eq!(changed, [DiagnosticsKey::of(&real)]);
         assert!(!cache.has_diagnostics(&real));
+        cache.assert_consistent();
+    }
+
+    /// Named delivery loss remains observable when a full pulled report survives.
+    #[test]
+    fn test_named_delivery_loss_keeps_delta_incomplete_with_retained_pull() {
+        let mut cache = NotificationCache::new();
+        let server = test_server();
+        let uri = file_uri("a.rs");
+        cache.store_diagnostics(&server, &uri, None, vec![diagnostic_at(8, "old push")]);
+        cache.store_pulled_for_test(&server, &uri, vec![diagnostic_at(1, "pull")]);
+        let lost = [PublishedDiagnosticsUri::for_test(uri.clone(), uri.clone())];
+
+        cache.record_lost_files(&server, &lost);
+
+        assert_eq!(
+            cache.availability(&uri, Some(&server)),
+            DiagnosticsAvailability::Published
+        );
+        let current = cache.diagnostic_sources(&uri).merge().unwrap();
+        assert_eq!(messages(&current), vec!["pull"]);
+        assert_eq!(cache.delta_completeness(&uri), (true, false));
+        cache.store_diagnostics(&server, &uri, None, vec![diagnostic_at(8, "new push")]);
+        cache.store_pulled_for_test(&server, &uri, vec![diagnostic_at(1, "new pull")]);
+        assert_eq!(cache.delta_completeness(&uri), (true, false));
+        cache.assert_consistent();
+    }
+
+    /// An accepted write may clear legacy overflow, but cannot restore unknown delivery history.
+    #[test]
+    fn test_unnamed_delivery_loss_survives_legacy_overflow_clear() {
+        let mut cache = NotificationCache::new();
+        let server = test_server();
+        let uri = file_uri("a.rs");
+        cache.record_unnamed_loss(&server);
+        cache.store_diagnostics(&server, &uri, None, vec![diagnostic_at(1, "current")]);
+
+        assert_eq!(
+            cache.availability(&uri, Some(&server)),
+            DiagnosticsAvailability::Published
+        );
+        assert_eq!(
+            cache.availability(&file_uri("unknown.rs"), Some(&server)),
+            DiagnosticsAvailability::Pending
+        );
+        assert_eq!(cache.delta_completeness(&uri), (false, true));
+        cache.store_pulled_for_test(&server, &uri, Vec::new());
+        assert_eq!(cache.delta_completeness(&uri), (false, true));
         cache.assert_consistent();
     }
 
