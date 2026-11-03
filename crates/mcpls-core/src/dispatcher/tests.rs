@@ -822,6 +822,52 @@ async fn demand_uses_marker_filtered_and_settled_routes() {
     task.await.unwrap();
 }
 
+/// Null optional items leave emitted targets usable through public dispatcher calls.
+#[tokio::test]
+async fn portable_call_targets_treat_null_item_as_absent() {
+    let fixture = Fixture::new(4);
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let outline = call(
+        &client,
+        "get_document_outline",
+        json!({"file_path":fixture.main.join("file.py"),"include_targets":true}),
+    )
+    .await
+    .unwrap();
+    let target = &outline["symbols"][0]["symbol_target"];
+    assert!(target.is_object(), "{outline}");
+    for (tool, field) in [("get_incoming_calls", "from"), ("get_outgoing_calls", "to")] {
+        let direct = call(&client, tool, json!({"symbol_target":target,"item":null}))
+            .await
+            .unwrap();
+        assert_eq!(direct["status"], "ok", "{tool}: {direct}");
+        let item = &direct["calls"][0][field];
+        assert_eq!(item["name"], "entry", "{direct}");
+        assert_eq!(item["data"]["marker"], "AUTHORED MAIN", "{direct}");
+        assert!(item["dispatcher_context"].is_string(), "{direct}");
+        let mixed = call(&client, tool, json!({"symbol_target":target,"item":item})).await;
+        assert!(mixed.is_err(), "non-null mixed item must reject: {mixed:?}");
+        let followed = call(&client, tool, json!({"item":item})).await.unwrap();
+        assert_eq!(followed["calls"][0][field]["data"], item["data"]);
+    }
+    let preparations: Vec<_> = fixture
+        .events()
+        .into_iter()
+        .filter(|event| event["method"] == "textDocument/prepareCallHierarchy")
+        .collect();
+    assert_eq!(preparations.len(), 2, "one direct preparation per consumer");
+    for request in preparations {
+        assert_eq!(
+            request["params"]["position"],
+            json!({"line":0,"character":0})
+        );
+    }
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
 /// Only the producing backend's restart invalidates a hierarchy continuation.
 #[tokio::test]
 async fn hierarchy_context_survives_unrelated_backend_start_and_restart() {

@@ -400,7 +400,7 @@ impl McplsServer {
             || request
                 .arguments
                 .as_ref()
-                .is_some_and(|arguments| arguments.contains_key("item"))
+                .is_some_and(|arguments| arguments.get("item").is_some_and(|item| !item.is_null()))
             || matches!(
                 name.as_str(),
                 "get_server_logs"
@@ -524,7 +524,8 @@ impl McplsServer {
         file: Option<&PathBuf>,
         workspace: Option<&PathBuf>,
     ) -> Result<(Lease, Option<(crate::config::ServerId, String)>), McpError> {
-        let continuation = if let Some(item) = arguments.get_mut("item") {
+        let item = arguments.get_mut("item").filter(|item| !item.is_null());
+        let continuation = if let Some(item) = item {
             let token = item
                 .get("dispatcher_context")
                 .and_then(Value::as_str)
