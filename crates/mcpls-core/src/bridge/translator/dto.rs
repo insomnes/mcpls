@@ -855,7 +855,7 @@ pub struct SymbolTargetEnvelope {
 /// Why a retained discovery entry has no portable target.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SymbolTargetUnavailable {
-    /// Stable snake_case reason.
+    /// Stable `snake_case` reason.
     pub reason: String,
 }
 

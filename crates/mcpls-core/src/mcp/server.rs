@@ -9622,6 +9622,7 @@ sleep 0.3
                     );
                     assert!(result.to_string().contains("same"), "{response}");
                 }
+                drop(observed);
             }
         }
         for consumer in consumers {

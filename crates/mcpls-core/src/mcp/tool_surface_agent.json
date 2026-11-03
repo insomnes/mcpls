@@ -3859,7 +3859,7 @@
           ]
         },
         "container": {
-          "description": "Optional immediate container for symbol_name.",
+          "description": "Optional immediate container for `symbol_name`.",
           "type": [
             "string",
             "null"
@@ -3927,7 +3927,7 @@
               "type": "null"
             }
           ],
-          "description": "Optional kind qualifier for symbol_name."
+          "description": "Optional kind qualifier for `symbol_name`."
         },
         "symbol_name": {
           "description": "Symbol name, instead of a position or reference.",
@@ -3937,7 +3937,7 @@
           ]
         },
         "symbol_ref": {
-          "description": "Existing opaque reference, with file_path.",
+          "description": "Existing opaque reference, with `file_path`.",
           "type": [
             "string",
             "null"
@@ -5689,7 +5689,7 @@
           ]
         },
         "container": {
-          "description": "Optional immediate container for symbol_name.",
+          "description": "Optional immediate container for `symbol_name`.",
           "type": [
             "string",
             "null"
@@ -5788,7 +5788,7 @@
               "type": "null"
             }
           ],
-          "description": "Optional kind qualifier for symbol_name."
+          "description": "Optional kind qualifier for `symbol_name`."
         },
         "symbol_name": {
           "description": "Symbol name, instead of a position or reference.",
@@ -5798,7 +5798,7 @@
           ]
         },
         "symbol_ref": {
-          "description": "Existing opaque reference, with file_path.",
+          "description": "Existing opaque reference, with `file_path`.",
           "type": [
             "string",
             "null"

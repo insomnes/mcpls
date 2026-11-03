@@ -150,11 +150,11 @@ macro_rules! reusable_target_wire {
             character: Option<u32>,
             /// Symbol name, instead of a position or reference.
             symbol_name: Option<String>,
-            /// Optional kind qualifier for symbol_name.
+            /// Optional kind qualifier for `symbol_name`.
             symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
-            /// Optional immediate container for symbol_name.
+            /// Optional immediate container for `symbol_name`.
             container: Option<String>,
-            /// Existing opaque reference, with file_path.
+            /// Existing opaque reference, with `file_path`.
             symbol_ref: Option<String>,
             $($extra)*
         }
