@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use globset::GlobBuilder;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{FileWatchingBackend, FileWatchingConfig};
 use crate::error::{Error, Result};
@@ -63,17 +64,45 @@ pub(crate) struct Change {
 pub(crate) struct Backend {
     events: broadcast::Sender<Vec<Change>>,
     failure: Arc<Mutex<Option<String>>>,
-    task: tokio::task::JoinHandle<()>,
+    invalid: CancellationToken,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Drop for Backend {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = self
+            .task
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
     }
 }
 
 impl Backend {
+    pub(crate) fn invalidated(&self) -> CancellationToken {
+        self.invalid.clone()
+    }
+
+    pub(crate) async fn stop(&self) {
+        self.invalid.cancel();
+        let task = self
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
     pub(crate) fn check(&self) -> Result<()> {
+        if self.invalid.is_cancelled() {
+            return Err(unavailable("watching coverage invalidated"));
+        }
         if let Some(reason) = self
             .failure
             .lock()
@@ -119,6 +148,17 @@ impl Backend {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixStream;
         use tokio::time::{Duration, timeout};
+        // Watchman versions can accept a watch after failing to parse root JSON.
+        // Validate syntax before advertising coverage; Watchman owns its semantics.
+        for root in roots {
+            match std::fs::read(root.join(".watchmanconfig")) {
+                Ok(bytes) => {
+                    let _: Value = serde_json::from_slice(&bytes).map_err(unavailable)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(unavailable(error)),
+            }
+        }
         let directory = tempfile::Builder::new()
             .prefix("mcpls-watch-")
             .tempdir()
@@ -228,6 +268,8 @@ impl Backend {
         let (events, _) = broadcast::channel(256);
         let failure = Arc::new(Mutex::new(None));
         let task_failure = failure.clone();
+        let invalid = CancellationToken::new();
+        let task_invalid = invalid.clone();
         let sender = events.clone();
         let roots = roots.to_vec();
         let task = tokio::spawn(async move {
@@ -263,12 +305,14 @@ impl Backend {
                 *task_failure
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
+                task_invalid.cancel();
             }
         });
         Ok(Arc::new(Self {
             events,
             failure,
-            task,
+            invalid,
+            task: Mutex::new(Some(task)),
         }))
     }
 }
@@ -339,12 +383,18 @@ impl Registrations {
     }
 
     pub(crate) async fn next(&mut self) -> Result<Vec<Change>> {
-        self.receiver.recv().await.map_err(|error| {
+        let received = tokio::select! {
+            biased;
+            () = self.backend.invalid.cancelled() => return Err(unavailable("watching coverage invalidated")),
+            received = self.receiver.recv() => received,
+        };
+        received.map_err(|error| {
             *self
                 .backend
                 .failure
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.to_string());
+            self.backend.invalid.cancel();
             unavailable(error)
         })
     }

@@ -1294,6 +1294,15 @@ impl Resident {
         self.invalid.cancel();
         let resident = self.clone();
         tokio::spawn(async move {
+            // Stored start configurations can outlive retirement. Stop their
+            // shared backend explicitly rather than waiting for the final Arc.
+            if let Some(starts) = resident.servers.get() {
+                for start in starts {
+                    if let Some(backend) = &start.config.watching {
+                        backend.stop().await;
+                    }
+                }
+            }
             if let Some(runtime) = resident.runtime.get() {
                 runtime.translator.begin_shutdown();
                 runtime.subscription_registry.invalidate().await;

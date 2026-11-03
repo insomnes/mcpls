@@ -1067,6 +1067,9 @@ impl LspClient {
             )
             .await
         };
+        // Close the writer before waiting for reader cleanup. A canceled frame
+        // must never remain available for another write on this transport.
+        drop(transport);
         let _ = timeout(READER_TASK_ABORT_GRACE, reader_handle).await;
         // Dropped before the drain, not just at fn-exit: otherwise a
         // `register_and_send_request` racing the drain could still insert
@@ -1211,7 +1214,14 @@ impl LspClient {
                         watching.backend.check()?;
                         let notification = watching.notification(changes);
                         if notification.get("params").and_then(|p| p.get("changes")).and_then(Value::as_array).is_some_and(|changes| !changes.is_empty()) {
-                            transport.send(&notification).await?;
+                            let invalid = watching.backend.invalidated();
+                            // Canceling a partial frame must leave through the loop wrapper,
+                            // which closes this transport instead of resuming stale bytes.
+                            tokio::select! {
+                                biased;
+                                () = invalid.cancelled() => return Err(super::watching::unavailable("watching coverage invalidated")),
+                                result = transport.send(&notification) => result?,
+                            }
                         }
                     }
                 }

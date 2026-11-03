@@ -1,5 +1,6 @@
 //! Regression oracles run through real MCP transports, Git, and an external LSP.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -2064,4 +2065,60 @@ async fn symbol_context_outgoing_items_continue_within_final_budget() {
     dispatcher.shutdown().await;
     client.cancel().await.unwrap();
     task.abort();
+}
+
+/// Invalid root JSON must fail before launching a backend or advertising coverage.
+/// Valid and absent root files still reach the configured executable.
+#[tokio::test]
+async fn watching_root_json_is_validated_before_backend_launch() {
+    for (root_config, launched) in [
+        (Some("{ invalid JSON"), false),
+        (Some("{}"), true),
+        (None, true),
+    ] {
+        let fixture = Fixture::new(4);
+        if let Some(root_config) = root_config {
+            std::fs::write(fixture.main.join(".watchmanconfig"), root_config).unwrap();
+        }
+        let marker = fixture.profile.parent().unwrap().join("backend-started");
+        let backend = fixture.profile.parent().unwrap().join("backend");
+        std::fs::write(
+            &backend,
+            format!("#!/bin/sh\nprintf started > {marker:?}\nexit 1\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let profile = std::fs::read_to_string(&fixture.profile).unwrap();
+        std::fs::write(
+            &fixture.profile,
+            format!(
+                "{profile}\n[workspace.file_watching]\nbackend='watchman'\ncommand={backend:?}\n"
+            ),
+        )
+        .unwrap();
+        let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+        let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+        error_code(
+            call(
+                &client,
+                "get_document_outline",
+                json!({"file_path":fixture.main.join("file.py")}),
+            )
+            .await
+            .unwrap_err(),
+            "workspace_unavailable",
+        );
+        assert_eq!(
+            marker.exists(),
+            launched,
+            "root configuration: {root_config:?}"
+        );
+        assert!(
+            fixture.events().is_empty(),
+            "failed coverage must not start LSP"
+        );
+        dispatcher.shutdown().await;
+        client.cancel().await.unwrap();
+        task.await.unwrap();
+    }
 }
