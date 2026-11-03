@@ -24,6 +24,7 @@ clap = "4.6"
 dirs = "7.0"
 dunce = "1.0.5"
 futures = "0.3"
+globset = "=0.4.20"
 http-body = "1.0"
 hyper = "1.11"
 hyper-util = "0.1.20"
@@ -35,6 +36,7 @@ nix = { version = "0.31", default-features = false, features = ["user"] }
 predicates = "3.1"
 process-wrap = { version = "10.0.1", default-features = false }
 proptest = "1.11"
+regex = "1.13"
 rmcp = "3.5.1"
 rstest = "0.27"
 rustix = { version = "1.1", features = ["process"] }
@@ -52,7 +54,6 @@ toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2.5"
-wax = { version = "0.7", default-features = false }
 winapi-util = "0.1.11"
 
 [workspace.lints.rust]

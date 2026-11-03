@@ -9,9 +9,9 @@ use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use globset::GlobBuilder;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
-use wax::Program as _;
 
 use crate::config::{FileWatchingBackend, FileWatchingConfig};
 use crate::error::{Error, Result};
@@ -25,6 +25,36 @@ pub(crate) fn unavailable(message: impl std::fmt::Display) -> Error {
             "file watching backend unavailable; inspect backend configuration and restart the workspace runtime",
         ))
     }
+}
+
+// A quiet subscription need not produce an initial notification. Drain optional
+// initial frames while waiting for the next ordinary command response.
+#[cfg(target_os = "linux")]
+async fn setup_response(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+) -> Result<Value> {
+    use tokio::time::{Duration, timeout};
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .map_err(unavailable)?
+                .ok_or_else(|| unavailable("Watchman disconnected during setup"))?;
+            let response: Value = serde_json::from_str(&line).map_err(unavailable)?;
+            if ["error", "canceled", "overflow", "warning"]
+                .iter()
+                .any(|key| response.get(*key).is_some())
+            {
+                return Err(unavailable(response));
+            }
+            if response.get("subscription").is_none() {
+                return Ok(response);
+            }
+        }
+    })
+    .await
+    .map_err(unavailable)?
 }
 
 #[derive(Debug, Clone)]
@@ -159,48 +189,36 @@ impl Backend {
                     .write_all(format!("{command}\n").as_bytes())
                     .await
                     .map_err(unavailable)?;
-                let line = timeout(Duration::from_secs(10), lines.next_line())
-                    .await
-                    .map_err(unavailable)?
-                    .map_err(unavailable)?
-                    .ok_or_else(|| unavailable("Watchman disconnected during setup"))?;
-                let response: Value = serde_json::from_str(&line).map_err(unavailable)?;
-                if let Some(error) = response.get("error") {
-                    return Err(unavailable(error));
-                }
+                let response = setup_response(&mut lines).await?;
                 if command.get(0) == Some(&json!("clock")) {
                     let clock = response
                         .get("clock")
                         .ok_or_else(|| unavailable("missing Watchman clock"))?;
-                    let subscribe = json!(["subscribe", root, format!("mcpls-{index}"), {"since":clock,"fields":["name","exists","new","type"],"empty_on_fresh_instance":true}]);
+                    let subscribe = json!(["subscribe", root, format!("mcpls-{index}"), {"since":clock,"fields":["name","exists","new","type"],"empty_on_fresh_instance":false}]);
                     write
                         .write_all(format!("{subscribe}\n").as_bytes())
                         .await
                         .map_err(unavailable)?;
-                    let line = timeout(Duration::from_secs(10), lines.next_line())
-                        .await
-                        .map_err(unavailable)?
-                        .map_err(unavailable)?
-                        .ok_or_else(|| unavailable("Watchman disconnected during subscribe"))?;
-                    let response: Value = serde_json::from_str(&line).map_err(unavailable)?;
+                    let response = setup_response(&mut lines).await?;
                     if response.get("subscribe").is_none() || response.get("error").is_some() {
                         return Err(unavailable(response));
                     }
-                    let baseline = timeout(Duration::from_secs(10), lines.next_line())
-                        .await
-                        .map_err(unavailable)?
-                        .map_err(unavailable)?
-                        .ok_or_else(|| unavailable("missing subscription baseline"))?;
-                    let baseline: Value = serde_json::from_str(&baseline).map_err(unavailable)?;
-                    if baseline.get("subscription").and_then(Value::as_str)
-                        != Some(format!("mcpls-{index}").as_str())
-                        || baseline.get("error").is_some()
-                        || baseline.get("canceled").is_some()
-                    {
-                        return Err(unavailable("invalid subscription baseline"));
-                    }
                 }
             }
+        }
+        // The command response is a startup fence even when subscriptions are quiet.
+        let barrier = json!([
+            "clock",
+            roots
+                .last()
+                .ok_or_else(|| unavailable("no authorized roots"))?
+        ]);
+        write
+            .write_all(format!("{barrier}\n").as_bytes())
+            .await
+            .map_err(unavailable)?;
+        if setup_response(&mut lines).await?.get("clock").is_none() {
+            return Err(unavailable("missing startup clock response"));
         }
         let (events, _) = broadcast::channel(256);
         let failure = Arc::new(Mutex::new(None));
@@ -250,41 +268,51 @@ impl Backend {
     }
 }
 
-// Normalize only literal spelling differences. Wax owns grammar validation and matching.
-fn compile_glob(pattern: &str) -> std::result::Result<wax::Glob<'static>, wax::BuildError> {
-    let mut expression = String::with_capacity(pattern.len());
-    // None is outside a class; true is its first literal, false is its body.
-    let mut class_first: Option<bool> = None;
-    let mut characters = pattern.chars().peekable();
-    while let Some(character) = characters.next() {
-        if let Some(first) = class_first {
-            if character == ']' && !first {
-                class_first = None;
-            } else {
-                if matches!(character, '[' | ']' | '\\') {
-                    expression.push('\\');
+// Globset owns glob parsing. Its pinned regex representation encodes non-ASCII
+// literals as UTF-8 byte escapes; restore only those literals for Unicode regexes.
+fn compile_glob(pattern: &str) -> Option<regex::Regex> {
+    let glob = GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .backslash_escape(false)
+        .empty_alternates(true)
+        .build()
+        .ok()?;
+    let mut remaining = glob.regex().strip_prefix("(?-u)")?;
+    let mut expression = String::from("(?u)");
+    while !remaining.is_empty() {
+        if let Some(rest) = remaining.strip_prefix("\\\\") {
+            expression.push_str("\\\\");
+            remaining = rest;
+        } else if remaining.starts_with("\\x") {
+            let mut bytes = Vec::new();
+            while remaining.starts_with("\\x") {
+                let byte = u8::from_str_radix(remaining.get(2..4)?, 16).ok()?;
+                if byte.is_ascii() {
+                    return None;
                 }
-                class_first = Some(false);
+                bytes.push(byte);
+                remaining = remaining.get(4..)?;
             }
-        } else if character == '[' {
+            expression.push_str(std::str::from_utf8(&bytes).ok()?);
+        } else {
+            let character = remaining.chars().next()?;
+            if !character.is_ascii() {
+                return None;
+            }
             expression.push(character);
-            if characters.peek() == Some(&'!') {
-                expression.push('!');
-                characters.next();
-            }
-            class_first = Some(true);
-            continue;
-        } else if matches!(character, '$' | '<' | '>' | '(' | ')' | ':' | '\\') {
-            expression.push('\\');
+            remaining = remaining.get(1..)?;
         }
-        expression.push(character);
     }
-    wax::Glob::new(&expression).map(wax::Glob::into_owned)
+    regex::RegexBuilder::new(&expression)
+        .unicode(true)
+        .dot_matches_new_line(true)
+        .build()
+        .ok()
 }
 
 #[derive(Debug)]
 struct Watcher {
-    matcher: wax::Glob<'static>,
+    matcher: regex::Regex,
     absolute: bool,
     kinds: u8,
 }
@@ -330,11 +358,13 @@ impl Registrations {
                             _ => 4,
                         })
                         != 0
-                        && watcher.matcher.is_match(if watcher.absolute {
+                        && (if watcher.absolute {
                             path.as_path()
                         } else {
                             change.name.as_path()
                         })
+                        .to_str()
+                        .is_some_and(|path| watcher.matcher.is_match(path))
                 });
                 if !matches || !seen.insert((path.clone(), change.kind)) {
                     return None;
@@ -411,7 +441,7 @@ impl Registrations {
                             .and_then(|k| u8::try_from(k).ok())
                             .ok_or_else(invalid)?,
                     };
-                    let matcher = compile_glob(pattern).map_err(|_| invalid())?;
+                    let matcher = compile_glob(pattern).ok_or_else(invalid)?;
                     watchers.push(Watcher {
                         matcher,
                         kinds,
