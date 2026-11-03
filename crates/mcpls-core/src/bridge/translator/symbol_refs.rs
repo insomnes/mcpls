@@ -93,7 +93,7 @@ impl Translator {
         &self,
         path: &ClientPath,
         raw: &str,
-    ) -> Result<Position> {
+    ) -> Result<(Position, usize)> {
         let invalid = || {
             rejected(
                 "invalid_symbol_ref",
@@ -123,7 +123,14 @@ impl Translator {
                 "symbol_ref belongs to a different file or runtime context; resolve the target afresh",
             ));
         }
-        let (text, _) = self.symbol_ref_source(path, &mut 0).await?;
+        let mut charge = 0;
+        let (text, canonical) = self.symbol_ref_source(path, &mut charge).await?;
+        if canonical != reference.file {
+            return Err(rejected(
+                "unverifiable_target",
+                "The file target changed during reference validation",
+            ));
+        }
         if format!("{:x}", Sha256::digest(text.as_bytes())) != reference.sha256 {
             return Err(rejected(
                 "stale_target",
@@ -136,7 +143,7 @@ impl Translator {
                 "The target is not an exact UTF-16 position",
             ));
         }
-        Ok(position)
+        Ok((position, charge))
     }
 
     pub(crate) async fn issue_symbol_ref(

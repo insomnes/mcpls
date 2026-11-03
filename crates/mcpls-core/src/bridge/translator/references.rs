@@ -313,7 +313,11 @@ impl Translator {
                 bytes.extend_from_slice(chunk.get(..read).unwrap_or_default());
             }
             let after = file.get_ref().metadata().map_err(|_| Missing::ReadFailed)?;
-            if metadata.len() != after.len() || metadata.modified().ok() != after.modified().ok() {
+            // Preserve the established oversized-file outcome for bounded lookahead.
+            if bytes.len() <= file_bytes
+                && (metadata.len() != after.len()
+                    || metadata.modified().ok() != after.modified().ok())
+            {
                 return Err(Missing::ReadFailed);
             }
             Ok(bytes)

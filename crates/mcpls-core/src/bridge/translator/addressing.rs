@@ -173,6 +173,8 @@ pub struct Addressed<T> {
 /// The position a tool is to run at, and how it was obtained.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTarget {
+    /// Source acquisition bytes charged while validating a reference.
+    pub source_acquisition_bytes: usize,
     /// The 1-based position to query.
     pub position: Position,
     /// The resolved symbol; `None` when the caller gave the position.
@@ -576,8 +578,9 @@ impl Translator {
                         "symbol_ref is not supported by this tool".into(),
                     ));
                 }
-                let position = self.validate_symbol_ref(file_path, &reference).await?;
+                let (position, charge) = self.validate_symbol_ref(file_path, &reference).await?;
                 return Ok(ResolvedTarget {
+                    source_acquisition_bytes: charge,
                     position,
                     resolved: None,
                     positions_degraded: None,
@@ -585,6 +588,7 @@ impl Translator {
             }
             SymbolTarget::Position(position) => {
                 return Ok(ResolvedTarget {
+                    source_acquisition_bytes: 0,
                     position,
                     resolved: None,
                     positions_degraded: None,
@@ -606,6 +610,7 @@ impl Translator {
                 let located = locate_identifier(self, &fetched.ctx, &uri, entry).await;
                 match located {
                     IdentifierPosition::Verified(position, source) => Ok(ResolvedTarget {
+                        source_acquisition_bytes: 0,
                         position: Position::from_server_output(&position),
                         positions_degraded: fetched.ctx.positions_degraded(),
                         resolved: Some(ResolvedSymbol {

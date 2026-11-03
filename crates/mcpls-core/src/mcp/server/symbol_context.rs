@@ -483,7 +483,8 @@ impl McplsServer {
         } else {
             (Err("source_unavailable"), 0)
         };
-        if reference_charge > 0 {
+        let reference_charge = reference_charge.saturating_add(resolved.source_acquisition_bytes);
+        if reference_charge > 0 && params.sections.iter().any(|name| name == "source") {
             let charge = bundle["sections"]["source"]["source_acquisition_bytes"]
                 .as_u64()
                 .unwrap_or(0);

@@ -172,7 +172,9 @@ mcpls processes.
 
 Each complete source observation is bounded to 1 MiB. Issuance performs an
 additional fresh contained disk observation to confirm the source section's
-identity. Existing source accounting and response limits still apply. Read,
+identity. A source section's `source_acquisition_bytes` also includes reference
+validation and issuance reads. Existing source accounting and response limits
+still apply. Read,
 encoding, size, or detected acquisition-race failures prevent trustworthy reuse.
 
 Content identity does not prove analyzer freshness. Validation observes bytes

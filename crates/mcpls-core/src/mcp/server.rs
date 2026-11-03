@@ -980,6 +980,19 @@ impl McplsServer {
         dispatch::shape_workspace_schemas(&mut router);
         diagnostics_batch::shape_schema(&mut router);
         symbol_context::shape_schema(&mut router);
+        // Navigation wires are shared; only the supported consumers advertise references.
+        for route in router.map.values_mut() {
+            let tool = &mut route.attr;
+            if !matches!(
+                tool.name.as_ref(),
+                "get_hover" | "get_definition" | "get_references" | "get_symbol_context"
+            ) && let Some(properties) = Arc::make_mut(&mut tool.input_schema)
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                properties.remove("symbol_ref");
+            }
+        }
         router
     }
 
@@ -9305,6 +9318,10 @@ sleep 0.3
 
     /// Reusable targets reject changed tracked source before any semantic request.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one public MCP workflow covers reuse, staleness, and restoration with the same fixture"
+    )]
     async fn symbol_ref_roundtrip_and_stale_source_over_mcp() {
         use crate::test_lsp::{read_framed_message, write_response};
         let mut fixture = support_fixture(
@@ -9373,10 +9390,27 @@ sleep 0.3
                 }),
             )
             .await;
-            assert_eq!(
-                response["result"]["structuredContent"], explicit["result"]["structuredContent"],
-                "{name}"
-            );
+            let mut reused = response["result"]["structuredContent"].clone();
+            let mut expected = explicit["result"]["structuredContent"].clone();
+            if name == "get_symbol_context" {
+                assert_eq!(
+                    reused["sections"]["source"]["source_acquisition_bytes"],
+                    original.len() * 3
+                );
+                assert_eq!(
+                    expected["sections"]["source"]["source_acquisition_bytes"],
+                    original.len() * 2
+                );
+                reused["sections"]["source"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source_acquisition_bytes");
+                expected["sections"]["source"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source_acquisition_bytes");
+            }
+            assert_eq!(reused, expected, "{name}");
         }
         std::fs::write(&fixture.file, original.replace("main", "away")).unwrap();
         for name in [
