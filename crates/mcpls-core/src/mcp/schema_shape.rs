@@ -1242,7 +1242,11 @@ mod tests {
                         | "go_to_implementation"
                         | "go_to_type_definition"
                         | "go_to_declaration"
-                ) || schema_index == 0 && before.name == "get_symbol_context"
+                ) || schema_index == 0
+                    && matches!(
+                        before.name.as_ref(),
+                        "get_symbol_context" | "get_references"
+                    )
                     || schema_index == 1
                         && matches!(
                             before.name.as_ref(),
