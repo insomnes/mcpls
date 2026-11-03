@@ -9933,7 +9933,7 @@
             {
               "properties": {
                 "coalesced": {
-                  "description": "Another restart of this server finished while the request waited, so none was repeated.",
+                  "description": "Another restart of this server finished during the wait, so none was repeated.",
                   "type": "boolean"
                 },
                 "indexing_state": {

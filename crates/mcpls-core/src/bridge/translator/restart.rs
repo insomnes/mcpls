@@ -275,7 +275,7 @@ impl RestartFailure {
 pub enum RestartOutcome {
     /// The server runs a freshly initialized process.
     Restarted {
-        /// Another restart of this server finished while the request waited, so none was repeated.
+        /// Another restart of this server finished during the wait, so none was repeated.
         coalesced: bool,
         /// Indexing readiness of the new process.
         indexing_state: IndexingState,
