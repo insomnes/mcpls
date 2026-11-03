@@ -191,6 +191,10 @@ impl McplsServer {
         ))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "input validation must precede workspace acquisition and demand"
+    )]
     pub(super) async fn dispatch_single_tool(
         &self,
         mut request: CallToolRequestParams,
@@ -212,6 +216,9 @@ impl McplsServer {
                 | "get_tool_support"
         );
         let arguments = request.arguments.get_or_insert_default();
+        if name == "diagnostics_delta" {
+            super::diagnostics_delta::validate(&Value::Object(arguments.clone()))?;
+        }
         let workspace = if scoped {
             selector(arguments, "workspace_path")?
         } else {
@@ -316,10 +323,15 @@ impl McplsServer {
             .validate(resident)
             .await
             .map_err(DispatchError::wire)?;
-        let local_only = request
-            .arguments
-            .as_ref()
-            .is_some_and(|arguments| arguments.contains_key("item"))
+        let local_only = name == "diagnostics_delta"
+            && request
+                .arguments
+                .as_ref()
+                .is_some_and(|args| args.get("mode").is_some_and(|v| v == "cached"))
+            || request
+                .arguments
+                .as_ref()
+                .is_some_and(|arguments| arguments.contains_key("item"))
             || matches!(
                 name.as_str(),
                 "get_server_logs"
@@ -643,14 +655,16 @@ impl McplsServer {
             return Ok(server.clone());
         }
         let dispatcher = self.require_dispatcher()?;
-        let server = Arc::new(
-            lease
-                .resident
-                .server(dispatcher)
-                .await
-                .map_err(DispatchError::wire)?
-                .with_stop(self.stop.clone()),
-        );
+        let mut server = lease
+            .resident
+            .server(dispatcher)
+            .await
+            .map_err(DispatchError::wire)?
+            .with_stop(self.stop.clone());
+        server
+            .diagnostics_generation
+            .clone_from(&lease.resident.generation);
+        let server = Arc::new(server);
         sessions.insert(lease.resident.generation.clone(), server.clone());
         drop(sessions);
         Ok(server)

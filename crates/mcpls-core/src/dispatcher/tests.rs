@@ -2122,3 +2122,134 @@ async fn watching_root_json_is_validated_before_backend_launch() {
         task.await.unwrap();
     }
 }
+
+/// Caller-held observations round-trip and report exact changed memberships.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one external protocol session checks baseline continuity and cache-only side effects"
+)]
+async fn diagnostics_delta_round_trip_and_cached_no_sync() {
+    let fixture = Fixture::new(4);
+    std::fs::write(fixture.main.join(".diagnostics.json"), json!([{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"message":"old problem","severity":1,"source":"fixture","code":"A"}]).to_string()).unwrap();
+    let full_items: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture.main.join(".diagnostics.json")).unwrap(),
+    )
+    .unwrap();
+    let report_path = fixture.main.join(".diagnostics-report.json");
+    std::fs::write(
+        &report_path,
+        json!({"kind":"full","resultId":"r1","items":full_items}).to_string(),
+    )
+    .unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let path = fixture.main.join("file.py");
+    for args in [
+        json!({"file_path":path,"action":"compare"}),
+        json!({"file_path":path,"action":"capture","mode":null}),
+        json!({"file_path":path,"action":"capture","extra":1}),
+    ] {
+        assert!(call(&client, "diagnostics_delta", args).await.is_err());
+    }
+    assert!(
+        fixture.events().is_empty(),
+        "rejected requests started an LSP"
+    );
+    assert!(
+        call(
+            &client,
+            "diagnostics_delta",
+            json!({"file_path":path,"action":"capture","mode":"cached"})
+        )
+        .await
+        .is_err()
+    );
+    assert!(fixture.events().is_empty(), "cached capture started an LSP");
+    let first = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"capture"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["status"], "baseline_captured");
+    let baseline = first["baseline"].clone();
+    let same = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"compare","baseline":baseline}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(same["remaining"], json!([0]));
+    assert_eq!(same["added"], json!([]));
+    assert_eq!(same["comparison_complete"], true);
+    std::fs::write(
+        &report_path,
+        json!({"kind":"unchanged","resultId":"r1"}).to_string(),
+    )
+    .unwrap();
+    let unchanged = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"compare","baseline":baseline}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged["remaining"], json!([0]));
+    assert_eq!(unchanged["comparison_complete"], true);
+    assert_eq!(unchanged["report"]["pull_kind"], "unchanged");
+    std::fs::write(
+        &report_path,
+        json!({"kind":"unchanged","resultId":"unrelated"}).to_string(),
+    )
+    .unwrap();
+    let missing = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"compare","baseline":baseline}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(missing["comparison_complete"], false);
+    assert_eq!(missing["resolved"], json!([]));
+    assert!(
+        missing["report"]["uncertainties"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("unchanged_without_report"))
+    );
+    std::fs::remove_file(&report_path).unwrap();
+    let before = fixture.events();
+    std::fs::write(&path, "x = 2\n").unwrap();
+    let cached = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"compare","mode":"cached","baseline":baseline}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(cached["remaining"], json!([0]));
+    assert_eq!(cached["report"]["source_freshness"], "unknown");
+    assert_eq!(
+        fixture.events().len(),
+        before.len(),
+        "cached read synchronized or pulled"
+    );
+    let changed = json!([{"range":{"start":{"line":10,"character":0},"end":{"line":10,"character":1}},"message":"new problem","severity":2,"source":"fixture","code":"B"}]);
+    std::fs::write(fixture.main.join(".diagnostics.json"), changed.to_string()).unwrap();
+    let delta = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"compare","baseline":baseline}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(delta["resolved"], json!([0]));
+    assert_eq!(delta["added"].as_array().unwrap().len(), 1);
+    assert_eq!(delta["added"][0]["source"], "fixture");
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}

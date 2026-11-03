@@ -677,6 +677,7 @@ fn test_keys_differing_in_drive_letter_case_name_one_slot() {
 #[test]
 fn test_change_outcome_distinguishes_absent_from_empty() {
     let empty = DiagnosticInfo {
+        evidence: crate::bridge::notifications::DiagnosticEvidence::default(),
         uri: file(),
         version: None,
         diagnostics: vec![],
@@ -810,6 +811,7 @@ fn test_merge_at_the_entry_cap_does_not_compare_every_pair() {
 #[test]
 fn test_unserializable_diagnostics_read_as_a_change() {
     let info = DiagnosticInfo {
+        evidence: crate::bridge::notifications::DiagnosticEvidence::default(),
         uri: file(),
         version: None,
         diagnostics: vec![error(1, "a")],
@@ -828,6 +830,7 @@ fn test_unserializable_diagnostics_read_as_a_change() {
 #[test]
 fn test_change_outcome_ignores_the_order_of_equal_ranges() {
     let info = |items: Vec<LspDiagnostic>| DiagnosticInfo {
+        evidence: crate::bridge::notifications::DiagnosticEvidence::default(),
         uri: file(),
         version: None,
         diagnostics: items,

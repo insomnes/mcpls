@@ -4,6 +4,7 @@
 //! as MCP tools using the rmcp SDK.
 
 mod diagnostics_batch;
+mod diagnostics_delta;
 mod dispatch;
 mod symbol_context;
 
@@ -321,6 +322,7 @@ struct WorkspaceStatusParams {
 ///
 /// MCP server with isolated session subscriptions and optional worktree dispatch.
 pub struct McplsServer {
+    diagnostics_generation: String,
     dispatcher: Option<Arc<crate::dispatcher::Dispatcher>>,
     workspace_sessions: Mutex<std::collections::HashMap<String, Arc<Self>>>,
     hierarchy_contexts: HierarchyContexts,
@@ -715,6 +717,7 @@ impl McplsServer {
             mcp,
         ));
         Self {
+            diagnostics_generation: crate::dispatcher::opaque(),
             dispatcher: None,
             workspace_sessions: Mutex::new(std::collections::HashMap::new()),
             hierarchy_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -940,6 +943,7 @@ impl McplsServer {
             mcp: self.context.mcp.clone(),
         });
         Self {
+            diagnostics_generation: self.diagnostics_generation.clone(),
             dispatcher: self.dispatcher.clone(),
             workspace_sessions: Mutex::new(std::collections::HashMap::new()),
             hierarchy_contexts: self.hierarchy_contexts.clone(),
@@ -979,6 +983,7 @@ impl McplsServer {
         }
         dispatch::shape_workspace_schemas(&mut router);
         diagnostics_batch::shape_schema(&mut router);
+        diagnostics_delta::shape_schema(&mut router);
         symbol_context::shape_schema(&mut router);
         // Navigation wires are shared; only the supported consumers advertise references.
         for route in router.map.values_mut() {
@@ -1213,6 +1218,26 @@ impl McplsServer {
             origin: answer.origin,
             signals,
         }))
+    }
+
+    /// Capture or compare a bounded caller-held diagnostic observation.
+    #[tool(
+        description = "Capture or compare exact diagnostic occurrences for one file. Reuse the returned baseline verbatim. mode:refresh synchronizes and pulls; cached observes resident cache only. Resolved indices mean absent from a complete comparable report, never proof of a source fix. Incomplete evidence retains matches and uncertain_removed. Baselines expire on runtime/server identity changes. Source freshness is always unknown.",
+        title = "Diagnostics Delta"
+    )]
+    async fn diagnostics_delta(
+        &self,
+        Parameters(input): Parameters<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+        self.diagnostic_delta(serde_json::Value::Object(input))
+            .await
+            .and_then(|value| {
+                value
+                    .as_object()
+                    .cloned()
+                    .map(Json)
+                    .ok_or_else(|| McpError::internal_error("invalid delta output", None))
+            })
     }
 
     /// Rename a symbol across the workspace.
@@ -6070,6 +6095,7 @@ sleep 0.3
             ("get_definition", true, false, true),
             ("get_references", true, false, true),
             ("get_diagnostics", true, false, true),
+            ("diagnostics_delta", true, false, true),
             ("rename_symbol", true, false, true),
             ("get_completions", true, false, true),
             ("get_document_symbols", true, false, true),
@@ -6230,6 +6256,7 @@ sleep 0.3
         let uri: lsp_types::Uri =
             lsp_types::Uri::from(Url::parse("file:///sample.rs").unwrap().as_str());
         DiagnosticInfo {
+            evidence: crate::bridge::DiagnosticEvidence::default(),
             uri,
             version: Some(DocumentVersion::FIRST),
             diagnostics,
@@ -6922,9 +6949,9 @@ sleep 0.3
                 assert_eq!(
                     tools.len(),
                     if profile == ToolProfile::Agent {
-                        28
+                        29
                     } else {
-                        31
+                        32
                     }
                 );
                 let supported = tools_call_over_the_wire(
@@ -6996,7 +7023,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 28);
+            assert_eq!(tools.len(), 29);
             assert!(
                 !tools
                     .iter()
@@ -7010,7 +7037,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 28);
+            assert_eq!(tools.len(), 29);
             assert!(
                 !tools
                     .iter()
@@ -8601,6 +8628,15 @@ sleep 0.3
                 }))
                 .await
                 .map(|_| ()),
+            McpTool::DiagnosticsDelta => server
+                .diagnostics_delta(Parameters(
+                    serde_json::json!({"file_path":file_path,"action":"capture"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ))
+                .await
+                .map(|_| ()),
             McpTool::RenameSymbol => server
                 .rename_symbol(Parameters(RenameParams {
                     full: true,
@@ -8866,7 +8902,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 28);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 29);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

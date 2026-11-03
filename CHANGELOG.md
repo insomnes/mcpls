@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `diagnostics_delta` captures bounded caller-held baselines and compares exact diagnostic occurrences. Complete comparable reports qualify removed baseline indices; incomplete evidence reports uncertain removals. Cached mode does not start analysis. Baselines invalidate across runtime or diagnostics-server replacement, and source freshness remains unknown. The agent and full catalogs now expose 29 and 32 tools.
+
 - Opt-in Linux Watchman file watching supports standard LSP dynamic registrations, shared workspace coverage, operator-managed native exclusions, and explicit backend failure reporting. Watching remains disabled by default.
 
 - Optional `dispatcher.auto_workspaces` parent policies create shared temporary language-server contexts from absolute file requests. Ancestor markers select roots, markerless files can start their configured server, and automatic status snapshots report `temporary` without retaining unused contexts. Explicit approvals retain priority and existing profile semantics.

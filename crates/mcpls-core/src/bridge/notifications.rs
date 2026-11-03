@@ -463,6 +463,7 @@ struct CachedEntry {
     /// Position in `owner`'s write order.
     seq: u64,
     origin: Origin,
+    evidence: DiagnosticEvidence,
 }
 
 impl CachedEntry {
@@ -472,6 +473,7 @@ impl CachedEntry {
             uri: self.uri.clone(),
             version: self.origin.version(),
             diagnostics: self.diagnostics.clone(),
+            evidence: self.evidence.clone(),
         }
     }
 
@@ -716,12 +718,30 @@ pub fn message_as_str(message: &lsp_types::Message) -> &str {
 /// Information about diagnostics for a document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticInfo {
+    /// Retained report continuity and known cache loss; not a source freshness claim.
+    #[serde(skip)]
+    pub(crate) evidence: DiagnosticEvidence,
     /// URI of the document.
     pub uri: Uri,
     /// Document version when diagnostics were received.
     pub version: Option<DocumentVersion>,
     /// List of diagnostics.
     pub diagnostics: Vec<LspDiagnostic>,
+}
+
+/// Internal evidence retained with each bounded report.
+#[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "internal evidence is shared across bridge and MCP modules only"
+)]
+pub(crate) struct DiagnosticEvidence {
+    pub(crate) result_id: Option<String>,
+    pub(crate) metadata_omitted: bool,
+    pub(crate) truncated: bool,
+    pub(crate) omitted: Option<usize>,
+    pub(crate) origins: Vec<&'static str>,
+    pub(crate) report_version: Option<DocumentVersion>,
 }
 
 /// How an entry of a [`DiagnosticSources`] snapshot arrived.
@@ -779,8 +799,10 @@ impl DiagnosticSources {
         diagnostics: BoundedDiagnostics,
     ) -> Self {
         self.entries.retain(|entry| !entry.origin.is_pulled());
+        let evidence = diagnostics.evidence.clone();
         self.entries.push(SourceEntry {
             info: DiagnosticInfo {
+                evidence,
                 uri: file.clone(),
                 version,
                 diagnostics: diagnostics.into_vec(),
@@ -821,12 +843,63 @@ impl DiagnosticSources {
         self.merge_for_context(false)
     }
 
+    fn evidence(&self) -> DiagnosticEvidence {
+        let mut evidence = DiagnosticEvidence {
+            omitted: Some(0),
+            ..Default::default()
+        };
+        let versions: Vec<_> = self
+            .entries
+            .iter()
+            .map(|e| {
+                if e.origin.is_pulled() {
+                    None
+                } else {
+                    e.info.version
+                }
+            })
+            .collect();
+        evidence.report_version = versions
+            .first()
+            .copied()
+            .flatten()
+            .filter(|v| versions.iter().all(|x| *x == Some(*v)));
+        for origin in ["pull", "push"] {
+            if self
+                .entries
+                .iter()
+                .any(|e| e.origin.is_pulled() == (origin == "pull"))
+            {
+                evidence.origins.push(origin);
+            }
+        }
+        for entry in &self.entries {
+            evidence.truncated |= entry.info.evidence.truncated;
+            evidence.metadata_omitted |= entry.info.evidence.metadata_omitted;
+            evidence.omitted = evidence
+                .omitted
+                .zip(entry.info.evidence.omitted)
+                .map(|(a, b)| a.saturating_add(b));
+            if entry.origin.is_pulled() {
+                evidence
+                    .result_id
+                    .clone_from(&entry.info.evidence.result_id);
+            }
+        }
+        evidence
+    }
+
     /// Preserve source order for a context bundle; standalone diagnostics keep range order.
     pub(crate) fn merge_for_context(self, bundle: bool) -> Option<DiagnosticInfo> {
+        let mut evidence = self.evidence();
         let Self { requested, entries } = self;
         let has_pulled = entries.iter().any(|entry| entry.origin.is_pulled());
         if entries.len() <= 1 && !has_pulled {
-            return entries.into_iter().next().map(|entry| entry.info);
+            return entries.into_iter().next().map(|entry| {
+                let mut info = entry.info;
+                info.evidence = evidence;
+                info
+            });
         }
         let version = entries
             .iter()
@@ -878,9 +951,15 @@ impl DiagnosticSources {
         if !bundle {
             merged.sort_by_key(|d| (point(d.range.start), point(d.range.end)));
         }
+        let before_cap = merged.clone();
         cap_diagnostics_entry_size(&requested, &mut merged);
+        if before_cap != merged {
+            evidence.truncated = true;
+            evidence.omitted = None;
+        }
 
         Some(DiagnosticInfo {
+            evidence,
             uri: requested,
             version,
             diagnostics: merged,
@@ -1407,6 +1486,7 @@ impl NotificationCache {
                 .then(|| self.oldest_alias_source(&canonical_key))
                 .flatten();
             let Some(oldest_alias) = alias_to_evict else {
+                self.mark_delta_source_loss(&canonical_key);
                 debug!(
                     "dropping diagnostics for {}: {MAX_SOURCES_PER_FILE} published URIs already cached for {}",
                     published.source().as_ref(),
@@ -1417,8 +1497,10 @@ impl NotificationCache {
                 };
             };
             self.evict_entry(&oldest_alias);
+            self.mark_delta_source_loss(&canonical_key);
         }
 
+        let evidence = diagnostics.evidence.clone();
         let diagnostics = diagnostics.into_vec();
 
         self.drop_superseded_pull(&canonical_key, published.canonical(), version);
@@ -1449,6 +1531,7 @@ impl NotificationCache {
             source_key,
             CachedEntry {
                 uri: published.source().clone(),
+                evidence,
                 diagnostics,
                 owner: server_id.clone(),
                 seq,
@@ -1684,6 +1767,7 @@ impl NotificationCache {
             slot_key,
             CachedEntry {
                 uri: file.clone(),
+                evidence: items.evidence.clone(),
                 diagnostics: items.into_vec(),
                 owner: server_id.clone(),
                 seq,
@@ -1962,6 +2046,15 @@ impl NotificationCache {
     ///
     /// A clean entry is remembered only when it was the file's last one: while
     /// other slots of the file remain, they answer reads.
+    fn mark_delta_source_loss(&mut self, file: &DiagnosticsKey) {
+        for key in self.source_keys(file) {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.evidence.truncated = true;
+                entry.evidence.omitted = None;
+            }
+        }
+    }
+
     fn evict_for_capacity(&mut self, key: &SlotKey) -> Option<DiagnosticsKey> {
         let entry = self.entries.get(key)?;
         let file = entry.file(key).clone();
@@ -1972,6 +2065,9 @@ impl NotificationCache {
             EvictedContent::Lost
         };
         self.evict_entry(key);
+        if content == EvictedContent::Lost {
+            self.mark_delta_source_loss(&file);
+        }
         if content == EvictedContent::Lost || !self.files.contains_key(&file) {
             self.eviction_marks.record(file.clone(), owner, content);
         }

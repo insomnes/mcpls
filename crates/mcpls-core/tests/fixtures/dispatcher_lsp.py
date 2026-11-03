@@ -63,6 +63,8 @@ while True:
                     "message": "problem " + (root / "marker").read_text(), "severity": 1}]}
         if (root / ".diagnostics.json").exists():
             result["items"] = json.loads((root / ".diagnostics.json").read_text())
+        if (root / ".diagnostics-report.json").exists():
+            result = json.loads((root / ".diagnostics-report.json").read_text())
     elif method == "textDocument/hover":
         event("hover")
         wait_for_release(root / ".hold-response")

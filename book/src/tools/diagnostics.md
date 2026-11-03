@@ -146,3 +146,78 @@ It is a compact way to see the shape of a large file.
 ## What's Next
 
 Continue with [Refactoring](refactoring.md) to turn what you found into changes.
+
+## diagnostics_delta
+
+Capture one file's normalized merged diagnostics, then compare the returned
+caller-held baseline with another observation. Both tool profiles expose this tool.
+
+```json
+{"file_path":"/work/app/src/main.rs","action":"capture","mode":"refresh"}
+```
+
+The response has `status: "baseline_captured"`, `baseline`, and `truncated`.
+Pass the entire returned `baseline` object unchanged to compare:
+
+```javascript
+const captured = await callTool("diagnostics_delta", {
+  file_path: "/work/app/src/main.rs", action: "capture"
+});
+const delta = await callTool("diagnostics_delta", {
+  file_path: "/work/app/src/main.rs", action: "compare",
+  baseline: captured.baseline
+});
+```
+
+`mode` defaults to `refresh`, which synchronizes the document and uses the same
+pull/probe and push-merge policy as `get_diagnostics`. `cached` reads resident
+observations without starting a language server, synchronizing, or pulling.
+An unstarted route returns an ordinary unavailable or initializing error.
+
+Matching uses exact normalized range, severity, code, message, and source.
+Positions are 1-based UTF-16 coordinates. Changed messages or shifted ranges
+produce unmatched old and new observations. Each current occurrence consumes
+the lowest unmatched equal baseline index. Existing push/pull deduplication
+still determines the visible population; delta does not restore discarded items.
+
+`added` contains unmatched current diagnostics. `remaining`, `resolved`, and
+`uncertain_removed` contain ascending, zero-based baseline indices. For example,
+a baseline `[A, B]` followed by `[B, C]` gives `remaining: [1]`, `resolved: [0]`,
+and `added: [C]` when both observations are complete. With incomplete evidence,
+`resolved` is empty and `[0]` appears in `uncertain_removed` instead. With an
+incomplete baseline, `added` only means absent from its retained items.
+
+`comparison_complete` requires complete published observations without indexing,
+degradation, position uncertainty, or loss. `status` is `compared` when complete,
+otherwise `incomplete`. `resolved` means absent from comparable observed reports.
+It does not prove that the source is fixed or the program compiles.
+
+The report exposes availability, origin, pull kind, result ID, tracked sync
+version, server-supplied report version, cached origins, completeness, uncertainty
+reasons, and omitted diagnostic count. `source_freshness` is always `unknown`.
+An unchanged pull reuses retained full materialization only with matching report
+continuity. A result ID or local sync version does not prove analysis completion.
+A delayed push can continue to expose the previous report after a source edit.
+Missing or mixed report versions remain null.
+
+Baselines have no TTL or server-side storage. Canonical file/workspace identity,
+runtime generation, server ID, and server incarnation must match. Server or
+runtime replacement invalidates them. A well-formed mismatch returns only
+`status: "incompatible_baseline"` and its reason: `schema_mismatch`,
+`file_mismatch`, `workspace_mismatch`, `runtime_mismatch`, `server_mismatch`, or
+`server_restarted`, in that precedence. Concurrent invalidation can return an
+ordinary typed runtime error. Capture again to advance the baseline.
+
+Paths are absolute and at most 4096 UTF-8 bytes. Baselines contain at most 256
+diagnostics and 65536 compact JSON UTF-8 bytes. Each diagnostic is at most 8192
+bytes; whole responses are at most 131072 bytes. Output limits omit whole
+items, retain later fitting items, and set `truncated: true` with incomplete
+evidence. Known upstream loss also sets truncation. `omitted_diagnostics` is
+exact when known, otherwise null. Result IDs longer than 1024 bytes, or changed
+by secret redaction, are omitted and cannot establish continuity.
+
+Malformed envelopes, unknown fields, explicit optional nulls, malformed nested
+records, invalid positions, and oversized baselines return JSON-RPC `-32602`
+before starting or querying a language server. Existing path authorization,
+unsupported-language, startup, cancellation, and no-observation pull errors remain
+ordinary MCP errors. Caller-held baselines are unauthenticated evidence.

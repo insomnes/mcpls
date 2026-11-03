@@ -113,6 +113,7 @@ pub(super) fn lsp_diag(
 
 pub(super) fn diag_info(diagnostics: Vec<lsp_types::Diagnostic>) -> DiagnosticInfo {
     DiagnosticInfo {
+        evidence: crate::bridge::notifications::DiagnosticEvidence::default(),
         uri: lsp_types::Uri::from("file:///test.rs"),
         version: Some(crate::bridge::DocumentVersion::FIRST),
         diagnostics,

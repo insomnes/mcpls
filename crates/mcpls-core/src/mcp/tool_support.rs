@@ -42,6 +42,7 @@ pub(super) enum McpTool {
     GetDefinition,
     GetReferences,
     GetDiagnostics,
+    DiagnosticsDelta,
     RenameSymbol,
     GetCompletions,
     GetDocumentSymbols,
@@ -72,12 +73,13 @@ pub(super) enum McpTool {
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 31] = [
+    pub(super) const ALL: [Self; 32] = [
         Self::GetSymbolContext,
         Self::GetHover,
         Self::GetDefinition,
         Self::GetReferences,
         Self::GetDiagnostics,
+        Self::DiagnosticsDelta,
         Self::RenameSymbol,
         Self::GetCompletions,
         Self::GetDocumentSymbols,
@@ -142,6 +144,7 @@ impl McpTool {
             Self::GetDefinition => ("get_definition", Document(ToolKind::Definition)),
             Self::GetReferences => ("get_references", Document(ToolKind::References)),
             Self::GetDiagnostics => ("get_diagnostics", Document(ToolKind::Diagnostics)),
+            Self::DiagnosticsDelta => ("diagnostics_delta", Document(ToolKind::Diagnostics)),
             Self::RenameSymbol => ("rename_symbol", Document(ToolKind::Rename)),
             Self::GetCompletions => ("get_completions", Document(ToolKind::Completions)),
             Self::GetDocumentSymbols => {

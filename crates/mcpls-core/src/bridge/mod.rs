@@ -25,6 +25,8 @@ pub(crate) use indexing::{
     DEFAULT_INDEXING_READY_TIMEOUT_SECS, INDEXING_STALENESS_BOUND, IndexingReset, PROGRESS_SETTLE,
 };
 pub use indexing::{IndexingPolicy, IndexingState};
+#[cfg(test)]
+pub(crate) use notifications::DiagnosticEvidence;
 pub(crate) use notifications::{
     BoundedDiagnostics, DiagnosticsKey, MAX_DIAGNOSTIC_ENTRIES, PushWrite, diagnostics_cache_key,
     on_lifecycle,
