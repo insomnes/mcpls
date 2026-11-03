@@ -314,6 +314,7 @@ impl std::ops::Deref for VettedInitConfig {
 /// [`LspServerConfig`] this was built from.
 #[derive(Debug, Clone)]
 pub struct ServerInitConfig {
+    pub(crate) watching: Option<Arc<super::watching::Backend>>,
     server_config: LspServerConfig,
     workspace_roots: WorkspaceRoots,
     position_encodings: PositionEncodings,
@@ -372,6 +373,7 @@ impl ServerInitConfig {
     ) -> Self {
         Self {
             server_config,
+            watching: None,
             workspace_roots,
             position_encodings,
             redactions,
@@ -685,6 +687,14 @@ pub fn child_env_var(
 }
 
 impl LspServer {
+    pub(crate) fn watching_error(&self) -> Option<String> {
+        self.init_config
+            .watching
+            .as_ref()
+            .and_then(|backend| backend.check().err())
+            .map(|error| error.to_string())
+    }
+
     pub(crate) fn dispatcher_connection(&self) -> String {
         format!("{:?}", self.client.connection_id())
     }
@@ -745,6 +755,10 @@ impl LspServer {
         result
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "spawn retains child ownership through all initialization error paths"
+    )]
     async fn spawn_admitted(config: ServerInitConfig) -> Result<SpawnedServer> {
         // Repeated on purpose: a workspace file can become executable between plan and spawn (#736).
         config.vet_arguments_off_runtime().await?;
@@ -801,7 +815,11 @@ impl LspServer {
             .ok_or(Error::StdioCapture(StdioStream::Stderr))?;
         let stderr_capture = StderrCapture::start(stderr);
 
-        let transport = LspTransport::with_redactions(stdin, stdout, Arc::clone(&redactions));
+        let mut transport = LspTransport::with_redactions(stdin, stdout, Arc::clone(&redactions));
+        if let Some(backend) = &config.watching {
+            backend.check()?;
+            transport.0.watching = Some(super::watching::Registrations::new(backend.clone()));
+        }
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (notification_sink, publish_rx) = NotificationSink::new(notification_tx);
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_CAPACITY);
@@ -1123,6 +1141,21 @@ impl LspServer {
         }
     }
 
+    fn configured_capabilities(config: &ServerInitConfig) -> Result<ClientCapabilities> {
+        let mut capabilities = Self::client_capabilities(
+            &config.position_encodings,
+            config.server_config.settings.as_ref(),
+        );
+        if config.watching.is_some()
+            && let Some(workspace) = capabilities.workspace.as_mut()
+        {
+            workspace.did_change_watched_files = Some(serde_json::from_value(
+                serde_json::json!({"dynamicRegistration":true,"relativePatternSupport":false}),
+            )?);
+        }
+        Ok(capabilities)
+    }
+
     /// Perform LSP initialization handshake.
     ///
     /// Sends initialize request and waits for response, then sends the
@@ -1183,10 +1216,7 @@ impl LspServer {
                 None
             },
             initialization_options: config.server_config().initialization_options.clone(),
-            capabilities: Self::client_capabilities(
-                &config.position_encodings,
-                config.server_config.settings.as_ref(),
-            ),
+            capabilities: Self::configured_capabilities(config)?,
             client_info: Some(ClientInfo {
                 name: "mcpls".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),

@@ -358,6 +358,13 @@ impl Translator {
         self.rebind_router_to_settled();
     }
 
+    pub(crate) fn watching_error(&self, id: &ServerId) -> Option<String> {
+        lock_std(&self.servers)
+            .running_servers()
+            .find(|(server_id, _)| *server_id == id)
+            .and_then(|(_, server)| server.watching_error())
+    }
+
     pub(crate) fn dispatcher_server(&self, id: &ServerId) -> Option<(bool, String)> {
         let mut slots = lock_std(&self.servers);
         slots.server_mut(id).map(|server| {

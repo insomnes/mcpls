@@ -2504,6 +2504,7 @@ mod tests {
             dispatcher: None,
             mcp: crate::config::McpConfig::default(),
             workspace: WorkspaceConfig {
+                file_watching: crate::config::FileWatchingConfig::default(),
                 roots: vec![crate::config::ConfiguredRoot::new("/tmp/test-workspace").unwrap()],
                 position_encodings: PositionEncodings::DEFAULT,
                 language_extensions: language_extensions.clone(),

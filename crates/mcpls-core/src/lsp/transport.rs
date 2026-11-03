@@ -53,6 +53,7 @@ const MAX_HEADERS: usize = 100;
 /// inside a `tokio::select!` alongside outbound sends -- see
 /// [`LspTransportReader`] for why.
 pub struct LspTransport {
+    pub(crate) watching: Option<super::watching::Registrations>,
     stdin: Box<dyn AsyncWrite + Unpin + Send>,
     redactions: Arc<Redactions>,
 }
@@ -132,6 +133,7 @@ impl LspTransport {
         (
             Self {
                 stdin: Box::new(stdin),
+                watching: None,
                 redactions: Arc::clone(&redactions),
             },
             LspTransportReader {

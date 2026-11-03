@@ -41,6 +41,32 @@ Array of strings. Default `[]`, meaning the process working directory.
 
 Directories the servers analyze. Each must exist and is canonicalized before any server starts. An empty string is rejected. A relative root resolves against the directory of the config file when the file was named explicitly (`--config`, `MCPLS_CONFIG`, or a trusted project-local file), and against the process working directory when the file came from the user config directory. A file path is also accepted under a root-level system symlink spelling of a root (for example `/tmp/proj` for a root at `/private/tmp/proj` on macOS); links deeper in the tree are not admitted.
 
+### `[workspace.file_watching]`
+
+Client file watching is disabled by default. Enable the Linux Watchman backend in each workspace profile:
+
+```toml
+[workspace.file_watching]
+backend = "watchman" # "disabled" or "watchman"
+command = "watchman" # executable name or absolute path; never shell text
+```
+
+Install Watchman separately and use a stable executable path. Unknown backends and empty commands are rejected. Existing workspace trust rules apply to executable selection. Disabled mode starts no backend and preserves server-managed watching and request-time document synchronization.
+
+Manage exclusions in each authorized root's `.watchmanconfig`:
+
+```json
+{"ignore_dirs":[".agnt-tsks"]}
+```
+
+`ignore_dirs` uses Watchman's root-relative directory semantics. On Linux local filesystems, excluded trees consume no parent-owned native watches. mcpls never modifies this file. An independently authorized child worktree can use its own root and exclusions. `WATCHMAN_CONFIG_FILE` selects global settings and cannot replace root exclusions.
+
+Each workspace runtime owns a private, ephemeral Watchman daemon shared by its language servers and HTTP sessions. mcpls supports standard string glob registrations and WatchKind masks. RelativePattern objects are unsupported. Native watching does not follow directory symlinks outside authorized roots.
+
+Enabled startup fails explicitly if Watchman is missing, its root configuration is malformed, or the platform is unsupported. Backend disconnect, cancellation, overflow, or a fresh instance after baseline makes affected LSP requests unavailable. Other workspace runtimes remain independent. No polling or native fallback is used. Restart the workspace runtime or mcpls service after restoring the backend. Restart also applies configuration and exclusion changes. To roll back, set `backend = "disabled"` and restart.
+
+Filesystem notifications describe delivered changes, not completed language-server analysis. Indexing can finish later. Request-time `didOpen` and `didChange` synchronization remains active.
+
 ### `position_encodings`
 
 Array of `"utf-8"`, `"utf-16"`, `"utf-32"`. Default `["utf-8", "utf-16"]`.

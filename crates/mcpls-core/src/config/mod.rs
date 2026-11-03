@@ -351,10 +351,61 @@ impl InvalidToolPrefix {
     }
 }
 
+/// Client-side filesystem watching configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileWatchingConfig {
+    /// Backend selection; disabled by default.
+    #[serde(default)]
+    pub backend: FileWatchingBackend,
+    /// Executable name or path, never shell text.
+    #[serde(default = "watchman_command", deserialize_with = "watchman_executable")]
+    pub command: String,
+}
+
+impl Default for FileWatchingConfig {
+    fn default() -> Self {
+        Self {
+            backend: FileWatchingBackend::Disabled,
+            command: watchman_command(),
+        }
+    }
+}
+
+fn watchman_executable<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let command = String::deserialize(deserializer)?;
+    if command.trim().is_empty() || command.contains('\0') {
+        return Err(serde::de::Error::custom(
+            "file watching command must be a nonempty executable",
+        ));
+    }
+    Ok(command)
+}
+
+fn watchman_command() -> String {
+    "watchman".to_owned()
+}
+
+/// Available filesystem watching backends.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileWatchingBackend {
+    /// Preserve server-managed watching.
+    #[default]
+    Disabled,
+    /// Use a private Linux Watchman daemon.
+    Watchman,
+}
+
 /// Workspace-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
+    /// Optional client-side filesystem watching.
+    #[serde(default)]
+    pub file_watching: FileWatchingConfig,
     /// Root directories for the workspace.
     ///
     /// Entries are kept as written (relative entries of a loaded config file
@@ -441,6 +492,7 @@ impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             roots: Vec::new(),
+            file_watching: FileWatchingConfig::default(),
             position_encodings: PositionEncodings::DEFAULT,
             language_extensions: default_language_extensions(),
             heuristics_max_depth: SearchDepth::DEFAULT,
@@ -2435,6 +2487,7 @@ mod tests {
     #[test]
     fn test_build_extension_map() {
         let workspace = WorkspaceConfig {
+            file_watching: FileWatchingConfig::default(),
             roots: vec![],
             position_encodings: PositionEncodings::DEFAULT,
             language_extensions: vec![
@@ -2617,6 +2670,7 @@ mod tests {
     #[test]
     fn test_language_for_extension() {
         let workspace = WorkspaceConfig {
+            file_watching: FileWatchingConfig::default(),
             roots: vec![],
             position_encodings: PositionEncodings::DEFAULT,
             language_extensions: vec![
@@ -3105,6 +3159,7 @@ mod tests {
     #[test]
     fn test_workspace_config_toml_round_trip() {
         let original = WorkspaceConfig {
+            file_watching: FileWatchingConfig::default(),
             roots: vec![ConfiguredRoot::new("/tmp/round-trip").unwrap()],
             position_encodings: PositionEncodings::new(vec![PositionEncoding::Utf8]).unwrap(),
             language_extensions: vec![LanguageExtensionMapping {
@@ -3710,6 +3765,23 @@ mod tool_profile_tests {
         for value in ["\"unknown\"", "1", "true", "[]", "{}"] {
             assert!(
                 toml::from_str::<ServerConfig>(&format!("[mcp]\ntool_profile = {value}")).is_err()
+            );
+        }
+    }
+    #[test]
+    fn file_watching_configuration_is_opt_in_and_validated() {
+        let default: ServerConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            default.workspace.file_watching.backend,
+            FileWatchingBackend::Disabled
+        );
+        let enabled: ServerConfig =
+            toml::from_str("[workspace.file_watching]\nbackend='watchman'").unwrap();
+        assert_eq!(enabled.workspace.file_watching.command, "watchman");
+        for text in ["backend='other'", "command=''", "command='   '"] {
+            assert!(
+                toml::from_str::<ServerConfig>(&format!("[workspace.file_watching]\n{text}"))
+                    .is_err()
             );
         }
     }

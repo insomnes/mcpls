@@ -1105,6 +1105,7 @@ dependencies = [
  "dunce",
  "futures",
  "gen-lsp-types",
+ "globset",
  "http-body",
  "hyper",
  "hyper-util",

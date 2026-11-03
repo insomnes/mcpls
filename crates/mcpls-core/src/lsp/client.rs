@@ -261,6 +261,7 @@ impl PendingFailure {
 /// - Graceful shutdown
 #[derive(Debug)]
 pub struct LspClient {
+    watching: Option<Arc<super::watching::Backend>>,
     /// Configuration for this LSP server.
     config: LspServerConfig,
 
@@ -323,6 +324,7 @@ impl Clone for LspClient {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
+            watching: self.watching.clone(),
             state: Arc::clone(&self.state),
             request_counter: Arc::clone(&self.request_counter),
             command_tx: self.command_tx.clone(),
@@ -412,6 +414,7 @@ impl LspClient {
 
         Self {
             config,
+            watching: None,
             state: Arc::new(Mutex::new(super::ServerState::Uninitialized)),
             request_counter: Arc::new(AtomicI64::new(1)),
             command_tx,
@@ -486,6 +489,11 @@ impl LspClient {
 
         let (command_tx, command_rx) = mpsc::channel(100);
 
+        let watching = transport
+            .0
+            .watching
+            .as_ref()
+            .map(|watching| watching.backend.clone());
         let receiver_task = tokio::spawn(Self::message_loop(
             transport,
             command_rx,
@@ -498,6 +506,7 @@ impl LspClient {
 
         Self {
             config,
+            watching,
             state: Arc::new(Mutex::new(super::ServerState::Initializing)),
             request_counter: Arc::new(AtomicI64::new(1)),
             command_tx,
@@ -533,6 +542,13 @@ impl LspClient {
 
     /// Get the current server state.
     pub async fn state(&self) -> super::ServerState {
+        if self
+            .watching
+            .as_ref()
+            .is_some_and(|backend| backend.check().is_err())
+        {
+            return super::ServerState::Shutdown;
+        }
         *self.state.lock().await
     }
 
@@ -713,6 +729,11 @@ impl LspClient {
         P: Serialize,
         R: DeserializeOwned,
     {
+        if method != "shutdown"
+            && let Some(backend) = &self.watching
+        {
+            backend.check().map_err(UnclassifiedError::logged)?;
+        }
         let params_value = Self::omit_null_params(
             serde_json::to_value(params).map_err(|e| UnclassifiedError::logged(e.into()))?,
         );
@@ -1179,6 +1200,21 @@ impl LspClient {
     ) -> Result<()> {
         loop {
             tokio::select! {
+                changes = async {
+                    match transport.watching.as_mut() {
+                        Some(watching) => watching.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let changes = changes?;
+                    if let Some(watching) = &transport.watching {
+                        watching.backend.check()?;
+                        let notification = watching.notification(changes);
+                        if notification.get("params").and_then(|p| p.get("changes")).and_then(Value::as_array).is_some_and(|changes| !changes.is_empty()) {
+                            transport.send(&notification).await?;
+                        }
+                    }
+                }
                 Some(command) = command_rx.recv() => {
                     match command {
                         ClientCommand::SendRequest { request } => {
@@ -1353,7 +1389,23 @@ impl LspClient {
                     "Received server request: {} (id={:?})",
                     request.method, request.id
                 );
-                let reply = Self::server_request_reply(request, settings);
+                let reply = if matches!(
+                    request.method.as_str(),
+                    "client/registerCapability" | "client/unregisterCapability"
+                ) {
+                    let result = match &mut transport.watching {
+                        Some(watching) => {
+                            watching.request(&request.method, request.params.as_ref())
+                        }
+                        None => Err(JsonRpcError::new(
+                            ErrorCodes::MethodNotFound,
+                            "Client file watching is disabled",
+                        )),
+                    };
+                    JsonRpcReply::new(request.id, result.into())
+                } else {
+                    Self::server_request_reply(request, settings)
+                };
                 let value = serde_json::to_value(&reply)?;
                 transport.send(&value).await?;
             }
@@ -2429,6 +2481,7 @@ mod tests {
         let (command_tx, _command_rx) = mpsc::channel(1);
 
         let client = LspClient {
+            watching: None,
             config: LspServerConfig::rust_analyzer(),
             state: Arc::new(Mutex::new(super::super::ServerState::Ready)),
             request_counter: Arc::new(AtomicI64::new(1)),

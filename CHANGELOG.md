@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in Linux Watchman file watching supports standard LSP dynamic registrations, shared workspace coverage, operator-managed native exclusions, and explicit backend failure reporting. Watching remains disabled by default.
+
 - Optional `dispatcher.auto_workspaces` parent policies create shared temporary language-server contexts from absolute file requests. Ancestor markers select roots, markerless files can start their configured server, and automatic status snapshots report `temporary` without retaining unused contexts. Explicit approvals retain priority and existing profile semantics.
 
 - Opt-in shared worktree service: approve Git repositories or non-Git roots, select workspaces by absolute paths, and run isolated lazy language-server runtimes behind one endpoint. Service profiles reload per workspace; lifecycle limits, generation-bound continuations, workspace status, and a repeatable systemd installation/rollback recipe are available. Static HTTP and stdio remain supported.

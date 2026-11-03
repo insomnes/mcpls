@@ -375,7 +375,33 @@ impl WorkspaceRuntime {
         ));
         let (workspace_roots, plan) =
             plan_off_runtime(config, &startup_redactions, boundary).await?;
-        let (applicable_configs, refused, refusals) = plan.into_parts();
+        let (mut applicable_configs, refused, refusals) = plan.into_parts();
+        let mut watching_config = config.workspace.file_watching.clone();
+        if watching_config.backend == config::FileWatchingBackend::Watchman {
+            let resolved = lsp::command_path::resolve_named(
+                std::path::Path::new(&watching_config.command),
+                &config::LspServerConfig::rust_analyzer(),
+                lsp::process_env,
+            )
+            .ok_or_else(|| lsp::watching::unavailable("cannot resolve Watchman executable"))?;
+            if matches!(config.workspace_trust, config::WorkspaceTrust::Untrusted(_))
+                && workspace_roots.contains_resolved_prefix(&resolved.canonical)
+            {
+                return Err(lsp::watching::unavailable(
+                    "untrusted workspace executable refused",
+                ));
+            }
+            watching_config.command = resolved.canonical.to_string_lossy().into_owned();
+        }
+        let watching = lsp::watching::Backend::start(
+            &watching_config,
+            workspace_roots.canonical(),
+            matches!(config.workspace_trust, config::WorkspaceTrust::Trusted),
+        )
+        .await?;
+        for init in &mut applicable_configs {
+            init.watching.clone_from(&watching);
+        }
 
         info!(
             "Attempting to spawn {} applicable LSP server(s)...",
@@ -518,6 +544,7 @@ mod tests {
                 dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
+                    file_watching: crate::config::FileWatchingConfig::default(),
                     roots: vec![crate::config::ConfiguredRoot::new("/tmp/test-workspace").unwrap()],
                     position_encodings: PositionEncodings::DEFAULT,
                     language_extensions: vec![],
@@ -583,6 +610,7 @@ mod tests {
                 dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
+                    file_watching: crate::config::FileWatchingConfig::default(),
                     roots: vec![crate::config::ConfiguredRoot::new(&root).unwrap()],
                     position_encodings: PositionEncodings::DEFAULT,
                     language_extensions: vec![],
@@ -656,6 +684,7 @@ mod tests {
                 dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
+                    file_watching: crate::config::FileWatchingConfig::default(),
                     roots: vec![crate::config::ConfiguredRoot::new("/tmp/test-workspace").unwrap()],
                     position_encodings: PositionEncodings::DEFAULT,
                     language_extensions: vec![],
@@ -716,6 +745,7 @@ mod tests {
                 dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
+                    file_watching: crate::config::FileWatchingConfig::default(),
                     roots: vec![crate::config::ConfiguredRoot::new(workspace_root).unwrap()],
                     position_encodings: PositionEncodings::DEFAULT,
                     language_extensions: vec![],
@@ -771,6 +801,7 @@ mod tests {
                 dispatcher: None,
                 mcp: crate::config::McpConfig::default(),
                 workspace: WorkspaceConfig {
+                    file_watching: crate::config::FileWatchingConfig::default(),
                     roots: vec![],
                     position_encodings: PositionEncodings::DEFAULT,
                     language_extensions: vec![],

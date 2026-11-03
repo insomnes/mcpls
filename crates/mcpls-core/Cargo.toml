@@ -16,6 +16,8 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }
 futures = { workspace = true }
+globset = { workspace = true }
+tempfile = { workspace = true }
 http-body = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, optional = true, features = ["service", "tokio"] }

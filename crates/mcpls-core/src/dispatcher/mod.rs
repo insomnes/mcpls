@@ -917,6 +917,11 @@ async fn workspace_status(selection: Selection, resident: Option<Arc<Resident>>)
                         pid = Some(raw);
                     }
                 }
+                if let Some(reason) = runtime.translator.watching_error(&id) {
+                    state = "failed";
+                    error = Some(reason);
+                    pid = None;
+                }
                 if runtime.translator.startup_failure(&id).is_some() {
                     state = "failed";
                     failures = failures.max(1);
