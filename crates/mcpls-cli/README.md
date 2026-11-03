@@ -37,7 +37,7 @@ Rust projects work with no configuration. For other languages, see [Minimal Conf
 
 ## Features
 
-- 30 tools: hover, definition, references, diagnostics, rename, code actions, call and type hierarchies, selection and folding ranges, and more
+- 33 tools: hover, definition, references, diagnostics, rename, code actions, call and type hierarchies, selection and folding ranges, and more
 - Symbol-name addressing, `get_tool_support` discovery and `restart_server`
 - Several language servers at once, started concurrently and stopped with mcpls, with graceful degradation
 - stdio transport by default; optional HTTP transport behind the `transport-http` feature

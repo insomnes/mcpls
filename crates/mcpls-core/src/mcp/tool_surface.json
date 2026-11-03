@@ -728,6 +728,65 @@
     }
   },
   {
+    "name": "feedback_add",
+    "title": "Add Feedback",
+    "description": "Store explicit mcpls feedback privately on this host. Report concrete mcpls failures, missing capabilities, or useful workarounds once per distinct observation. Skip routine success and duplicates. Do not report feedback-tool failures recursively; reporting failure must not block the user's task. operation: nonblank, max128 UTF-8 bytes; observation: nonblank, max2048 bytes; optional category: friction/missing/useful; optional workaround: nonblank, max2048 bytes. Preserve only text you explicitly supply; do not include secrets or source code. Repeated calls append separate records.",
+    "inputSchema": {
+      "$defs": {
+        "Category": {
+          "enum": [
+            "friction",
+            "missing",
+            "useful"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "observation": {
+          "description": "The concrete observation (maximum 2,048 UTF-8 bytes).",
+          "type": "string"
+        },
+        "operation": {
+          "description": "The mcpls operation being reported (maximum 128 UTF-8 bytes).",
+          "type": "string"
+        },
+        "workaround": {
+          "description": "An optional workaround (maximum 2,048 UTF-8 bytes).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "observation"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "stored": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stored"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Add Feedback",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    }
+  },
+  {
     "name": "format_document",
     "title": "Format Document",
     "description": "Propose whole-file formatting as one changes document, including empty successful edits. positions_degraded:response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",

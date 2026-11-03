@@ -1005,14 +1005,15 @@ impl McplsServer {
     /// and, when `prefix` is configured, every tool name rewritten to
     /// `{prefix}_{name}`.
     ///
-    /// Every mcpls tool is a read-only LSP query: `rename_symbol`,
+    /// Most mcpls tools are read-only LSP queries: `rename_symbol`,
     /// `format_document` and `get_code_actions` return a *proposed*
     /// `WorkspaceEdit` and never write to disk. Applying that once here
     /// replaces an identical `annotations(...)` block on every `#[tool]`
     /// attributes. A tool declaring its own annotations keeps them;
     /// `test_tool_annotation_classifications_match_intent` forces a future
     /// mutating tool to write down an explicit classification rather than
-    /// inherit this default silently.
+    /// inherit this default silently. Feedback appends and server restarts declare
+    /// their own mutating classifications.
     ///
     /// With `prefix: None`, the golden snapshot pins the default unprefixed
     /// surface, including optional workspace selectors and continuation fields.
@@ -1891,6 +1892,24 @@ impl McplsServer {
                 )
                 .await,
         )
+    }
+
+    /// Append explicit feedback without a workspace or language server.
+    #[tool(
+        description = "Store explicit mcpls feedback privately on this host. Report concrete mcpls failures, missing capabilities, or useful workarounds once per distinct observation. Skip routine success and duplicates. Do not report feedback-tool failures recursively; reporting failure must not block the user's task. operation: nonblank, max128 UTF-8 bytes; observation: nonblank, max2048 bytes; optional category: friction/missing/useful; optional workaround: nonblank, max2048 bytes. Preserve only text you explicitly supply; do not include secrets or source code. Repeated calls append separate records.",
+        title = "Add Feedback",
+        annotations(
+            title = "Add Feedback",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn feedback_add(
+        &self,
+        Parameters(input): Parameters<super::feedback::FeedbackInput>,
+    ) -> Result<Json<super::feedback::FeedbackStored>, McpError> {
+        super::feedback::add(input).await.map(Json)
     }
 
     /// Restart LSP servers.
@@ -2863,10 +2882,14 @@ impl ServerHandler for McplsServer {
         let mut instructions = self.context.mcp.instructions.as_ref().map_or_else(
             || {
                 format!(
-                    "{DEFAULT_INSTRUCTIONS} Call {} to see which tools work for which languages.",
+                    "{DEFAULT_INSTRUCTIONS} Call {} to see which tools work for which languages. Use {} for concrete mcpls failures, missing capabilities, or useful workarounds once per distinct observation. Skip routine success and duplicates. Never report feedback-tool failures recursively; reporting failure must not block the user's task.",
                     prefixed_tool_name(
                         self.context.mcp.tool_prefix.as_ref(),
                         McpTool::GetToolSupport.name()
+                    ),
+                    prefixed_tool_name(
+                        self.context.mcp.tool_prefix.as_ref(),
+                        McpTool::FeedbackAdd.name()
                     )
                 )
             },
@@ -6122,6 +6145,7 @@ sleep 0.3
             ("get_tool_support", true, false, true),
             ("go_to_declaration", true, false, true),
             ("restart_server", false, true, false),
+            ("feedback_add", false, false, false),
         ];
 
         assert_eq!(
@@ -6949,9 +6973,9 @@ sleep 0.3
                 assert_eq!(
                     tools.len(),
                     if profile == ToolProfile::Agent {
-                        29
+                        30
                     } else {
-                        32
+                        33
                     }
                 );
                 let supported = tools_call_over_the_wire(
@@ -7023,7 +7047,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 29);
+            assert_eq!(tools.len(), 30);
             assert!(
                 !tools
                     .iter()
@@ -7037,7 +7061,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 29);
+            assert_eq!(tools.len(), 30);
             assert!(
                 !tools
                     .iter()
@@ -8902,7 +8926,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 29);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 30);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

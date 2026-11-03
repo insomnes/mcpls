@@ -69,11 +69,12 @@ pub(super) enum McpTool {
     GetToolSupport,
     GoToDeclaration,
     RestartServer,
+    FeedbackAdd,
 }
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 32] = [
+    pub(super) const ALL: [Self; 33] = [
         Self::GetSymbolContext,
         Self::GetHover,
         Self::GetDefinition,
@@ -106,6 +107,7 @@ impl McpTool {
         Self::GetToolSupport,
         Self::GoToDeclaration,
         Self::RestartServer,
+        Self::FeedbackAdd,
     ];
 
     /// Whether this tool belongs to the configured static catalog.
@@ -189,6 +191,7 @@ impl McpTool {
             Self::GetToolSupport => ("get_tool_support", Local),
             Self::GoToDeclaration => ("go_to_declaration", Document(ToolKind::Declaration)),
             Self::RestartServer => ("restart_server", Local),
+            Self::FeedbackAdd => ("feedback_add", Local),
         };
         ToolSpec { name, backend }
     }

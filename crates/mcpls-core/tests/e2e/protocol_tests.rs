@@ -169,7 +169,7 @@ fn test_e2e_get_tool_support_reports_every_tool() -> Result<()> {
     let tools = report["tools"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("tools should be an array: {report}"))?;
-    assert_eq!(tools.len(), 29, "{report}");
+    assert_eq!(tools.len(), 30, "{report}");
     let logs = tools
         .iter()
         .find(|tool| tool["name"] == "get_server_logs")
@@ -246,7 +246,7 @@ fn test_e2e_list_tools() -> Result<()> {
         .as_array()
         .unwrap_or_else(|| panic!("tools should be an array"));
 
-    assert_eq!(tools.len(), 29, "Should have exactly 29 default tools");
+    assert_eq!(tools.len(), 30, "Should have exactly 30 default tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
@@ -278,6 +278,7 @@ fn test_e2e_list_tools() -> Result<()> {
         "get_tool_support",
         "go_to_declaration",
         "restart_server",
+        "feedback_add",
     ] {
         assert!(tool_names.contains(expected), "Should have {expected} tool");
     }

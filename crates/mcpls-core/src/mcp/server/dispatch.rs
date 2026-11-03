@@ -207,6 +207,13 @@ impl McplsServer {
                 .await;
         }
         let name = self.unprefixed(&request.name).to_string();
+        // Feedback is process-local: do not select or acquire a workspace runtime.
+        if name == "feedback_add" {
+            return self
+                .tool_router
+                .call(ToolCallContext::new(self, request, context))
+                .await;
+        }
         let scoped = matches!(
             name.as_str(),
             "workspace_symbol_search"

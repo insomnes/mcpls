@@ -2,7 +2,7 @@
 
 In this chapter you find every key of `mcpls.toml`, with type, default and rules. For a guided introduction read [Configuration](../guide/configuration.md) first. Unknown keys are rejected at startup.
 
-The default `[mcp].tool_profile = "agent"` exposes 29 tools. Set `tool_profile = "full"` to restore all 32 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 30 tools. Set `tool_profile = "full"` to restore all 33 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 ## File structure
 
@@ -28,7 +28,7 @@ Controls the tool catalog and the text mcpls reports about itself. Every field i
 | `title` | `serverInfo.title` | `MCPLS - MCP to LSP Bridge` | 128 bytes |
 | `description` | `serverInfo.description` | The crate description | 1024 bytes |
 | `instructions` | `ServerInfo.instructions` | Built-in capability text | 4096 bytes |
-| `tool_profile` | Static tool catalog (`agent` or `full`) | `agent` (29 tools) | — |
+| `tool_profile` | Static tool catalog (`agent` or `full`) | `agent` (30 tools) | — |
 | `tool_prefix` | Every tool name, as `{tool_prefix}_{tool}` | No prefix | 32 bytes |
 
 Limits are in UTF-8 bytes. A whitespace-only value is rejected as empty; omit the key instead. `instructions` replaces the built-in text rather than appending to it. `tool_prefix` may contain only ASCII letters, digits, `_` and `-`, and must start and end with a letter or digit.

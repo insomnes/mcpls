@@ -5,6 +5,7 @@
 
 mod cancel;
 mod custom_request;
+mod feedback;
 mod handlers;
 mod parameters;
 mod schema_shape;

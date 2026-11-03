@@ -768,8 +768,8 @@ mod tests {
 
     use super::super::server::McplsServer;
 
-    /// Total serialized `tools` array budget, including compact document navigation.
-    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 149_000;
+    /// Total serialized `tools` array budget, including local feedback.
+    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 151_000;
     /// Largest serialized single `Tool` (compact bytes).
     const TOOL_BUDGET_BYTES: usize = 9_000;
     /// Sum of all schema `description` bytes.
