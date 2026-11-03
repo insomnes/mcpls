@@ -194,6 +194,8 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
         if matches!(
             tool.name.as_ref(),
             "get_symbol_context"
+                | "get_incoming_calls"
+                | "get_outgoing_calls"
                 | "get_supertypes"
                 | "get_subtypes"
                 | "get_completions"
@@ -212,19 +214,29 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
                 if matches!(
                     tool.name.as_ref(),
                     "get_definition"
+                        | "get_incoming_calls"
+                        | "get_outgoing_calls"
                         | "go_to_implementation"
                         | "go_to_type_definition"
                         | "go_to_declaration"
                 ) {
                     // Keep absolute-path and coordinate conventions at the input boundary.
-                    for field in ["file_path", "line", "character"] {
+                    let fields: &[&str] = if matches!(
+                        tool.name.as_ref(),
+                        "get_incoming_calls" | "get_outgoing_calls"
+                    ) {
+                        &["file_path", "line", "character", "item", "symbol_target"]
+                    } else {
+                        &["file_path", "line", "character"]
+                    };
+                    for field in fields {
                         if let Some(description) = conventions
                             .as_ref()
-                            .and_then(|p| p.get(field))
+                            .and_then(|p| p.get(*field))
                             .and_then(|p| p.get("description"))
                             .cloned()
                             && let Some(Value::Object(property)) =
-                                shaped.get_mut("properties").and_then(|p| p.get_mut(field))
+                                shaped.get_mut("properties").and_then(|p| p.get_mut(*field))
                         {
                             property.insert("description".into(), description);
                         }
@@ -234,41 +246,61 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
             }
         }
 
-        if let Some(output) = tool.output_schema.as_mut() {
-            shape_schema(Arc::make_mut(output), &usage);
-            if matches!(
-                tool.name.as_ref(),
-                "get_symbol_context"
-                    | "get_document_symbols"
-                    | "get_document_outline"
-                    | "get_document_highlights"
-                    | "get_definition"
-                    | "go_to_implementation"
-                    | "go_to_type_definition"
-                    | "go_to_declaration"
-                    | "get_references"
-                    | "get_incoming_calls"
-                    | "get_outgoing_calls"
-                    | "get_supertypes"
-                    | "get_subtypes"
-                    | "rename_symbol"
-                    | "format_document"
-                    | "format_range"
-                    | "get_code_actions"
-                    | "get_completions"
-                    | "get_diagnostics"
-            ) {
-                // Bounded results add metadata whose descriptions repeat the tool guidance.
-                // Keep its structural contract; field meanings are in the tool description.
-                let mut schema = Schema::from(std::mem::take(Arc::make_mut(output)));
-                RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
-                    .transform(&mut schema);
-                if let Value::Object(shaped) = Value::from(schema) {
-                    *Arc::make_mut(output) = shaped;
+        shape_output_schema(tool, &usage);
+        shape_client_contract(tool);
+    }
+}
+
+/// Compact output annotations while retaining the workspace containment warning.
+fn shape_output_schema(tool: &mut Tool, usage: &DefinitionUsage) {
+    if let Some(output) = tool.output_schema.as_mut() {
+        shape_schema(Arc::make_mut(output), usage);
+        if matches!(
+            tool.name.as_ref(),
+            "get_symbol_context"
+                | "get_hover"
+                | "workspace_symbol_search"
+                | "get_document_symbols"
+                | "get_document_outline"
+                | "get_document_highlights"
+                | "get_definition"
+                | "go_to_implementation"
+                | "go_to_type_definition"
+                | "go_to_declaration"
+                | "get_references"
+                | "get_incoming_calls"
+                | "get_outgoing_calls"
+                | "get_supertypes"
+                | "get_subtypes"
+                | "rename_symbol"
+                | "format_document"
+                | "format_range"
+                | "get_code_actions"
+                | "get_completions"
+                | "get_diagnostics"
+        ) {
+            // Bounded results add metadata whose descriptions repeat the tool guidance.
+            // Keep its structural contract; field meanings are in the tool description.
+            let containment = output
+                .get("$defs")
+                .and_then(|defs| defs.pointer("/Location/properties/out_of_workspace/description"))
+                .cloned();
+            let mut schema = Schema::from(std::mem::take(Arc::make_mut(output)));
+            RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
+                .transform(&mut schema);
+            if let Value::Object(mut shaped) = Value::from(schema) {
+                if tool.name == "workspace_symbol_search"
+                    && let Some(description) = containment
+                    && let Some(property) = shaped
+                        .get_mut("$defs")
+                        .and_then(|defs| defs.pointer_mut("/Location/properties/out_of_workspace"))
+                        .and_then(Value::as_object_mut)
+                {
+                    property.insert("description".into(), description);
                 }
+                *Arc::make_mut(output) = shaped;
             }
         }
-        shape_client_contract(tool);
     }
 }
 
@@ -1004,6 +1036,7 @@ mod tests {
     #[test]
     fn test_no_output_schema_is_closed() {
         let mut violations = Vec::new();
+        let mut target_records = 0;
         for tool in shaped_tools() {
             let Some(output) = tool.output_schema.as_deref() else {
                 continue;
@@ -1019,12 +1052,51 @@ mod tests {
             }
             let mut found = Vec::new();
             object_schemas_with_openness(&Value::Object(output.clone()), "", false, &mut found);
+            let target_path = match tool.name.as_ref() {
+                "get_definition" | "get_document_outline" | "workspace_symbol_search" => {
+                    Some("/$defs/SymbolTargetEnvelope")
+                }
+                "get_symbol_context" => Some("/properties/symbol_target"),
+                _ => None,
+            };
+            if let Some(path) = target_path {
+                let schema = Value::Object(output.clone());
+                let target = schema
+                    .pointer(path)
+                    .expect("producer declares its reusable target");
+                assert_eq!(target["type"], "object");
+                assert_eq!(target["additionalProperties"], false);
+                let properties = target["properties"].as_object().unwrap();
+                assert_eq!(
+                    properties
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from(["file_path", "symbol_ref"])
+                );
+                for field in ["file_path", "symbol_ref"] {
+                    assert_eq!(properties[field]["type"], "string");
+                }
+                let required = target["required"].as_array().unwrap();
+                assert_eq!(required.len(), 2);
+                assert_eq!(
+                    required
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from(["file_path", "symbol_ref"])
+                );
+                assert!(found.iter().any(|closed| closed == path));
+                found.retain(|closed| closed != path);
+                target_records += 1;
+            }
             violations.extend(
                 found
                     .into_iter()
                     .map(|path| format!("{}: {path}", tool.name)),
             );
         }
+        assert_eq!(target_records, 4);
         assert!(
             violations.is_empty(),
             "output schema objects closed to additional properties:\n{}",
@@ -1161,6 +1233,8 @@ mod tests {
                 if matches!(
                     before.name.as_ref(),
                     "get_supertypes"
+                        | "get_incoming_calls"
+                        | "get_outgoing_calls"
                         | "get_subtypes"
                         | "get_completions"
                         | "get_definition"
@@ -1172,6 +1246,8 @@ mod tests {
                         && matches!(
                             before.name.as_ref(),
                             "get_document_symbols"
+                                | "get_hover"
+                                | "workspace_symbol_search"
                                 | "get_document_outline"
                                 | "get_document_highlights"
                                 | "get_definition"

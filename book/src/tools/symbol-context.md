@@ -147,7 +147,8 @@ The envelope has exactly two required strings: absolute `file_path` and
 `symbol_ref`. Unknown envelope members fail. Omit top-level `file_path`,
 `symbol_ref`, `line`, `character`, `symbol_name`, `symbol_kind`, `container`, and
 hierarchy `item`. Mixing any non-null legacy selector with an envelope fails,
-even when they agree. Optional null selectors count as absent. Non-address
+even when they agree. With a valid `symbol_target`, optional null selectors count
+as absent. Non-address
 options, including `sections`, `limit`, `include_source`, and
 `include_declaration`, retain their meaning. Edit tools, standalone hierarchy
 preparation, type hierarchy, implementation and type-definition tools do not

@@ -3960,7 +3960,6 @@
     "outputSchema": {
       "$defs": {
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -3968,7 +3967,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -3981,7 +3979,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -3994,7 +3991,6 @@
           ]
         },
         "PositionSource": {
-          "description": "Where the queried position of a name-addressed call came from.",
           "oneOf": [
             {
               "const": "selection_range",
@@ -4007,15 +4003,12 @@
           ]
         },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -4059,7 +4052,6 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "contents": {
-          "description": "Hover contents as markdown string.",
           "type": "string"
         },
         "positions_degraded": {
@@ -4070,8 +4062,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          ]
         },
         "range": {
           "anyOf": [
@@ -4081,8 +4072,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Optional range the hover applies to."
+          ]
         },
         "resolved_symbol": {
           "anyOf": [
@@ -4092,8 +4082,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only for a name-addressed call."
+          ]
         }
       },
       "required": [
@@ -4116,7 +4105,6 @@
       "$defs": {
         "HierarchyItem": {
           "additionalProperties": false,
-          "description": "A call or type hierarchy item.",
           "properties": {
             "data": {},
             "detail": {
@@ -4134,21 +4122,18 @@
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "out_of_workspace": {
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selectionRange": {
               "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -4163,7 +4148,6 @@
         },
         "Position2D": {
           "additionalProperties": false,
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -4171,7 +4155,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -4185,15 +4168,12 @@
         },
         "Range": {
           "additionalProperties": false,
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -4204,7 +4184,6 @@
         },
         "SymbolTargetEnvelope": {
           "additionalProperties": false,
-          "description": "Copyable source-bound target for the six supported read-only consumers.",
           "properties": {
             "file_path": {
               "type": "string"
@@ -4233,7 +4212,6 @@
           ]
         },
         "container": {
-          "description": "Optional immediate container, with `symbol_name`.",
           "type": [
             "string",
             "null"
@@ -4311,11 +4289,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Optional symbol kind, with `symbol_name`."
+          ]
         },
         "symbol_name": {
-          "description": "Symbol name, instead of a position.",
           "type": [
             "string",
             "null"
@@ -4968,7 +4944,6 @@
       "$defs": {
         "HierarchyItem": {
           "additionalProperties": false,
-          "description": "A call or type hierarchy item.",
           "properties": {
             "data": {},
             "detail": {
@@ -4986,21 +4961,18 @@
               "type": "integer"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "out_of_workspace": {
               "type": "boolean"
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range of the symbol."
+              "$ref": "#/$defs/Range"
             },
             "selectionRange": {
               "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -5015,7 +4987,6 @@
         },
         "Position2D": {
           "additionalProperties": false,
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -5023,7 +4994,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -5037,15 +5007,12 @@
         },
         "Range": {
           "additionalProperties": false,
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -5056,7 +5023,6 @@
         },
         "SymbolTargetEnvelope": {
           "additionalProperties": false,
-          "description": "Copyable source-bound target for the six supported read-only consumers.",
           "properties": {
             "file_path": {
               "type": "string"
@@ -5085,7 +5051,6 @@
           ]
         },
         "container": {
-          "description": "Optional immediate container, with `symbol_name`.",
           "type": [
             "string",
             "null"
@@ -5163,11 +5128,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Optional symbol kind, with `symbol_name`."
+          ]
         },
         "symbol_name": {
-          "description": "Symbol name, instead of a position.",
           "type": [
             "string",
             "null"
@@ -10455,7 +10418,6 @@
     "outputSchema": {
       "$defs": {
         "IndexCoverage": {
-          "description": "What an empty references or workspace-symbol answer covers.",
           "properties": {
             "server_restarted": {
               "type": "boolean"
@@ -10472,18 +10434,15 @@
           "type": "object"
         },
         "Location": {
-          "description": "Location in a document.",
           "properties": {
             "out_of_workspace": {
-              "description": "Whether this location is not provably inside a configured workspace root (stdlib, a dependency).",
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Whether this location is not provably inside a configured workspace root (stdlib, a dependency)."
             },
             "range": {
-              "$ref": "#/$defs/Range",
-              "description": "Range within the document."
+              "$ref": "#/$defs/Range"
             },
             "uri": {
-              "description": "URI of the document.",
               "type": "string"
             }
           },
@@ -10494,7 +10453,6 @@
           "type": "object"
         },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -10502,7 +10460,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
@@ -10515,7 +10472,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -10528,15 +10484,12 @@
           ]
         },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -10547,7 +10500,6 @@
         },
         "SymbolTargetEnvelope": {
           "additionalProperties": false,
-          "description": "Copyable source-bound target for the six supported read-only consumers.",
           "properties": {
             "file_path": {
               "type": "string"
@@ -10563,7 +10515,6 @@
           "type": "object"
         },
         "SymbolTargetUnavailable": {
-          "description": "Why a retained discovery entry has no portable target.",
           "properties": {
             "reason": {
               "type": "string"
@@ -10575,27 +10526,22 @@
           "type": "object"
         },
         "WorkspaceSymbol": {
-          "description": "A workspace symbol.",
           "properties": {
             "container_name": {
-              "description": "Optional container name (parent scope).",
               "type": [
                 "string",
                 "null"
               ]
             },
             "kind": {
-              "description": "LSP numeric symbol kind (e.g. 12 for Function).",
               "format": "uint32",
               "minimum": 0,
               "type": "integer"
             },
             "location": {
-              "$ref": "#/$defs/Location",
-              "description": "Location of the symbol."
+              "$ref": "#/$defs/Location"
             },
             "name": {
-              "description": "Name of the symbol.",
               "type": "string"
             },
             "symbol_target": {
@@ -10606,8 +10552,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Absent unless portable target enrichment was requested."
+              ]
             },
             "symbol_target_unavailable": {
               "anyOf": [
@@ -10617,8 +10562,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Explicit unavailability when portable target enrichment was requested."
+              ]
             }
           },
           "required": [
@@ -10632,8 +10576,7 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "index_coverage": {
-          "$ref": "#/$defs/IndexCoverage",
-          "description": "Set only when the server itself answered with no symbols: what its answer covers."
+          "$ref": "#/$defs/IndexCoverage"
         },
         "positions_degraded": {
           "anyOf": [
@@ -10643,18 +10586,15 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          ]
         },
         "symbols": {
-          "description": "List of symbols found.",
           "items": {
             "$ref": "#/$defs/WorkspaceSymbol"
           },
           "type": "array"
         },
         "truncated": {
-          "description": "Whether more symbols matched than `symbols` returns.",
           "type": "boolean"
         }
       },
