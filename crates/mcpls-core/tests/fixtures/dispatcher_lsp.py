@@ -45,7 +45,13 @@ while True:
     if method == "textDocument/hover" and (root / ".exit-on-hover").exists():
         (root / ".exit-on-hover").unlink()
         sys.exit(0)
-    if method == "textDocument/didOpen" and not (root / ".diagnostics.json").exists():
+    alias_mode = (root / ".publish-aliases").exists() and params.get("textDocument", {}).get("uri", "").endswith("/file.py")
+    if method in ("textDocument/didOpen", "textDocument/didChange") and alias_mode:
+        publications = [(root / f"alias{i}.py", f"A{i}") for i in range(1, 9)] if method.endswith("didOpen") else [(root / "file.py", "C")] + [(root / f"alias{i}.py", "done" if i == 8 else f"A{i}") for i in range(2, 9)]
+        for published, message in publications:
+            send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
+                "uri": published.as_uri(), "diagnostics": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "severity": 1, "code": message, "message": message, "source": "fixture"}]}})
+    elif method == "textDocument/didOpen" and not (root / ".diagnostics.json").exists():
         uri = params["textDocument"]["uri"]
         send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
             "uri": uri, "diagnostics": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
@@ -60,6 +66,8 @@ while True:
             continue
         result = {"capabilities": {"hoverProvider": True, "definitionProvider": True, "documentSymbolProvider": True,
                                    "workspaceSymbolProvider": True, "callHierarchyProvider": True, "typeHierarchyProvider": True}}
+        if (root / ".publish-aliases").exists():
+            result["capabilities"]["textDocumentSync"] = 1
     elif method == "textDocument/diagnostic":
         if (root / ".diagnostics-error.json").exists():
             send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": json.loads((root / ".diagnostics-error.json").read_text()), "message": "authored diagnostic failure"}})

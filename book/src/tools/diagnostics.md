@@ -200,6 +200,10 @@ continuity. A result ID or local sync version does not prove analysis completion
 A delayed push can continue to expose the previous report after a source edit.
 Missing or mixed report versions remain null.
 
+Generated opaque identity fields are limited to 256 UTF-8 bytes. A configured
+server identifier beyond that limit makes `diagnostics_delta` return a typed
+unavailable error; existing diagnostics tools and configuration remain usable.
+
 Baselines have no TTL or server-side storage. Canonical file/workspace identity,
 runtime generation, server ID, and server incarnation must match. Server or
 runtime replacement invalidates them. A well-formed mismatch returns only
@@ -221,3 +225,8 @@ records, invalid positions, and oversized baselines return JSON-RPC `-32602`
 before starting or querying a language server. Existing path authorization,
 unsupported-language, startup, cancellation, and no-observation pull errors remain
 ordinary MCP errors. Caller-held baselines are unauthenticated evidence.
+
+Known loss of an alias or cached source remains incomplete across later source
+publications. If bounded eviction history forgets which files lost sources,
+completeness becomes unknown until the analysis context is recreated. This
+uncertainty does not claim that every observed file lost diagnostics.

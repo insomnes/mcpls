@@ -270,7 +270,30 @@ impl McplsServer {
             .workspace_roots
             .canonical_root_of(validated.as_path())
             .ok_or_else(invalid)?;
-        let identity = json!({"file_path":validated.as_path(),"workspace_path":workspace,"runtime_generation":self.diagnostics_generation,"server_id":route.as_str(),"server_incarnation":incarnation});
+        let unavailable_identity = || {
+            McpError::new(
+                rmcp::model::ErrorCode(-32057),
+                "diagnostics identity exceeds supported byte bounds",
+                Some(json!({"code":"workspace_unavailable","retryable":false})),
+            )
+        };
+        let file_identity = validated
+            .as_path()
+            .to_str()
+            .ok_or_else(unavailable_identity)?;
+        let workspace_identity = workspace.to_str().ok_or_else(unavailable_identity)?;
+        for (value, limit) in [
+            (file_identity, 4096),
+            (workspace_identity, 4096),
+            (self.diagnostics_generation.as_str(), 256),
+            (route.as_str(), 256),
+            (incarnation.as_str(), 256),
+        ] {
+            if value.is_empty() || value.len() > limit {
+                return Err(unavailable_identity());
+            }
+        }
+        let identity = json!({"file_path":file_identity,"workspace_path":workspace_identity,"runtime_generation":self.diagnostics_generation,"server_id":route.as_str(),"server_incarnation":incarnation});
         if input["action"] == "compare" {
             for (key, reason) in [
                 ("file_path", "file_mismatch"),
@@ -314,6 +337,16 @@ impl McplsServer {
         )
         .await;
         let evidence = info.as_ref().map(|i| &i.evidence);
+        let (source_loss, history_unknown) = {
+            let uri = crate::bridge::path_to_uri(validated.as_path())
+                .map_err(|e| self.render_error(e))?;
+            self.context
+                .notification_cache
+                .lock()
+                .await
+                .delta_completeness(&uri)
+        };
+        let cache_unknown = history_unknown || evidence.is_some_and(|e| e.cache_unknown);
         let mut report = json!({"availability":availability,"origin":origin,"pull_kind":pull_kind,"result_id":evidence.and_then(|e|e.result_id.as_ref()),"synced_version":translator.document_tracker().synced_version(validated.as_path(),&route),"report_version":evidence.and_then(|e|e.report_version),"cached_origins":evidence.map(|e|e.origins.iter().copied().filter(|origin| pull_kind != "full" || *origin != "pull").collect::<Vec<_>>()).unwrap_or_default(),"indexing_in_progress":signals.indexing.indexing_in_progress,"push_notifications_degraded":signals.push_notifications_degraded,"completeness":"complete","uncertainties":[],"omitted_diagnostics":evidence.and_then(|e|e.omitted).unwrap_or(0),"source_freshness":"unknown"});
         for (condition, reason) in [
             (
@@ -325,6 +358,7 @@ impl McplsServer {
                 "evicted",
             ),
             (pull_kind == "failed", "pull_failed"),
+            (cache_unknown, "cache_completeness_unknown"),
             (pull_kind == "partial", "partial_report"),
             (!continuity, "unchanged_without_report"),
             (signals.indexing.indexing_in_progress, "indexing"),
@@ -342,6 +376,13 @@ impl McplsServer {
                 incomplete(&mut report, reason);
             }
         }
+        if cache_unknown
+            && report["uncertainties"]
+                .as_array()
+                .is_some_and(|reasons| reasons.len() == 1)
+        {
+            report["completeness"] = json!("unknown");
+        }
         if translator.dispatcher_server(&route).as_ref() != Some(&(true, incarnation)) {
             return Err(McpError::new(
                 rmcp::model::ErrorCode(-32056),
@@ -349,7 +390,7 @@ impl McplsServer {
                 None,
             ));
         }
-        let mut truncated = evidence.is_some_and(|e| e.truncated);
+        let mut truncated = source_loss || evidence.is_some_and(|e| e.truncated);
         if truncated {
             incomplete(&mut report, "truncated");
             report["omitted_diagnostics"] = json!(evidence.and_then(|e| e.omitted));
@@ -390,11 +431,12 @@ impl McplsServer {
                 incomplete(&mut report, "truncated");
             }
             let base_omitted = evidence.and_then(|e| e.omitted);
-            report["omitted_diagnostics"] = if evidence.is_some() && base_omitted.is_none() {
-                Value::Null
-            } else {
-                json!(base_omitted.unwrap_or(0).saturating_add(omitted))
-            };
+            report["omitted_diagnostics"] =
+                if source_loss || cache_unknown || evidence.is_some_and(|e| e.omitted.is_none()) {
+                    Value::Null
+                } else {
+                    json!(base_omitted.unwrap_or(0).saturating_add(omitted))
+                };
             let baseline = json!({"schema_version":1,"identity":identity,"report":report,"diagnostics":diagnostics});
             let output = if input["action"] == "capture" {
                 json!({"status":"baseline_captured","baseline":baseline,"truncated":truncated})

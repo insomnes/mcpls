@@ -620,6 +620,7 @@ enum EvictedContent {
 struct EvictionMark {
     owner: ServerId,
     content: EvictedContent,
+    delta_source_loss: bool,
     seq: u64,
 }
 
@@ -639,12 +640,17 @@ struct EvictionMarks {
     order: BTreeMap<u64, DiagnosticsKey>,
     next_seq: u64,
     overflowed: HashSet<ServerId>,
+    delta_history_unknown: bool,
 }
 
 impl EvictionMarks {
     /// Marks `file`; returns whether that changed what a read of it says (it
     /// had no mark, or one with other content).
     fn record(&mut self, file: DiagnosticsKey, owner: ServerId, content: EvictedContent) -> bool {
+        let previous_loss = self
+            .by_file
+            .get(&file)
+            .is_some_and(|mark| mark.delta_source_loss);
         let previous = self.by_file.get(&file).map(|previous| previous.content);
         let content = match previous {
             Some(EvictedContent::Lost) => EvictedContent::Lost,
@@ -660,6 +666,7 @@ impl EvictionMarks {
             EvictionMark {
                 owner,
                 content,
+                delta_source_loss: previous_loss || content == EvictedContent::Lost,
                 seq,
             },
         );
@@ -668,6 +675,7 @@ impl EvictionMarks {
                 break;
             };
             if let Some(mark) = self.by_file.remove(&oldest) {
+                self.delta_history_unknown |= mark.delta_source_loss;
                 self.overflowed.insert(mark.owner);
             }
         }
@@ -735,10 +743,16 @@ pub struct DiagnosticInfo {
     clippy::redundant_pub_crate,
     reason = "internal evidence is shared across bridge and MCP modules only"
 )]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent observed loss and metadata facts can coexist; they are not exclusive states"
+)]
 pub(crate) struct DiagnosticEvidence {
     pub(crate) result_id: Option<String>,
     pub(crate) metadata_omitted: bool,
     pub(crate) truncated: bool,
+    pub(crate) source_loss: bool,
+    pub(crate) cache_unknown: bool,
     pub(crate) omitted: Option<usize>,
     pub(crate) origins: Vec<&'static str>,
     pub(crate) report_version: Option<DocumentVersion>,
@@ -787,6 +801,8 @@ struct SourceEntry {
 pub struct DiagnosticSources {
     requested: Uri,
     entries: Vec<SourceEntry>,
+    source_loss: bool,
+    cache_unknown: bool,
 }
 
 impl DiagnosticSources {
@@ -845,6 +861,8 @@ impl DiagnosticSources {
 
     fn evidence(&self) -> DiagnosticEvidence {
         let mut evidence = DiagnosticEvidence {
+            source_loss: self.source_loss,
+            cache_unknown: self.cache_unknown,
             omitted: Some(0),
             ..Default::default()
         };
@@ -875,6 +893,8 @@ impl DiagnosticSources {
         }
         for entry in &self.entries {
             evidence.truncated |= entry.info.evidence.truncated;
+            evidence.source_loss |= entry.info.evidence.source_loss;
+            evidence.cache_unknown |= entry.info.evidence.cache_unknown;
             evidence.metadata_omitted |= entry.info.evidence.metadata_omitted;
             evidence.omitted = evidence
                 .omitted
@@ -886,13 +906,22 @@ impl DiagnosticSources {
                     .clone_from(&entry.info.evidence.result_id);
             }
         }
+        if evidence.source_loss {
+            evidence.truncated = true;
+            evidence.omitted = None;
+        }
+        if evidence.cache_unknown {
+            evidence.omitted = None;
+        }
         evidence
     }
 
     /// Preserve source order for a context bundle; standalone diagnostics keep range order.
     pub(crate) fn merge_for_context(self, bundle: bool) -> Option<DiagnosticInfo> {
         let mut evidence = self.evidence();
-        let Self { requested, entries } = self;
+        let Self {
+            requested, entries, ..
+        } = self;
         let has_pulled = entries.iter().any(|entry| entry.origin.is_pulled());
         if entries.len() <= 1 && !has_pulled {
             return entries.into_iter().next().map(|entry| {
@@ -1486,7 +1515,9 @@ impl NotificationCache {
                 .then(|| self.oldest_alias_source(&canonical_key))
                 .flatten();
             let Some(oldest_alias) = alias_to_evict else {
-                self.mark_delta_source_loss(&canonical_key);
+                if !diagnostics.as_slice().is_empty() {
+                    self.mark_delta_source_loss(&canonical_key);
+                }
                 debug!(
                     "dropping diagnostics for {}: {MAX_SOURCES_PER_FILE} published URIs already cached for {}",
                     published.source().as_ref(),
@@ -1496,11 +1527,18 @@ impl NotificationCache {
                     evicted: Vec::new(),
                 };
             };
+            let lost = self
+                .entries
+                .get(&oldest_alias)
+                .is_some_and(|entry| !entry.diagnostics.is_empty() || entry.evidence.source_loss);
             self.evict_entry(&oldest_alias);
-            self.mark_delta_source_loss(&canonical_key);
+            if lost {
+                self.mark_delta_source_loss(&canonical_key);
+            }
         }
 
-        let evidence = diagnostics.evidence.clone();
+        let mut evidence = diagnostics.evidence.clone();
+        evidence.source_loss |= self.delta_source_loss(&canonical_key);
         let diagnostics = diagnostics.into_vec();
 
         self.drop_superseded_pull(&canonical_key, published.canonical(), version);
@@ -1520,6 +1558,7 @@ impl NotificationCache {
             }
         };
 
+        evidence.source_loss |= self.delta_source_loss(&canonical_key);
         let seq = self.next_seq();
         let opening = self.document_opening(published.canonical());
         let spelling = if published.is_canonical() {
@@ -1727,6 +1766,8 @@ impl NotificationCache {
         }
         let file_key = DiagnosticsKey::of(file);
         let slot_key = SlotKey::pulled(file_key.clone());
+        let mut evidence = items.evidence.clone();
+        evidence.source_loss |= self.delta_source_loss(&file_key);
         if self.entries.get(&slot_key).is_some_and(|stored| {
             matches!(stored.origin, Origin::Pulled { ticket, .. } if ticket >= stamp.ticket)
         }) {
@@ -1767,7 +1808,7 @@ impl NotificationCache {
             slot_key,
             CachedEntry {
                 uri: file.clone(),
-                evidence: items.evidence.clone(),
+                evidence,
                 diagnostics: items.into_vec(),
                 owner: server_id.clone(),
                 seq,
@@ -2046,11 +2087,29 @@ impl NotificationCache {
     ///
     /// A clean entry is remembered only when it was the file's last one: while
     /// other slots of the file remain, they answer reads.
+    pub(crate) fn delta_completeness(&self, uri: &Uri) -> (bool, bool) {
+        (
+            self.delta_source_loss(&DiagnosticsKey::of(uri)),
+            self.eviction_marks.delta_history_unknown,
+        )
+    }
+
+    fn delta_source_loss(&self, file: &DiagnosticsKey) -> bool {
+        self.eviction_marks
+            .by_file
+            .get(file)
+            .is_some_and(|mark| mark.delta_source_loss)
+            || self.source_keys(file).iter().any(|key| {
+                self.entries
+                    .get(key)
+                    .is_some_and(|entry| entry.evidence.source_loss)
+            })
+    }
+
     fn mark_delta_source_loss(&mut self, file: &DiagnosticsKey) {
         for key in self.source_keys(file) {
             if let Some(entry) = self.entries.get_mut(&key) {
-                entry.evidence.truncated = true;
-                entry.evidence.omitted = None;
+                entry.evidence.source_loss = true;
             }
         }
     }
@@ -2059,6 +2118,7 @@ impl NotificationCache {
         let entry = self.entries.get(key)?;
         let file = entry.file(key).clone();
         let owner = entry.owner.clone();
+        let source_loss = entry.evidence.source_loss;
         let content = if entry.diagnostics.is_empty() {
             EvictedContent::Clean
         } else {
@@ -2070,6 +2130,9 @@ impl NotificationCache {
         }
         if content == EvictedContent::Lost || !self.files.contains_key(&file) {
             self.eviction_marks.record(file.clone(), owner, content);
+            if source_loss && let Some(mark) = self.eviction_marks.by_file.get_mut(&file) {
+                mark.delta_source_loss = true;
+            }
         }
         Some(file)
     }
@@ -2342,6 +2405,8 @@ impl NotificationCache {
         DiagnosticSources {
             requested: uri.clone(),
             entries,
+            source_loss: self.delta_source_loss(&key),
+            cache_unknown: self.eviction_marks.delta_history_unknown,
         }
     }
 

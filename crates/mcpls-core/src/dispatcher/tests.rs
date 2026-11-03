@@ -2352,7 +2352,7 @@ async fn diagnostics_delta_refresh_recovers_dead_backend() {
             {
                 Ok(observation) => break observation,
                 Err(rmcp::ServiceError::McpError(error)) if error.code.0 == -32051 => {
-                    tokio::task::yield_now().await
+                    tokio::task::yield_now().await;
                 }
                 Err(error) => panic!("unexpected initialization error: {error}"),
             }
@@ -2386,4 +2386,188 @@ async fn diagnostics_delta_refresh_recovers_dead_backend() {
     supervisor.await.unwrap();
     client.cancel().await.unwrap();
     task.await.unwrap();
+}
+
+/// Republishing retained aliases cannot erase evidence of an evicted source.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one public protocol session establishes alias loss, republication and an unrelated complete file"
+)]
+async fn diagnostics_delta_retains_alias_loss_across_republication() {
+    let fixture = Fixture::new(4);
+    let path = fixture.main.join("file.py");
+    for index in 1..=8 {
+        std::os::unix::fs::symlink(&path, fixture.main.join(format!("alias{index}.py"))).unwrap();
+    }
+    std::fs::write(fixture.main.join(".publish-aliases"), "").unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    call(&client, "get_hover", hover(&fixture.main))
+        .await
+        .unwrap();
+    let baseline = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let captured = call(
+                &client,
+                "diagnostics_delta",
+                json!({"file_path":path,"action":"capture","mode":"cached"}),
+            )
+            .await
+            .unwrap();
+            if captured["baseline"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .len()
+                == 8
+            {
+                break captured["baseline"].clone();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(baseline["report"]["completeness"], "complete");
+    let lost = baseline["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|d| d["message"] == "A1")
+        .unwrap();
+    std::fs::write(&path, "x = 2\n").unwrap();
+    call(&client, "get_hover", hover(&fixture.main))
+        .await
+        .unwrap();
+    let current = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let captured = call(
+                &client,
+                "diagnostics_delta",
+                json!({"file_path":path,"action":"capture","mode":"cached"}),
+            )
+            .await
+            .unwrap();
+            if captured["baseline"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["message"] == "done")
+            {
+                break captured;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(current["baseline"]["report"]["completeness"], "incomplete");
+    assert_eq!(current["truncated"], true);
+    assert!(current["baseline"]["report"]["omitted_diagnostics"].is_null());
+    let compared = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"compare","mode":"cached","baseline":baseline}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(compared["comparison_complete"], false);
+    assert_eq!(compared["resolved"], json!([]));
+    assert!(
+        compared["uncertain_removed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(lost))
+    );
+    let normal = fixture.main.join("normal.py");
+    std::fs::write(&normal, "x = 1\n").unwrap();
+    call(
+        &client,
+        "get_hover",
+        json!({"file_path":normal,"line":1,"character":1}),
+    )
+    .await
+    .unwrap();
+    let clean = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":normal,"action":"capture"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(clean["baseline"]["report"]["completeness"], "complete");
+    assert_eq!(clean["truncated"], false);
+    let oversized = json!([{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":1,"message":"x".repeat(300_000)}]);
+    std::fs::write(
+        fixture.main.join(".diagnostics.json"),
+        oversized.to_string(),
+    )
+    .unwrap();
+    let clipped = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":normal,"action":"capture"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(clipped["truncated"], true);
+    let fresh = json!([{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"severity":1,"message":"fresh complete report"}]);
+    std::fs::write(fixture.main.join(".diagnostics.json"), fresh.to_string()).unwrap();
+    let replaced = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":normal,"action":"capture"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replaced["baseline"]["report"]["completeness"], "complete");
+    assert_eq!(replaced["truncated"], false);
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// The identity byte limit permits verbatim reuse at 256 and rejects 257 before capture.
+#[tokio::test]
+async fn diagnostics_delta_server_identity_byte_boundary() {
+    for length in [256, 257] {
+        let fixture = Fixture::new(4);
+        let mut profile = std::fs::read_to_string(&fixture.profile).unwrap();
+        profile.push_str("name='");
+        profile.push_str(&"s".repeat(length));
+        profile.push_str("'\n");
+        std::fs::write(&fixture.profile, profile).unwrap();
+        let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+        let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+        let path = fixture.main.join("file.py");
+        let captured = call(
+            &client,
+            "diagnostics_delta",
+            json!({"file_path":path,"action":"capture"}),
+        )
+        .await;
+        if length == 256 {
+            let baseline = captured.unwrap()["baseline"].clone();
+            assert_eq!(
+                baseline["identity"]["server_id"].as_str().unwrap().len(),
+                256
+            );
+            let compared = call(
+                &client,
+                "diagnostics_delta",
+                json!({"file_path":path,"action":"compare","baseline":baseline}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(compared["comparison_complete"], true);
+        } else {
+            error_code(captured.unwrap_err(), "workspace_unavailable");
+        }
+        call(&client, "get_diagnostics", json!({"file_path":path}))
+            .await
+            .unwrap();
+        dispatcher.shutdown().await;
+        client.cancel().await.unwrap();
+        task.await.unwrap();
+    }
 }
