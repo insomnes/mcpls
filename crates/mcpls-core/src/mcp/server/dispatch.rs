@@ -431,12 +431,28 @@ impl McplsServer {
                 .and_then(|args| args.get("sections"))
                 .and_then(Value::as_array)
                 .is_some_and(|sections| sections.iter().any(|section| section == "outgoing_calls"));
+        // A definition may select another language's call-hierarchy route.
+        // Keep its pre-request connection identity for the usual replacement guard.
+        let bundle_router = server.context.translator.router_snapshot();
+        let bundle_origins: std::collections::HashMap<_, _> = if bundle_calls {
+            bundle_router
+                .configured_languages()
+                .iter()
+                .filter_map(|language| {
+                    let origin = bundle_router
+                        .resolve(language.as_ref(), crate::config::ToolKind::CallHierarchy)?;
+                    Some((origin.clone(), resident.incarnation(origin)?))
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
         let binding_tool = if bundle_calls {
             Some(crate::config::ToolKind::CallHierarchy)
         } else {
             tool
         };
-        let origin = if let Some(origin) = origin {
+        let mut origin = if let Some(origin) = origin {
             Some(origin)
         } else if let (Some(file), Some(tool)) = (&file, binding_tool) {
             let path = crate::bridge::ClientPath::try_from(file.clone())
@@ -456,7 +472,7 @@ impl McplsServer {
         } else {
             None
         };
-        let incarnation = expected_incarnation.or_else(|| {
+        let mut incarnation = expected_incarnation.or_else(|| {
             origin
                 .as_ref()
                 .and_then(|origin| resident.incarnation(origin))
@@ -492,6 +508,37 @@ impl McplsServer {
             }
             if name == "get_document_outline" {
                 value["runtime_generation"] = json!(resident.generation);
+            }
+            if bundle_calls
+                && value
+                    .get("sections")
+                    .and_then(|sections| sections.get("outgoing_calls"))
+                    .and_then(|section| section.get("data"))
+                    .is_some_and(|data| data.get("calls").is_some() || data.get("items").is_some())
+            {
+                let target_file = value
+                    .get("target")
+                    .and_then(|target| target.get("file_path"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| DispatchError::stale().wire())?;
+                let target = crate::bridge::ClientPath::try_from(PathBuf::from(target_file))
+                    .map_err(|_| DispatchError::stale().wire())?;
+                let language = server
+                    .context
+                    .translator
+                    .language_for_path(&target)
+                    .await
+                    .map_err(|error| server.render_error(error))?;
+                origin = bundle_router
+                    .resolve(language.as_ref(), crate::config::ToolKind::CallHierarchy)
+                    .cloned();
+                incarnation = origin
+                    .as_ref()
+                    .and_then(|origin| bundle_origins.get(origin))
+                    .cloned();
+                if origin.is_none() || incarnation.is_none() {
+                    return Err(DispatchError::stale().wire());
+                }
             }
             if let (Some(origin), Some(incarnation)) = (&origin, &incarnation) {
                 if resident.incarnation(origin).as_ref() != Some(incarnation) {

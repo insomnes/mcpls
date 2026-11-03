@@ -91,7 +91,10 @@ ordinary absolute-file position addressing; selection is never automatic.
 Targets must pass canonical containment in the query's selected workspace before
 context requests or source access. A separately approved workspace is not selected
 automatically. External candidates remain navigation evidence. Once resolved,
-source or section failures preserve the target and resolution. References, when
+source or section failures preserve the target and resolution. In dispatcher mode,
+a different language backend may remain unstarted; its semantic sections can fail
+until a normal direct request starts it. Source can remain available independently.
+References, when
 issued, identify the selected definition only. Definition metadata is absent in
 direct responses. There is no recursion or whole-body guarantee from navigation.
 

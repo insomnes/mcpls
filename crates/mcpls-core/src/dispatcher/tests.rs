@@ -2076,6 +2076,117 @@ async fn diagnostics_batch_bounds_output_without_rewriting_retained_diagnostics(
     dispatcher.shutdown().await;
 }
 
+/// Definition-context items retain their producing server across language routes.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one public workflow checks cold readiness, producing-server ownership and replacement"
+)]
+async fn symbol_context_definition_items_continue_on_target_server() {
+    let fixture = Fixture::new(4);
+    let query = fixture.main.join("query.rs");
+    let target = fixture.main.join("target.py");
+    std::fs::write(&query, "fn query() {}\n").unwrap();
+    std::fs::write(&target, "def target(): pass\n").unwrap();
+    let script = fixture.profile.parent().unwrap().join("cross-provider.py");
+    let provider = include_str!("../../tests/fixtures/dispatcher_lsp.py")
+        .replace("    elif method == \"textDocument/diagnostic\":", "    elif method == \"textDocument/definition\":\n        result = [{\"uri\": (root / \"target.py\").as_uri(), \"range\": {\"start\": {\"line\": 0, \"character\": 4}, \"end\": {\"line\": 0, \"character\": 10}}}]\n    elif method == \"textDocument/diagnostic\":")
+        .replace("    elif method == \"callHierarchy/outgoingCalls\":", "    elif method == \"callHierarchy/outgoingCalls\" and params[\"item\"].get(\"data\", {}).get(\"server_pid\") != os.getpid():\n        send({\"jsonrpc\": \"2.0\", \"id\": request[\"id\"], \"error\": {\"code\": -32602, \"message\": \"foreign opaque item\"}})\n        continue\n    elif method == \"callHierarchy/outgoingCalls\":");
+    std::fs::write(&script, provider).unwrap();
+    let events = &fixture.events;
+    std::fs::write(&fixture.profile, format!(
+        "[[lsp_servers]]\nlanguage_id='rust'\ncommand='/usr/bin/python3'\nargs=[{script:?},{events:?}]\nfile_patterns=['*.rs']\n[[lsp_servers]]\nlanguage_id='python'\ncommand='/usr/bin/python3'\nargs=[{script:?},{events:?}]\nfile_patterns=['*.py']\n"
+    )).unwrap();
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let definition = call(
+        &client,
+        "get_definition",
+        json!({"file_path":query,"line":1,"character":4}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        definition["locations"][0]["uri"],
+        url::Url::from_file_path(&target).unwrap().as_str()
+    );
+    let cold = call(&client, "get_symbol_context", json!({"file_path":query,"line":1,"character":4,"resolve":"definition","sections":["source","outgoing_calls"]})).await.unwrap();
+    assert_eq!(cold["resolution"]["status"], "resolved");
+    assert_eq!(cold["target"]["file_path"], serde_json::json!(target));
+    assert_eq!(
+        cold["sections"]["source"]["data"]["text"],
+        "def target(): pass\n"
+    );
+    assert_eq!(cold["sections"]["outgoing_calls"]["status"], "error");
+    assert_eq!(
+        cold["sections"]["outgoing_calls"]["reason"],
+        "provider_error"
+    );
+    assert_eq!(
+        fixture
+            .events()
+            .iter()
+            .filter(|event| event["event"] == "start")
+            .count(),
+        1
+    );
+    let direct = call(
+        &client,
+        "get_outgoing_calls",
+        json!({"file_path":target,"line":1,"character":5}),
+    )
+    .await
+    .unwrap();
+    let direct_item = &direct["calls"][0]["to"];
+    let followed = call(&client, "get_outgoing_calls", json!({"item":direct_item}))
+        .await
+        .unwrap();
+    assert_eq!(followed["calls"][0]["to"]["data"], direct_item["data"]);
+    let definition = call(
+        &client,
+        "get_definition",
+        json!({"file_path":query,"line":1,"character":4}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        definition["locations"][0]["uri"],
+        url::Url::from_file_path(&target).unwrap().as_str()
+    );
+    let bundle = call(&client, "get_symbol_context", json!({"file_path":query,"line":1,"character":4,"resolve":"definition","sections":["outgoing_calls"]})).await.unwrap();
+    assert_eq!(bundle["resolution"]["status"], "resolved");
+    let item = &bundle["sections"]["outgoing_calls"]["data"]["calls"][0]["to"];
+    assert_eq!(item["data"], direct_item["data"]);
+    assert!(item["dispatcher_context"].is_string());
+    let followed = call(&client, "get_outgoing_calls", json!({"item":item}))
+        .await
+        .unwrap();
+    assert_eq!(followed["calls"][0]["to"]["data"], item["data"]);
+    for event in fixture
+        .events()
+        .iter()
+        .filter(|event| event["method"] == "callHierarchy/outgoingCalls")
+    {
+        assert_eq!(event["pid"], event["params"]["item"]["data"]["server_pid"]);
+    }
+    call(
+        &client,
+        "restart_server",
+        json!({"workspace_path":fixture.main,"servers":["python"]}),
+    )
+    .await
+    .unwrap();
+    error_code(
+        call(&client, "get_outgoing_calls", json!({"item":item}))
+            .await
+            .unwrap_err(),
+        "stale_continuation",
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.abort();
+}
+
 #[tokio::test]
 async fn symbol_context_outgoing_items_continue_within_final_budget() {
     let fixture = Fixture::new(4);
