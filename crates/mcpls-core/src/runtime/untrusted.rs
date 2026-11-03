@@ -324,7 +324,7 @@ fn home_overrides(
 /// The server learns the workspace from `workspaceFolders`, not from its working
 /// directory; starting in the checkout would let a name lookup or a relative
 /// path resolve into it.
-fn untrusted_working_dir(
+pub fn untrusted_working_dir(
     boundary: &WorkspaceRoots,
     login_home: Option<&Path>,
 ) -> Result<ChildWorkingDir, UntrustedRefusal> {

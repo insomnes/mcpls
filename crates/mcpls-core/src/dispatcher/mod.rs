@@ -1032,7 +1032,12 @@ impl Resident {
                 let mut runtime =
                     WorkspaceRuntime::prepare_scoped(&config, Some(execution_boundary))
                         .await
-                        .map_err(|_| DispatchError::profile(&self.selection.profile))?;
+                        .map_err(|error| match error {
+                            crate::error::Error::FileWatchingUnavailable => {
+                                DispatchError::new("workspace_unavailable", error.to_string())
+                            }
+                            _ => DispatchError::profile(&self.selection.profile),
+                        })?;
                 runtime
                     .subscription_registry
                     .set_validity(Arc::new(RuntimeValidity {

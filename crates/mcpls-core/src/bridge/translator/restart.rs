@@ -208,6 +208,7 @@ impl RestartFailure {
             | Error::StdioCapture(_)
             | Error::Timeout(_)
             | Error::LspServerError(..)
+            | Error::FileWatchingUnavailable
             | Error::LspProtocolError(_)
             | Error::ShutdownTimeout
             | Error::Io(_)

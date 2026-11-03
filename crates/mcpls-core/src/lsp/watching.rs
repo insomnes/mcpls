@@ -16,15 +16,10 @@ use tokio::sync::broadcast;
 use crate::config::{FileWatchingBackend, FileWatchingConfig};
 use crate::error::{Error, Result};
 use crate::lsp::types::JsonRpcError;
-use crate::redaction::RedactedText;
 
 pub(crate) fn unavailable(message: impl std::fmt::Display) -> Error {
-    {
-        tracing::warn!("File watching backend unavailable: {message}");
-        Error::LspProtocolError(RedactedText::fixed(
-            "file watching backend unavailable; inspect backend configuration and restart the workspace runtime",
-        ))
-    }
+    tracing::warn!("File watching backend unavailable: {message}");
+    Error::FileWatchingUnavailable
 }
 
 // A quiet subscription need not produce an initial notification. Drain optional
@@ -93,18 +88,20 @@ impl Backend {
     pub(crate) async fn start(
         config: &FileWatchingConfig,
         roots: &[PathBuf],
-        trusted: bool,
+        execution_boundary: Option<&crate::bridge::WorkspaceRoots>,
     ) -> Result<Option<Arc<Self>>> {
         if config.backend == FileWatchingBackend::Disabled {
             return Ok(None);
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (roots, trusted);
+            let _ = (roots, execution_boundary);
             return Err(unavailable("Watchman requires Linux"));
         }
         #[cfg(target_os = "linux")]
-        Self::start_linux(config, roots, trusted).await.map(Some)
+        Self::start_linux(config, roots, execution_boundary)
+            .await
+            .map(Some)
     }
 
     #[cfg(target_os = "linux")]
@@ -115,7 +112,7 @@ impl Backend {
     async fn start_linux(
         config: &FileWatchingConfig,
         roots: &[PathBuf],
-        trusted: bool,
+        execution_boundary: Option<&crate::bridge::WorkspaceRoots>,
     ) -> Result<Arc<Self>> {
         use std::process::Stdio;
 
@@ -148,15 +145,23 @@ impl Backend {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        if !trusted {
-            let configured = roots
-                .iter()
-                .map(|root| crate::config::ConfiguredRoot::new(root.clone()).map_err(unavailable))
-                .collect::<Result<Vec<_>>>()?;
-            let boundary = crate::bridge::WorkspaceRoots::from_configured(&configured)?;
+        if let Some(boundary) = execution_boundary {
+            let working_dir = crate::runtime::untrusted::untrusted_working_dir(
+                boundary,
+                crate::config::login_home_dir().as_deref(),
+            )
+            .map_err(unavailable)?;
+            match working_dir {
+                super::ChildWorkingDir::Fixed(directory) => {
+                    command.current_dir(directory);
+                }
+                super::ChildWorkingDir::Inherit => {
+                    return Err(unavailable("no safe untrusted working directory"));
+                }
+            }
             let path = super::command_path::path_outside(
                 &std::env::var_os("PATH").unwrap_or_default(),
-                &boundary,
+                boundary,
             );
             command.env(
                 "PATH",

@@ -2132,6 +2132,12 @@ pub enum Error {
         io: std::io::Error,
     },
 
+    /// Client filesystem coverage could not be established or was lost.
+    #[error(
+        "file watching backend unavailable; inspect backend configuration and restart the workspace runtime"
+    )]
+    FileWatchingUnavailable,
+
     /// LSP protocol error during message parsing.
     #[error("LSP protocol error: {}", escape_control(.0.as_str()))]
     LspProtocolError(RedactedText),
@@ -2678,6 +2684,7 @@ impl Error {
             | Self::Timeout(_)
             | Self::ServerSpawnFailed { .. }
             | Self::ServerNotFound { .. }
+            | Self::FileWatchingUnavailable
             | Self::LspProtocolError(_)
             | Self::ServerTerminated
             | Self::ShutdownTimeout
@@ -2734,6 +2741,7 @@ impl Error {
             | Self::Timeout(..)
             | Self::ServerSpawnFailed { .. }
             | Self::ServerNotFound { .. }
+            | Self::FileWatchingUnavailable
             | Self::LspProtocolError(..)
             | Self::NoResolvableListenUris
             | Self::InvalidPositionInput(..)

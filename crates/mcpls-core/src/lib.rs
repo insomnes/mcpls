@@ -373,9 +373,30 @@ impl WorkspaceRuntime {
             &config.lsp_servers,
             lsp::current_environment(),
         ));
+        let watching_boundary_override = boundary.clone();
         let (workspace_roots, plan) =
             plan_off_runtime(config, &startup_redactions, boundary).await?;
         let (mut applicable_configs, refused, refusals) = plan.into_parts();
+        let execution_boundary =
+            if matches!(config.workspace_trust, config::WorkspaceTrust::Untrusted(_))
+                && config.workspace.file_watching.backend == config::FileWatchingBackend::Watchman
+            {
+                Some(if let Some(paths) = watching_boundary_override {
+                    let configured = paths
+                        .into_iter()
+                        .map(config::ConfiguredRoot::new)
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(lsp::watching::unavailable)?;
+                    WorkspaceRoots::from_configured(&configured)?
+                } else {
+                    workspace_roots.untrusted_boundary(
+                        &config.workspace.roots,
+                        config::login_home_dir().as_deref(),
+                    )
+                })
+            } else {
+                None
+            };
         let mut watching_config = config.workspace.file_watching.clone();
         if watching_config.backend == config::FileWatchingBackend::Watchman {
             let resolved = lsp::command_path::resolve_named(
@@ -384,8 +405,9 @@ impl WorkspaceRuntime {
                 lsp::process_env,
             )
             .ok_or_else(|| lsp::watching::unavailable("cannot resolve Watchman executable"))?;
-            if matches!(config.workspace_trust, config::WorkspaceTrust::Untrusted(_))
-                && workspace_roots.contains_resolved_prefix(&resolved.canonical)
+            if execution_boundary
+                .as_ref()
+                .is_some_and(|boundary| boundary.contains_resolved_prefix(&resolved.canonical))
             {
                 return Err(lsp::watching::unavailable(
                     "untrusted workspace executable refused",
@@ -396,7 +418,7 @@ impl WorkspaceRuntime {
         let watching = lsp::watching::Backend::start(
             &watching_config,
             workspace_roots.canonical(),
-            matches!(config.workspace_trust, config::WorkspaceTrust::Trusted),
+            execution_boundary.as_ref(),
         )
         .await?;
         for init in &mut applicable_configs {
