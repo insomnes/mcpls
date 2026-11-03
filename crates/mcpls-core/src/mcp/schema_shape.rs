@@ -362,8 +362,135 @@ fn shape_client_contract(tool: &mut Tool) {
             }
         }
     }
+    repair_finite_client_leaves(&mut value, tool.name.as_ref());
     if let Value::Object(shaped) = value {
         *output = shaped;
+    }
+}
+
+/// Repair only the finite leaves demonstrated to lose types in client readback.
+fn repair_finite_client_leaves(value: &mut Value, tool: &str) {
+    let enum_paths: &[&str] = if tool == "get_diagnostics" {
+        for (name, owner) in [
+            (
+                "DiagnosticSeverity",
+                "/$defs/ContextualDiagnostic/properties/severity",
+            ),
+            (
+                "EnrichmentSummary",
+                "/$defs/DiagnosticsReport/properties/enrichment",
+            ),
+            (
+                "DiagnosticsOrigin",
+                "/$defs/DiagnosticsReport/properties/origin",
+            ),
+            (
+                "PositionDegradation",
+                "/$defs/DiagnosticsReport/properties/positions_degraded",
+            ),
+        ] {
+            let definition = value.pointer(&format!("/$defs/{name}")).cloned();
+            if let Some(definition) = definition
+                && let Some(property) = value.pointer_mut(owner)
+                && property.as_object().is_some_and(|object| object.len() == 1)
+                && property.get("$ref").and_then(Value::as_str)
+                    == Some(format!("#/$defs/{name}").as_str())
+            {
+                *property = definition;
+                if let Some(definitions) = value.get_mut("$defs").and_then(Value::as_object_mut) {
+                    definitions.remove(name);
+                }
+            }
+        }
+        for (branch, forbidden) in [(0, "error"), (1, "report")] {
+            if let Some(properties) = value
+                .pointer_mut(&format!(
+                    "/anyOf/1/properties/results/items/oneOf/{branch}/properties"
+                ))
+                .and_then(Value::as_object_mut)
+            {
+                // The retained `not: {required: ...}` constraint forbids this
+                // property; listing it would add an impossible union member.
+                properties.remove(forbidden);
+            }
+        }
+        &[
+            "/$defs/ContextualDiagnostic/properties/severity",
+            "/$defs/DiagnosticsAvailability",
+            "/$defs/DiagnosticsReport/properties/origin",
+            "/$defs/DiagnosticsReport/properties/positions_degraded",
+            "/$defs/NotComputedReason",
+            "/$defs/SymbolFidelity",
+            "/$defs/UnavailableReason",
+        ]
+    } else if matches!(tool, "get_incoming_calls" | "get_outgoing_calls") {
+        let position = value.pointer("/$defs/Position2D").cloned();
+        let source = value.pointer("/$defs/PositionSource").cloned();
+        let resolved = value.pointer("/$defs/ResolvedSymbol").cloned();
+        if let Some(position) = position
+            && let Some(source) = source
+            && let Some(mut resolved) = resolved
+        {
+            if let Some(start) = value.pointer_mut("/$defs/Range/properties/start") {
+                *start = position.clone();
+            }
+            if let Some(field) = resolved.pointer_mut("/properties/position") {
+                *field = position;
+            }
+            if let Some(field) = resolved.pointer_mut("/properties/position_source") {
+                *field = source;
+            }
+            if let Some(field) =
+                value.pointer_mut("/$defs/Indexed/anyOf/1/properties/resolved_symbol/anyOf/0")
+            {
+                *field = resolved;
+            }
+        }
+        &[
+            "/$defs/Indexed/anyOf/1/properties/positions_degraded/anyOf/0",
+            "/$defs/Indexed/anyOf/1/properties/resolved_symbol/anyOf/0/properties/position_source",
+            "/$defs/Indexed/anyOf/1/properties/status",
+            "/$defs/PositionDegradation",
+            "/$defs/PositionSource",
+            "/$defs/PreparationStatus",
+        ]
+    } else {
+        return;
+    };
+    compact_known_string_enums(value, enum_paths);
+}
+
+fn compact_known_string_enums(value: &mut Value, enum_paths: &[&str]) {
+    for path in enum_paths {
+        let Some(object) = value.pointer_mut(path).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let Some(branches) = object.get("oneOf").and_then(Value::as_array) else {
+            continue;
+        };
+        // Distinct string constants make oneOf and enum equivalent. Do not
+        // rewrite annotated or constrained branches, or a different root type.
+        if branches.is_empty() || object.get("type").is_some_and(|kind| kind != "string") {
+            continue;
+        }
+        let literals: Option<Vec<Value>> = branches
+            .iter()
+            .map(|branch| {
+                let branch = branch.as_object()?;
+                if branch.len() != 2 || branch.get("type")?.as_str()? != "string" {
+                    return None;
+                }
+                Some(Value::String(branch.get("const")?.as_str()?.to_owned()))
+            })
+            .collect();
+        let Some(literals) = literals else { continue };
+        let unique: BTreeSet<&str> = literals.iter().filter_map(Value::as_str).collect();
+        if unique.len() != literals.len() {
+            continue;
+        }
+        object.remove("oneOf");
+        object.insert("type".into(), Value::String("string".into()));
+        object.insert("enum".into(), Value::Array(literals));
     }
 }
 
@@ -939,13 +1066,19 @@ mod tests {
             .as_array()
             .unwrap()
         {
+            let outcome = branch["properties"]["status"]["const"].as_str().unwrap();
+            let (present, forbidden) = if outcome == "ok" {
+                ("report", "error")
+            } else {
+                ("error", "report")
+            };
+            assert!(branch["properties"].get(present).is_some());
+            assert!(branch["properties"].get(forbidden).is_none());
             for field in [
                 "input_index",
                 "file_path",
                 "status",
                 "truncated",
-                "report",
-                "error",
                 "omitted_diagnostics",
             ] {
                 assert!(branch["properties"].get(field).is_some(), "{field}");

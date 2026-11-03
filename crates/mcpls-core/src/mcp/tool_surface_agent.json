@@ -2813,7 +2813,13 @@
               "$ref": "#/$defs/Range"
             },
             "severity": {
-              "$ref": "#/$defs/DiagnosticSeverity"
+              "enum": [
+                "error",
+                "warning",
+                "information",
+                "hint"
+              ],
+              "type": "string"
             }
           },
           "required": [
@@ -2823,57 +2829,13 @@
           ],
           "type": "object"
         },
-        "DiagnosticSeverity": {
-          "oneOf": [
-            {
-              "const": "error",
-              "type": "string"
-            },
-            {
-              "const": "warning",
-              "type": "string"
-            },
-            {
-              "const": "information",
-              "type": "string"
-            },
-            {
-              "const": "hint",
-              "type": "string"
-            }
-          ]
-        },
         "DiagnosticsAvailability": {
-          "oneOf": [
-            {
-              "const": "published",
-              "type": "string"
-            },
-            {
-              "const": "pending",
-              "type": "string"
-            },
-            {
-              "const": "evicted",
-              "type": "string"
-            }
-          ]
-        },
-        "DiagnosticsOrigin": {
-          "oneOf": [
-            {
-              "const": "pull",
-              "type": "string"
-            },
-            {
-              "const": "push_cache",
-              "type": "string"
-            },
-            {
-              "const": "cache_after_failed_pull",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "published",
+            "pending",
+            "evicted"
+          ],
+          "type": "string"
         },
         "DiagnosticsReport": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2888,16 +2850,45 @@
               "type": "array"
             },
             "enrichment": {
-              "$ref": "#/$defs/EnrichmentSummary"
+              "properties": {
+                "cut_short": {
+                  "type": "boolean"
+                },
+                "files_enriched": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "files_skipped": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "files_enriched",
+                "files_skipped",
+                "cut_short"
+              ],
+              "type": "object"
             },
             "indexing_in_progress": {
               "type": "boolean"
             },
             "origin": {
-              "$ref": "#/$defs/DiagnosticsOrigin"
+              "enum": [
+                "pull",
+                "push_cache",
+                "cache_after_failed_pull"
+              ],
+              "type": "string"
             },
             "positions_degraded": {
-              "$ref": "#/$defs/PositionDegradation"
+              "enum": [
+                "response",
+                "request"
+              ],
+              "type": "string"
             },
             "push_notifications_degraded": {
               "type": "boolean"
@@ -3001,48 +2992,14 @@
             }
           ]
         },
-        "EnrichmentSummary": {
-          "properties": {
-            "cut_short": {
-              "type": "boolean"
-            },
-            "files_enriched": {
-              "format": "uint",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "files_skipped": {
-              "format": "uint",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "files_enriched",
-            "files_skipped",
-            "cut_short"
-          ],
-          "type": "object"
-        },
         "NotComputedReason": {
-          "oneOf": [
-            {
-              "const": "file_cap",
-              "type": "string"
-            },
-            {
-              "const": "out_of_workspace",
-              "type": "string"
-            },
-            {
-              "const": "tracker_limit",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "file_cap",
+            "out_of_workspace",
+            "tracker_limit",
+            "deadline"
+          ],
+          "type": "string"
         },
         "Position2D": {
           "properties": {
@@ -3063,18 +3020,6 @@
           ],
           "type": "object"
         },
-        "PositionDegradation": {
-          "oneOf": [
-            {
-              "const": "response",
-              "type": "string"
-            },
-            {
-              "const": "request",
-              "type": "string"
-            }
-          ]
-        },
         "Range": {
           "properties": {
             "end": {
@@ -3091,32 +3036,19 @@
           "type": "object"
         },
         "SymbolFidelity": {
-          "oneOf": [
-            {
-              "const": "hierarchical",
-              "type": "string"
-            },
-            {
-              "const": "flat",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "hierarchical",
+            "flat"
+          ],
+          "type": "string"
         },
         "UnavailableReason": {
-          "oneOf": [
-            {
-              "const": "capability_absent",
-              "type": "string"
-            },
-            {
-              "const": "request_failed",
-              "type": "string"
-            },
-            {
-              "const": "timed_out",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "capability_absent",
+            "request_failed",
+            "timed_out"
+          ],
+          "type": "string"
         }
       },
       "anyOf": [
@@ -3135,25 +3067,6 @@
                       ]
                     },
                     "properties": {
-                      "error": {
-                        "properties": {
-                          "code": {
-                            "type": "integer"
-                          },
-                          "message": {
-                            "type": "string"
-                          },
-                          "retryable": {
-                            "type": "boolean"
-                          }
-                        },
-                        "required": [
-                          "code",
-                          "message",
-                          "retryable"
-                        ],
-                        "type": "object"
-                      },
                       "file_path": {
                         "type": "string"
                       },
@@ -3221,9 +3134,6 @@
                       "omitted_diagnostics": {
                         "minimum": 0,
                         "type": "integer"
-                      },
-                      "report": {
-                        "$ref": "#/$defs/DiagnosticsReport"
                       },
                       "status": {
                         "const": "error"
@@ -4430,16 +4340,11 @@
                 "positions_degraded": {
                   "anyOf": [
                     {
-                      "oneOf": [
-                        {
-                          "const": "response",
-                          "type": "string"
-                        },
-                        {
-                          "const": "request",
-                          "type": "string"
-                        }
-                      ]
+                      "enum": [
+                        "response",
+                        "request"
+                      ],
+                      "type": "string"
                     },
                     {
                       "type": "null"
@@ -4449,7 +4354,55 @@
                 "resolved_symbol": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/ResolvedSymbol"
+                      "properties": {
+                        "container": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "kind": {
+                          "format": "uint32",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "position": {
+                          "properties": {
+                            "character": {
+                              "format": "uint32",
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "line": {
+                              "format": "uint32",
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "line",
+                            "character"
+                          ],
+                          "type": "object"
+                        },
+                        "position_source": {
+                          "enum": [
+                            "selection_range",
+                            "inferred"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "kind",
+                        "position",
+                        "position_source"
+                      ],
+                      "type": "object"
                     },
                     {
                       "type": "null"
@@ -4457,20 +4410,12 @@
                   ]
                 },
                 "status": {
-                  "oneOf": [
-                    {
-                      "const": "no_item",
-                      "type": "string"
-                    },
-                    {
-                      "const": "selection_required",
-                      "type": "string"
-                    },
-                    {
-                      "const": "preparation_incomplete",
-                      "type": "string"
-                    }
-                  ]
+                  "enum": [
+                    "no_item",
+                    "selection_required",
+                    "preparation_incomplete"
+                  ],
+                  "type": "string"
                 },
                 "truncated": {
                   "type": "boolean"
@@ -4506,44 +4451,26 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "oneOf": [
-            {
-              "const": "response",
-              "type": "string"
-            },
-            {
-              "const": "request",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "response",
+            "request"
+          ],
+          "type": "string"
         },
         "PositionSource": {
-          "oneOf": [
-            {
-              "const": "selection_range",
-              "type": "string"
-            },
-            {
-              "const": "inferred",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "selection_range",
+            "inferred"
+          ],
+          "type": "string"
         },
         "PreparationStatus": {
-          "oneOf": [
-            {
-              "const": "no_item",
-              "type": "string"
-            },
-            {
-              "const": "selection_required",
-              "type": "string"
-            },
-            {
-              "const": "preparation_incomplete",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "no_item",
+            "selection_required",
+            "preparation_incomplete"
+          ],
+          "type": "string"
         },
         "Range": {
           "properties": {
@@ -4551,7 +4478,23 @@
               "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D"
+              "properties": {
+                "character": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "line",
+                "character"
+              ],
+              "type": "object"
             }
           },
           "required": [
@@ -5176,16 +5119,11 @@
                 "positions_degraded": {
                   "anyOf": [
                     {
-                      "oneOf": [
-                        {
-                          "const": "response",
-                          "type": "string"
-                        },
-                        {
-                          "const": "request",
-                          "type": "string"
-                        }
-                      ]
+                      "enum": [
+                        "response",
+                        "request"
+                      ],
+                      "type": "string"
                     },
                     {
                       "type": "null"
@@ -5195,7 +5133,55 @@
                 "resolved_symbol": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/ResolvedSymbol"
+                      "properties": {
+                        "container": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "kind": {
+                          "format": "uint32",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "position": {
+                          "properties": {
+                            "character": {
+                              "format": "uint32",
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "line": {
+                              "format": "uint32",
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "line",
+                            "character"
+                          ],
+                          "type": "object"
+                        },
+                        "position_source": {
+                          "enum": [
+                            "selection_range",
+                            "inferred"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "kind",
+                        "position",
+                        "position_source"
+                      ],
+                      "type": "object"
                     },
                     {
                       "type": "null"
@@ -5203,20 +5189,12 @@
                   ]
                 },
                 "status": {
-                  "oneOf": [
-                    {
-                      "const": "no_item",
-                      "type": "string"
-                    },
-                    {
-                      "const": "selection_required",
-                      "type": "string"
-                    },
-                    {
-                      "const": "preparation_incomplete",
-                      "type": "string"
-                    }
-                  ]
+                  "enum": [
+                    "no_item",
+                    "selection_required",
+                    "preparation_incomplete"
+                  ],
+                  "type": "string"
                 },
                 "truncated": {
                   "type": "boolean"
@@ -5297,44 +5275,26 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "oneOf": [
-            {
-              "const": "response",
-              "type": "string"
-            },
-            {
-              "const": "request",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "response",
+            "request"
+          ],
+          "type": "string"
         },
         "PositionSource": {
-          "oneOf": [
-            {
-              "const": "selection_range",
-              "type": "string"
-            },
-            {
-              "const": "inferred",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "selection_range",
+            "inferred"
+          ],
+          "type": "string"
         },
         "PreparationStatus": {
-          "oneOf": [
-            {
-              "const": "no_item",
-              "type": "string"
-            },
-            {
-              "const": "selection_required",
-              "type": "string"
-            },
-            {
-              "const": "preparation_incomplete",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "no_item",
+            "selection_required",
+            "preparation_incomplete"
+          ],
+          "type": "string"
         },
         "Range": {
           "properties": {
@@ -5342,7 +5302,23 @@
               "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D"
+              "properties": {
+                "character": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "line",
+                "character"
+              ],
+              "type": "object"
             }
           },
           "required": [
