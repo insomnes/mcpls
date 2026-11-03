@@ -27,7 +27,7 @@ It starts the language servers it needs for your project, translates every quest
 - **Real diagnostics.** Read the errors and warnings the compiler or linter reports, not guesses.
 - **Safe refactoring.** Get a workspace-wide rename plan as a set of edits.
 
-mcpls does not change your files. Tools such as `rename_symbol` and `format_document` return edits for the assistant to apply; every other tool is read-only.
+Tools such as `rename_symbol` and `format_document` propose source edits for the assistant to apply. `feedback_add` appends explicit reports to a private local JSONL file, and `restart_server` stops and starts language server processes. Other tools are read-only.
 
 ## How this book is organized
 

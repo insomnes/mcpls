@@ -69,7 +69,7 @@ An ambiguous `symbol_name` never produces edits; mcpls returns the candidates in
 
 `rename_symbol`, `format_document`, `format_range`, and `get_code_actions` return readable previews by default.
 Set `full: true` to also receive exact normalized raw `edits`, including unredacted replacement text.
-Default responses omit `edits`. mcpls never writes files or executes action commands.
+Default responses omit `edits`. These refactoring and formatting tools do not apply source edits or execute action commands. Separately, `feedback_add` appends explicit reports to a private local JSONL file.
 
 Every retained document has `uri`, `edit_count`, `preview`, and `analysis_freshness: "unknown"`.
 Formatting returns a one-document `changes` array, including successful empty edit sets.
