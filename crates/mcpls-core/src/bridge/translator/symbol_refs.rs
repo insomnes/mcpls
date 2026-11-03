@@ -112,6 +112,8 @@ impl Translator {
         path: &ClientPath,
         raw: &str,
     ) -> Result<(Position, usize)> {
+        // Authorization derives only from the caller's path and current roots.
+        let validated = self.validate_path(path).await.map_err(source_error)?;
         let invalid = || {
             rejected(
                 "invalid_symbol_ref",
@@ -148,8 +150,6 @@ impl Translator {
             _ => return Err(invalid()),
         };
         let position = Position::from_client(line, character).map_err(|_| invalid())?;
-        // Authorization derives only from the caller's path and current roots.
-        let validated = self.validate_path(path).await.map_err(source_error)?;
         let expected_file = validated.as_path().to_path_buf();
         let binding_matches = match &reference {
             SymbolRef::Legacy(reference) => {

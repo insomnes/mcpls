@@ -9781,6 +9781,40 @@ sleep 0.3
                 );
             }
         }
+        let outside = tempfile::TempDir::new().unwrap();
+        let outside_file = outside.path().join("outside.rs");
+        std::fs::write(&outside_file, original).unwrap();
+        for consumer in consumers {
+            for reference in [target["symbol_ref"].as_str().unwrap(), "broken", ""] {
+                let before = requests.lock().await.len();
+                let response = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    serde_json::json!({"name":consumer,"arguments":{"symbol_target":{
+                        "file_path":outside_file,"symbol_ref":reference
+                    }}}),
+                )
+                .await;
+                assert!(
+                    response["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("path outside workspace"),
+                    "{consumer}: {response}"
+                );
+                assert!(
+                    response["error"]
+                        .get("data")
+                        .and_then(|data| data.get("kind"))
+                        .is_none(),
+                    "{response}"
+                );
+                assert_eq!(
+                    requests.lock().await.len(),
+                    before,
+                    "unauthorized references must not dispatch"
+                );
+            }
+        }
         let other_file = fixture.dir.path().join("other.rs");
         std::fs::write(&other_file, original).unwrap();
         let response = tools_call_over_the_wire(
