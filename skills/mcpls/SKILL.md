@@ -23,7 +23,7 @@ metadata:
 mcpls is a single Rust binary that bridges the Model Context Protocol (MCP) to the
 Language Server Protocol (LSP). It spawns and speaks LSP to real language servers
 (rust-analyzer, pyright, gopls, clangd, …) and exposes their capabilities to an AI
-agent as 27 default MCP tools (30 with the full profile) — hover, go-to-definition, references, diagnostics, rename with internal preparation, completions, symbols, formatting (document and range), call and type
+agent as 30 default MCP tools (33 with the full profile) — hover, go-to-definition, references, diagnostics, rename with internal preparation, completions, symbols, formatting (document and range), call and type
 hierarchy, document highlights, a `get_tool_support` report of which tools work for which
 languages, and more.
 

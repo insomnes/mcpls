@@ -14,6 +14,10 @@ struct Client {
     id: u64,
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "test fixture failures must panic with the underlying error"
+)]
 impl Client {
     fn new(root: &Path, config: &str) -> Self {
         let config_path = root.join("config.toml");
@@ -39,7 +43,7 @@ impl Client {
             output,
             id: 0,
         };
-        let initialized = client.request("initialize", json!({"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"feedback-test","version":"1"}}));
+        let initialized = client.request("initialize", &json!({"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"feedback-test","version":"1"}}));
         assert!(initialized.get("result").is_some(), "{initialized}");
         writeln!(
             client.input,
@@ -50,7 +54,7 @@ impl Client {
         client
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Value {
+    fn request(&mut self, method: &str, params: &Value) -> Value {
         self.id += 1;
         writeln!(
             self.input,
@@ -69,8 +73,8 @@ impl Client {
         }
     }
 
-    fn feedback(&mut self, name: &str, args: Value) -> Value {
-        self.request("tools/call", json!({"name":name,"arguments":args}))
+    fn feedback(&mut self, name: &str, args: &Value) -> Value {
+        self.request("tools/call", &json!({"name":name,"arguments":args}))
     }
 }
 
@@ -99,7 +103,7 @@ fn feedback_preserves_explicit_text_and_repeated_reports_in_both_profiles() {
                 "[mcp]\ntool_profile = {profile:?}\ntool_prefix = 'test'\n[workspace]\nroots = []\n"
             ),
         );
-        let discovered = client.request("tools/list", json!({}));
+        let discovered = client.request("tools/list", &json!({}));
         let tool = discovered["result"]["tools"]
             .as_array()
             .unwrap()
@@ -112,8 +116,8 @@ fn feedback_preserves_explicit_text_and_repeated_reports_in_both_profiles() {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         assert!(!root.path().join("state/mcpls").exists());
         let args = json!({"operation":" get_hover ","observation":"λ\nsecond line","category":"friction","workaround":" retry "});
-        success(&client.feedback("test_feedback_add", args.clone()));
-        success(&client.feedback("test_feedback_add", args.clone()));
+        success(&client.feedback("test_feedback_add", &args));
+        success(&client.feedback("test_feedback_add", &args));
         let text = std::fs::read_to_string(root.path().join("state/mcpls/feedback.jsonl")).unwrap();
         let records: Vec<Value> = text
             .lines()
@@ -146,7 +150,7 @@ fn invalid_feedback_never_creates_storage() {
         json!({"operation":"hover","observation":"failure","workaround":""}),
         json!({"operation":"hover","observation":"failure","workspace_path":"/tmp"}),
     ] {
-        let response = client.feedback("feedback_add", args);
+        let response = client.feedback("feedback_add", &args);
         assert!(
             response.get("error").is_some() || response["result"]["isError"] == true,
             "{response}"
@@ -155,7 +159,7 @@ fn invalid_feedback_never_creates_storage() {
     }
     success(&client.feedback(
         "feedback_add",
-        json!({"operation":"é".repeat(64),"observation":"é".repeat(1024)}),
+        &json!({"operation":"é".repeat(64),"observation":"é".repeat(1024)}),
     ));
 }
 
@@ -173,7 +177,7 @@ fn separate_processes_append_complete_records_without_losing_successes() {
         std::thread::spawn(move || {
             barrier.wait();
             for report in 0..8 {
-                success(&client.feedback("feedback_add", json!({"operation":format!("{index}:{report}"),"observation":"λ\n".repeat(512)})));
+                success(&client.feedback("feedback_add", &json!({"operation":format!("{index}:{report}"),"observation":"λ\n".repeat(512)})));
             }
         })
     }).collect();
@@ -199,7 +203,7 @@ fn feedback_storage_is_private_and_refuses_unsafe_destinations() {
     let root = TempDir::new().unwrap();
     let mut client = Client::new(root.path(), "[workspace]\nroots = []\n");
     let args = json!({"operation":"hover","observation":"failure"});
-    success(&client.feedback("feedback_add", args.clone()));
+    success(&client.feedback("feedback_add", &args));
     let dir = root.path().join("state/mcpls");
     let file = dir.join("feedback.jsonl");
     assert_eq!(
@@ -214,7 +218,7 @@ fn feedback_storage_is_private_and_refuses_unsafe_destinations() {
     let original = std::fs::read(&file).unwrap();
     assert!(
         client
-            .feedback("feedback_add", args.clone())
+            .feedback("feedback_add", &args)
             .get("error")
             .is_some()
     );
@@ -223,6 +227,11 @@ fn feedback_storage_is_private_and_refuses_unsafe_destinations() {
     let target = root.path().join("target");
     std::fs::write(&target, "untouched").unwrap();
     symlink(&target, &file).unwrap();
-    assert!(client.feedback("feedback_add", args).get("error").is_some());
+    assert!(
+        client
+            .feedback("feedback_add", &args)
+            .get("error")
+            .is_some()
+    );
     assert_eq!(std::fs::read_to_string(target).unwrap(), "untouched");
 }

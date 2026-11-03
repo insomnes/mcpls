@@ -8809,6 +8809,17 @@ sleep 0.3
                 .get_tool_support(Parameters(ToolSupportParams::default()))
                 .await
                 .map(|_| ()),
+            // Invalid feedback exercises the local handler without writing to
+            // the user's state directory during the capability parity matrix.
+            McpTool::FeedbackAdd => server
+                .feedback_add(Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({"operation":"", "observation":"test"}),
+                    )
+                    .unwrap(),
+                ))
+                .await
+                .map(|_| ()),
             McpTool::RestartServer => server
                 .restart_server(Parameters(
                     serde_json::from_value(serde_json::json!({"servers": ["unconfigured"]}))

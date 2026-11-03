@@ -9,7 +9,7 @@
 
 **Give your AI coding agent a compiler's understanding of your code.**
 
-mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 29 default MCP tools (32 with the full profile), so an AI client reasons about code the way an IDE does.
+mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 30 default MCP tools (33 with the full profile), so an AI client reasons about code the way an IDE does.
 
 ```mermaid
 flowchart LR
