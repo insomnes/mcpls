@@ -42,6 +42,9 @@ while True:
     event("request", method=method, params=params)
     if method == "exit":
         break
+    if method == "textDocument/hover" and (root / ".exit-on-hover").exists():
+        (root / ".exit-on-hover").unlink()
+        sys.exit(0)
     if method == "textDocument/didOpen" and not (root / ".diagnostics.json").exists():
         uri = params["textDocument"]["uri"]
         send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
@@ -58,6 +61,9 @@ while True:
         result = {"capabilities": {"hoverProvider": True, "definitionProvider": True, "documentSymbolProvider": True,
                                    "workspaceSymbolProvider": True, "callHierarchyProvider": True, "typeHierarchyProvider": True}}
     elif method == "textDocument/diagnostic":
+        if (root / ".diagnostics-error.json").exists():
+            send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": json.loads((root / ".diagnostics-error.json").read_text()), "message": "authored diagnostic failure"}})
+            continue
         result = {"kind": "full", "items": [{"range": {"start": {"line": 0, "character": 0},
                     "end": {"line": 0, "character": 1}},
                     "message": "problem " + (root / "marker").read_text(), "severity": 1}]}

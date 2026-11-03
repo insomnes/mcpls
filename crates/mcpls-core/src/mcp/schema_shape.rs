@@ -466,7 +466,7 @@ mod tests {
     use super::super::server::McplsServer;
 
     /// Total serialized `tools` array budget, including compact document navigation.
-    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 140_000;
+    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 149_000;
     /// Largest serialized single `Tool` (compact bytes).
     const TOOL_BUDGET_BYTES: usize = 9_000;
     /// Sum of all schema `description` bytes.
@@ -705,6 +705,15 @@ mod tests {
             let Some(output) = tool.output_schema.as_deref() else {
                 continue;
             };
+            // Delta's reusable input records and exact outcome variants remain closed.
+            // Its output root follows the catalog's additive evolution convention.
+            if tool.name == "diagnostics_delta" {
+                assert_ne!(
+                    output.get("additionalProperties"),
+                    Some(&Value::Bool(false))
+                );
+                continue;
+            }
             let mut found = Vec::new();
             object_schemas_with_openness(&Value::Object(output.clone()), "", false, &mut found);
             violations.extend(

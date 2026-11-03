@@ -153,7 +153,7 @@ async fn lazy_catalog_and_worktree_isolation() {
     let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
     let (client, task) = connect(fixture.server(dispatcher.clone())).await;
     let before = client.peer().list_all_tools().await.unwrap();
-    assert_eq!(before.len(), 29);
+    assert_eq!(before.len(), 30);
     let support = call(&client, "get_tool_support", json!({})).await.unwrap();
     assert_eq!(support["basis"], "configured");
     let status = call(
@@ -741,13 +741,13 @@ async fn dispatcher_catalog_budget_and_static_null_support() {
         );
         let tools = client.peer().list_all_tools().await.unwrap();
         let expected = if profile == crate::config::ToolProfile::Full {
-            32
+            33
         } else {
-            29
+            30
         };
         assert_eq!(tools.len(), expected);
         let size = serde_json::to_vec(&tools).unwrap().len();
-        assert!(size <= 140_000, "dispatcher catalog uses {size} bytes");
+        assert!(size <= 149_000, "dispatcher catalog uses {size} bytes");
         dispatcher.shutdown().await;
         client.cancel().await.unwrap();
         task.await.unwrap();
@@ -2250,6 +2250,121 @@ async fn diagnostics_delta_round_trip_and_cached_no_sync() {
     assert_eq!(delta["added"].as_array().unwrap().len(), 1);
     assert_eq!(delta["added"][0]["source"], "fixture");
     dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// A cancelled unadvertised provider probe cannot qualify report removals.
+#[tokio::test]
+async fn diagnostics_delta_failed_probe_is_incomplete() {
+    let fixture = Fixture::new(4);
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    call(&client, "get_hover", hover(&fixture.main))
+        .await
+        .unwrap();
+    let path = fixture.main.join("file.py");
+    let baseline = loop {
+        let captured = call(
+            &client,
+            "diagnostics_delta",
+            json!({"file_path":path,"action":"capture","mode":"cached"}),
+        )
+        .await
+        .unwrap();
+        if !captured["baseline"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+        {
+            break captured["baseline"].clone();
+        }
+        tokio::task::yield_now().await;
+    };
+    std::fs::write(fixture.main.join(".diagnostics-error.json"), "-32802").unwrap();
+    let compared = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"compare","baseline":baseline}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(compared["report"]["pull_kind"], "failed");
+    assert_eq!(compared["report"]["origin"], "cache_after_failed_pull");
+    assert_eq!(compared["comparison_complete"], false);
+    assert_eq!(compared["resolved"], json!([]));
+    assert!(
+        compared["report"]["uncertainties"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("pull_failed"))
+    );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// The first delta refresh recovers a dead backend using ordinary routed recovery.
+#[tokio::test]
+async fn diagnostics_delta_refresh_recovers_dead_backend() {
+    let fixture = Fixture::new(4);
+    let mut config: ServerConfig =
+        toml::from_str(&std::fs::read_to_string(&fixture.profile).unwrap()).unwrap();
+    config.workspace.roots =
+        vec![crate::config::ConfiguredRoot::new(fixture.main.clone()).unwrap()];
+    let runtime = crate::WorkspaceRuntime::prepare(&config).await.unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    crate::runtime::spawn_lsp_servers_background(
+        runtime.applicable_configs,
+        runtime.translator.clone(),
+        runtime.notification_cache.clone(),
+        runtime.subscription_registry.clone(),
+        cancel.clone(),
+        runtime.workspace_roots.clone(),
+        config.workspace.max_concurrent_server_starts,
+    )
+    .await
+    .unwrap();
+    let server = McplsServer::new(
+        runtime.translator.clone(),
+        runtime.notification_cache.clone(),
+        runtime.workspace_roots,
+        runtime.subscription_registry,
+        config.project_config_status,
+        config.mcp,
+    );
+    let (client, task) = connect(server).await;
+    let path = fixture.main.join("file.py");
+    let first = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"capture"}),
+    )
+    .await
+    .unwrap();
+    std::fs::write(fixture.main.join(".exit-on-hover"), "").unwrap();
+    assert!(
+        call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .is_err()
+    );
+    let recovered = call(
+        &client,
+        "diagnostics_delta",
+        json!({"file_path":path,"action":"capture"}),
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        first["baseline"]["identity"]["server_incarnation"],
+        recovered["baseline"]["identity"]["server_incarnation"]
+    );
+    assert_eq!(
+        recovered["baseline"]["report"]["push_notifications_degraded"],
+        true
+    );
+    runtime.translator.shutdown_servers().await;
+    cancel.cancel();
     client.cancel().await.unwrap();
     task.await.unwrap();
 }

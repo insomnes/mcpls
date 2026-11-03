@@ -113,6 +113,8 @@ enum PullAttempt {
     /// No pull answered and none is expected to: the request was not sent, or a
     /// server advertising no provider refused it with `-32601`.
     PushOnly,
+    /// A failed provider probe, suppressed only by the legacy diagnostics adapter.
+    ProbeFailed(Error),
     /// The request failed.
     Failed(Error),
 }
@@ -122,7 +124,7 @@ impl PullAttempt {
     const fn origin(&self) -> DiagnosticsOrigin {
         match self {
             Self::Answered(..) => DiagnosticsOrigin::Pull,
-            Self::PushOnly => DiagnosticsOrigin::PushCache,
+            Self::PushOnly | Self::ProbeFailed(_) => DiagnosticsOrigin::PushCache,
             Self::Failed(_) => DiagnosticsOrigin::CacheAfterFailedPull,
         }
     }
@@ -184,6 +186,7 @@ pub(super) struct PullRound {
     pub(crate) continuity: bool,
     /// Why the pull request failed, when it did.
     pub(crate) failure: Option<Error>,
+    probe_failure: Option<Error>,
     /// The file's merged view with the report in it.
     pub(crate) merged: Option<DiagnosticInfo>,
     pub(crate) availability: DiagnosticsAvailability,
@@ -451,6 +454,12 @@ impl Translator {
         })
     }
 
+    pub(crate) async fn refresh_delta_route(&self, path: &WorkspacePath) -> Result<()> {
+        self.resolve_client_for_file(path.as_path(), ToolKind::Diagnostics)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn delta_observation(
         &self,
         path: &WorkspacePath,
@@ -466,15 +475,17 @@ impl Translator {
             .prepare_document_for_path(path, ToolKind::Diagnostics)
             .await?;
         let round = self.pull_round_for_context(&doc, cache, false).await;
-        if let Some(error) = round.failure
+        if let Some(error) = round.failure.or(round.probe_failure)
             && round.merged.is_none()
         {
             return Err(error);
         }
-        let origin = match round.origin {
-            DiagnosticsOrigin::Pull => "pull",
-            DiagnosticsOrigin::PushCache => "push_cache",
-            DiagnosticsOrigin::CacheAfterFailedPull => "cache_after_failed_pull",
+        let origin = match (round.pull_kind, round.origin) {
+            ("failed", _) | (_, DiagnosticsOrigin::CacheAfterFailedPull) => {
+                "cache_after_failed_pull"
+            }
+            (_, DiagnosticsOrigin::Pull) => "pull",
+            (_, DiagnosticsOrigin::PushCache) => "push_cache",
         };
         Ok((
             round.merged,
@@ -524,10 +535,11 @@ impl Translator {
 
         let attempt = self.request_pull(doc, support).await;
         let origin = attempt.origin();
-        let (pulled, failure, pull_kind, result_id) = match attempt {
-            PullAttempt::Answered(pulled, kind, id) => (pulled, None, kind, id),
-            PullAttempt::PushOnly => (None, None, "not_requested", None),
-            PullAttempt::Failed(e) => (None, Some(e), "failed", None),
+        let (pulled, failure, probe_failure, pull_kind, result_id) = match attempt {
+            PullAttempt::Answered(pulled, kind, id) => (pulled, None, None, kind, id),
+            PullAttempt::PushOnly => (None, None, None, "not_requested", None),
+            PullAttempt::ProbeFailed(e) => (None, None, Some(e), "failed", None),
+            PullAttempt::Failed(e) => (None, Some(e), None, "failed", None),
         };
 
         let wiring = self.wiring.get().map(Arc::clone);
@@ -584,6 +596,7 @@ impl Translator {
             pull_kind,
             continuity,
             failure,
+            probe_failure,
             merged,
             availability,
         }
@@ -658,6 +671,7 @@ impl Translator {
         let Some(outcome) = ProbeOutcome::of(&unclassified) else {
             return PullAttempt::Failed(unclassified.surface());
         };
+        let refused = matches!(outcome, ProbeOutcome::Refuse);
         let error = unclassified.handled();
         match outcome {
             ProbeOutcome::Refuse => {
@@ -690,7 +704,11 @@ impl Translator {
                 "probe pull could not be answered right now; answering from the push cache"
             ),
         }
-        PullAttempt::PushOnly
+        if refused {
+            PullAttempt::PushOnly
+        } else {
+            PullAttempt::ProbeFailed(error)
+        }
     }
 
     /// What is known about `id` answering `textDocument/diagnostic`.

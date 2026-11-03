@@ -247,6 +247,13 @@ impl McplsServer {
             let cache = self.context.notification_cache.lock().await;
             RouteSignals::sample(&cache, Some(&route))
         };
+        let cached = input["mode"] == "cached";
+        if !cached {
+            translator
+                .refresh_delta_route(&validated)
+                .await
+                .map_err(|e| self.render_error(e))?;
+        }
         let incarnation = translator
             .dispatcher_server(&route)
             .filter(|(alive, _)| *alive)
@@ -277,7 +284,6 @@ impl McplsServer {
                 }
             }
         }
-        let cached = input["mode"] == "cached";
         let (info, availability, origin, pull_kind, continuity) = if cached {
             let (_, snapshot) = self
                 .diagnostics_snapshot(&path)
@@ -455,6 +461,10 @@ fn schema_object(properties: Value) -> Value {
 fn enumeration(values: &[&str]) -> Value {
     json!({"type":"string","enum":values})
 }
+#[expect(
+    clippy::indexing_slicing,
+    reason = "schema roots are explicit JSON objects"
+)]
 pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
     let Some(route) = router.map.get_mut("diagnostics_delta") else {
         return;
@@ -467,7 +477,7 @@ pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
         json!({"line":{"type":"integer","minimum":1,"maximum":4_294_967_295_u64},"character":{"type":"integer","minimum":1,"maximum":4_294_967_295_u64}}),
     );
     let diagnostic = schema_object(
-        json!({"range":schema_object(json!({"start":point,"end":point})),"severity":enumeration(&["error","warning","information","hint"]),"code":nullable,"message":string,"source":nullable}),
+        json!({"range":schema_object(json!({"start":{"$ref":"#/$defs/Point"},"end":{"$ref":"#/$defs/Point"}})),"severity":enumeration(&["error","warning","information","hint"]),"code":nullable,"message":string,"source":nullable}),
     );
     let identity = schema_object(
         json!({"file_path":string,"workspace_path":string,"runtime_generation":string,"server_id":string,"server_incarnation":string}),
@@ -475,13 +485,19 @@ pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
     let report = schema_object(
         json!({"availability":enumeration(&["published","pending","evicted"]),"origin":enumeration(&["pull","push_cache","cache_after_failed_pull","cache"]),"pull_kind":enumeration(&["full","unchanged","partial","failed","not_requested"]),"result_id":nullable,"synced_version":{"type":["integer","null"],"minimum":1},"report_version":{"type":["integer","null"]},"cached_origins":{"type":"array","items":enumeration(&["pull","push"]),"uniqueItems":true},"indexing_in_progress":boolean,"push_notifications_degraded":boolean,"completeness":enumeration(&["complete","incomplete","unknown"]),"uncertainties":{"type":"array","items":enumeration(&["pending","evicted","pull_failed","partial_report","unchanged_without_report","indexing","push_degraded","truncated","cache_completeness_unknown","positions_degraded","metadata_omitted","baseline_incomplete"]),"uniqueItems":true},"omitted_diagnostics":{"type":["integer","null"],"minimum":0},"source_freshness":enumeration(&["unknown"])}),
     );
-    let diagnostics = json!({"type":"array","items":diagnostic,"maxItems":256});
+    let diagnostics = json!({"type":"array","items":{"$ref":"#/$defs/Diagnostic"},"maxItems":256});
     let baseline = schema_object(
-        json!({"schema_version":{"type":"integer","minimum":1},"identity":identity,"report":report,"diagnostics":diagnostics}),
+        json!({"schema_version":{"type":"integer","minimum":1},"identity":{"$ref":"#/$defs/Identity"},"report":{"$ref":"#/$defs/Report"},"diagnostics":diagnostics}),
     );
-    let input = json!({"type":"object","oneOf":[{"type":"object","properties":{"file_path":{"type":"string","minLength":1,"maxLength":4096},"action":{"const":"capture"},"mode":enumeration(&["refresh","cached"])},"required":["file_path","action"],"additionalProperties":false},{"type":"object","properties":{"file_path":{"type":"string","minLength":1,"maxLength":4096},"action":{"const":"compare"},"mode":enumeration(&["refresh","cached"]),"baseline":baseline},"required":["file_path","action","baseline"],"additionalProperties":false}]});
+    let definitions = json!({"Point":point,"Diagnostic":diagnostic,"Identity":identity,"Report":report,"Baseline":baseline});
+    let path = json!({"type":"string","minLength":1,"maxLength":4096});
+    let mode = enumeration(&["refresh", "cached"]);
+    let baseline_ref = json!({"$ref":"#/$defs/Baseline"});
+    let mut input = json!({"type":"object","properties":{"file_path":path,"action":enumeration(&["capture","compare"]),"mode":mode,"baseline":baseline_ref},"required":["file_path","action"],"additionalProperties":false,"oneOf":[{"type":"object","properties":{"file_path":path,"action":{"const":"capture"},"mode":mode},"required":["file_path","action"],"additionalProperties":false},{"type":"object","properties":{"file_path":path,"action":{"const":"compare"},"mode":mode,"baseline":baseline_ref},"required":["file_path","action","baseline"],"additionalProperties":false}]});
+    input["$defs"] = definitions.clone();
     let indices = json!({"type":"array","items":integer});
-    let output = json!({"type":"object","oneOf":[schema_object(json!({"status":{"const":"baseline_captured"},"baseline":baseline,"truncated":boolean})),schema_object(json!({"status":enumeration(&["compared","incomplete"]),"identity":identity,"report":report,"comparison_complete":boolean,"added":diagnostics,"resolved":indices,"remaining":indices,"uncertain_removed":indices,"truncated":boolean})),schema_object(json!({"status":{"const":"incompatible_baseline"},"reason":enumeration(&["schema_mismatch","file_mismatch","workspace_mismatch","runtime_mismatch","server_mismatch","server_restarted"])}))]});
+    let mut output = json!({"type":"object","oneOf":[schema_object(json!({"status":{"const":"baseline_captured"},"baseline":baseline_ref,"truncated":boolean})),schema_object(json!({"status":enumeration(&["compared","incomplete"]),"identity":{"$ref":"#/$defs/Identity"},"report":{"$ref":"#/$defs/Report"},"comparison_complete":boolean,"added":diagnostics,"resolved":indices,"remaining":indices,"uncertain_removed":indices,"truncated":boolean})),schema_object(json!({"status":{"const":"incompatible_baseline"},"reason":enumeration(&["schema_mismatch","file_mismatch","workspace_mismatch","runtime_mismatch","server_mismatch","server_restarted"])}))]});
+    output["$defs"] = definitions;
     if let Some(o) = input.as_object() {
         route.attr.input_schema = std::sync::Arc::new(o.clone());
     }
