@@ -3042,6 +3042,8 @@ impl ServerHandler for McplsServer {
 
 #[cfg(test)]
 mod tests {
+    include!("server/symbol_refs_tests.rs");
+
     use std::assert_matches;
     use std::path::Path;
 
@@ -9449,6 +9451,8 @@ sleep 0.3
         reason = "one public matrix verifies producer-consumer identity and rejection without dispatch"
     )]
     async fn portable_targets_roundtrip_and_reject_stale_over_mcp() {
+        use sha2::{Digest, Sha256};
+
         use crate::test_lsp::{read_framed_message, write_response};
         let mut fixture = support_fixture(
             vec![(
@@ -9580,50 +9584,87 @@ sleep 0.3
                 result[list][index]["symbol_target"].clone()
             };
             assert!(target.is_object(), "{producer}: {response}");
-            for consumer in consumers {
-                let before = requests.lock().await.len();
-                let mut arguments = serde_json::json!({"symbol_target":target});
-                if consumer == "get_symbol_context" {
-                    arguments["sections"] = serde_json::json!(["hover"]);
-                }
-                let response = tools_call_over_the_wire(
-                    fixture.server.for_new_session(),
-                    serde_json::json!({"name":consumer,"arguments":arguments}),
-                )
-                .await;
-                assert!(
-                    response.get("error").is_none(),
-                    "{producer} -> {consumer}: {response}"
-                );
-                let result = &response["result"]["structuredContent"];
-                assert!(result.is_object(), "{response}");
-                let observed = requests.lock().await;
-                let semantic = observed
-                    .iter()
-                    .skip(before)
-                    .find(|request| request["params"].get("position").is_some())
-                    .expect("consumer dispatched original point");
-                assert_eq!(
-                    semantic["params"]["position"],
-                    serde_json::json!({"line":1,"character":11}),
-                    "{producer} -> {consumer}"
-                );
-                if consumer == "get_hover" || consumer == "get_symbol_context" {
-                    assert!(result.to_string().contains("point:1:11"), "{response}");
-                }
-                if consumer.ends_with("_calls") {
-                    let walk = observed.last().unwrap();
-                    assert_eq!(
-                        walk["params"]["item"]["data"]["point"],
-                        serde_json::json!({"line":1,"character":11})
+            let reference: serde_json::Value =
+                serde_json::from_str(target["symbol_ref"].as_str().unwrap()).unwrap();
+            let context = fixture.server.context.translator.symbol_ref_test_context();
+            let file = std::fs::canonicalize(&fixture.file).unwrap();
+            let binding =
+                serde_json::to_vec(&serde_json::json!(["mcpls-symbol-ref-v2", context, file]))
+                    .unwrap();
+            assert_eq!(
+                reference,
+                serde_json::json!([
+                    2,
+                    format!("{:x}", Sha256::digest(binding)),
+                    format!("{:x}", Sha256::digest(original.as_bytes())),
+                    2,
+                    12
+                ])
+            );
+            if producer == "get_symbol_context" {
+                assert!(result.get("symbol_ref").is_none(), "{response}");
+                assert!(result.get("symbol_ref_unavailable").is_none(), "{response}");
+            }
+            let legacy = serde_json::json!({
+                "version":1,"context":context,"file":file,
+                "line":2,"character":12,"sha256":reference[2]
+            })
+            .to_string();
+            for addressing in [
+                serde_json::json!({"symbol_target":target}),
+                serde_json::json!({"file_path":fixture.file,"symbol_ref":target["symbol_ref"]}),
+                serde_json::json!({"symbol_target":{"file_path":fixture.file,"symbol_ref":legacy}}),
+                serde_json::json!({"file_path":fixture.file,"symbol_ref":legacy}),
+            ] {
+                for consumer in consumers {
+                    if consumer.ends_with("_calls") && addressing.get("symbol_ref").is_some() {
+                        continue;
+                    }
+
+                    let before = requests.lock().await.len();
+                    let mut arguments = addressing.clone();
+                    if consumer == "get_symbol_context" {
+                        arguments["sections"] = serde_json::json!(["hover"]);
+                    }
+                    let response = tools_call_over_the_wire(
+                        fixture.server.for_new_session(),
+                        serde_json::json!({"name":consumer,"arguments":arguments}),
+                    )
+                    .await;
+                    assert!(
+                        response.get("error").is_none(),
+                        "{producer} -> {consumer}: {response}"
                     );
+                    let result = &response["result"]["structuredContent"];
+                    assert!(result.is_object(), "{response}");
+                    let observed = requests.lock().await;
+                    let semantic = observed
+                        .iter()
+                        .skip(before)
+                        .find(|request| request["params"].get("position").is_some())
+                        .expect("consumer dispatched original point");
                     assert_eq!(
-                        walk["params"]["item"]["data"]["opaque"],
-                        serde_json::json!([1,{"x":true}])
+                        semantic["params"]["position"],
+                        serde_json::json!({"line":1,"character":11}),
+                        "{producer} -> {consumer}"
                     );
-                    assert!(result.to_string().contains("same"), "{response}");
+                    if consumer == "get_hover" || consumer == "get_symbol_context" {
+                        assert!(result.to_string().contains("point:1:11"), "{response}");
+                    }
+                    if consumer.ends_with("_calls") {
+                        let walk = observed.last().unwrap();
+                        assert_eq!(
+                            walk["params"]["item"]["data"]["point"],
+                            serde_json::json!({"line":1,"character":11})
+                        );
+                        assert_eq!(
+                            walk["params"]["item"]["data"]["opaque"],
+                            serde_json::json!([1,{"x":true}])
+                        );
+                        assert!(result.to_string().contains("same"), "{response}");
+                    }
+                    drop(observed);
                 }
-                drop(observed);
             }
         }
         for consumer in consumers {
@@ -9656,6 +9697,103 @@ sleep 0.3
                 );
             }
         }
+        let valid: serde_json::Value =
+            serde_json::from_str(target["symbol_ref"].as_str().unwrap()).unwrap();
+        let mut rejected_refs = vec![
+            (serde_json::json!([2]), "invalid_symbol_ref"),
+            (
+                serde_json::json!([2, valid[1], valid[2], 2, 12, 0]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([3, valid[1], valid[2], 2, 12]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([2, valid[1], valid[2], 0, 12]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([2, valid[1], valid[2], 2, 4_294_967_296_u64]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([2, valid[1], valid[2], 2, 1000]),
+                "unverifiable_target",
+            ),
+            (
+                serde_json::json!([2, "0".repeat(64), valid[2], 2, 12]),
+                "symbol_ref_context_mismatch",
+            ),
+            (
+                serde_json::json!([2, valid[1], "f".repeat(64), 2, 12]),
+                "stale_target",
+            ),
+            (
+                serde_json::json!([2, valid[1], "A".repeat(64), 2, 12]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([2, "A".repeat(64), valid[2], 2, 12]),
+                "invalid_symbol_ref",
+            ),
+        ];
+        let legacy = serde_json::json!({
+            "version":1,"context":fixture.server.context.translator.symbol_ref_test_context(),
+            "file":std::fs::canonicalize(&fixture.file).unwrap(),
+            "line":2,"character":12,"sha256":valid[2]
+        });
+        let mut extra_field = legacy.clone();
+        extra_field["extra"] = serde_json::json!(true);
+        rejected_refs.push((extra_field, "invalid_symbol_ref"));
+        let mut uppercase_legacy = legacy.clone();
+        uppercase_legacy["sha256"] = serde_json::json!(valid[2].as_str().unwrap().to_uppercase());
+        rejected_refs.push((uppercase_legacy, "stale_target"));
+        rejected_refs.push((
+            serde_json::json!([
+                1,
+                legacy["context"],
+                legacy["file"],
+                2,
+                12,
+                legacy["sha256"]
+            ]),
+            "invalid_symbol_ref",
+        ));
+        for (reference, kind) in rejected_refs {
+            for consumer in consumers {
+                let before = requests.lock().await.len();
+                let response = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    serde_json::json!({"name":consumer,"arguments":{"symbol_target":{
+                        "file_path":fixture.file,"symbol_ref":reference.to_string()
+                    }}}),
+                )
+                .await;
+                assert_eq!(
+                    response["error"]["data"]["kind"], kind,
+                    "{consumer}: {response}"
+                );
+                assert_eq!(
+                    requests.lock().await.len(),
+                    before,
+                    "rejection must not dispatch"
+                );
+            }
+        }
+        let other_file = fixture.dir.path().join("other.rs");
+        std::fs::write(&other_file, original).unwrap();
+        let response = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({"name":"get_hover","arguments":{"symbol_target":{
+                "file_path":other_file,"symbol_ref":target["symbol_ref"]
+            }}}),
+        )
+        .await;
+        assert_eq!(
+            response["error"]["data"]["kind"], "symbol_ref_context_mismatch",
+            "{response}"
+        );
         std::fs::write(&fixture.file, original.replace("same", "away")).unwrap();
         for consumer in consumers {
             let before = requests.lock().await.len();
@@ -9746,6 +9884,8 @@ sleep 0.3
                 "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"resolve":"definition"}
             })).await;
             let bundle = &response["result"]["structuredContent"];
+            assert!(bundle.get("symbol_ref").is_none(), "{response}");
+            assert!(bundle.get("symbol_ref_unavailable").is_none(), "{response}");
             assert_eq!(
                 bundle["query"]["file_path"],
                 serde_json::json!(fixture.file),
@@ -9782,9 +9922,10 @@ sleep 0.3
                 let direct = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
                     "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"sections":["source"]}
                 })).await;
-                let reference = direct["result"]["structuredContent"]["symbol_ref"]
-                    .as_str()
-                    .unwrap();
+                let reference =
+                    direct["result"]["structuredContent"]["symbol_target"]["symbol_ref"]
+                        .as_str()
+                        .unwrap();
                 seen.lock().await.clear();
                 let reused = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
                     "name":"get_symbol_context","arguments":{"file_path":fixture.file,"symbol_ref":reference,"resolve":"definition","sections":["source"]}
@@ -10013,10 +10154,24 @@ sleep 0.3
         let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
             "name":"get_symbol_context", "arguments":{"file_path":fixture.file,"line":2,"character":4,"sections":["source"]}
         })).await;
-        let reference = response["result"]["structuredContent"]["symbol_ref"]
+        let reference = response["result"]["structuredContent"]["symbol_target"]["symbol_ref"]
             .as_str()
             .expect("issued reference")
             .to_owned();
+        let mut split_surrogate: serde_json::Value = serde_json::from_str(&reference).unwrap();
+        split_surrogate[3] = serde_json::json!(1);
+        split_surrogate[4] = serde_json::json!(5);
+        let invalid_point = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({"name":"get_hover","arguments":{
+                "file_path":fixture.file,"symbol_ref":split_surrogate.to_string()
+            }}),
+        )
+        .await;
+        assert_eq!(
+            invalid_point["error"]["data"]["kind"],
+            "unverifiable_target"
+        );
         for name in [
             "get_hover",
             "get_definition",
@@ -10130,6 +10285,17 @@ sleep 0.3
         let oversized=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
             "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"sections":["source"]}
         })).await;
+        let bundle = &oversized["result"]["structuredContent"];
+        assert!(bundle.get("symbol_ref").is_none(), "{oversized}");
+        assert!(
+            bundle.get("symbol_ref_unavailable").is_none(),
+            "{oversized}"
+        );
+        assert!(bundle.get("symbol_target").is_none(), "{oversized}");
+        assert_eq!(
+            bundle["symbol_target_unavailable"]["reason"],
+            "source_unavailable"
+        );
         assert_eq!(
             oversized["result"]["structuredContent"]["sections"]["source"]["reason"],
             "file_too_large"

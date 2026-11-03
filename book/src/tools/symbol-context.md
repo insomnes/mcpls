@@ -191,7 +191,8 @@ atomic-snapshot guarantee.
 `symbol_target` or `symbol_target_unavailable.reason`. Workspace symbols and
 outline entries put these fields in `symbols[]`; definitions use `locations[]`.
 `get_symbol_context` always adds the same envelope when it issues a trustworthy
-reference. Its existing descriptive `target` and `symbol_ref` fields remain.
+reference. Its descriptive `target` remains. Top-level `symbol_ref` and
+`symbol_ref_unavailable` are no longer emitted.
 
 Copy the complete object into any of `get_symbol_context`, `get_hover`,
 `get_definition`, `get_references`, `get_incoming_calls`, or `get_outgoing_calls`:
@@ -254,14 +255,15 @@ typed errors, runtime lifecycle, and concurrency limits described below.
 
 ## Reuse an observed target
 
-When source is requested, a trustworthy observation adds an opaque `symbol_ref`
-to the result. Keep this string unchanged. Pass it with `file_path` to
-`get_symbol_context`, `get_hover`, `get_definition`, or `get_references`:
+When source is requested, a trustworthy observation adds `symbol_target`.
+Keep the complete envelope unchanged and pass it to any supported consumer.
+`get_symbol_context`, `get_hover`, `get_definition`, and `get_references` also
+accept the envelope's opaque `symbol_ref` with legacy `file_path` addressing:
 
 ```json
 {
   "file_path": "/work/app/main.rs",
-  "symbol_ref": "<symbol_ref from get_symbol_context>"
+  "symbol_ref": "<symbol_target.symbol_ref from a discovery result>"
 }
 ```
 
@@ -272,11 +274,15 @@ Both tool profiles expose the supported reference consumers.
 
 The reference binds an exact 1-based UTF-16 position, the authorized file and
 runtime context, and SHA-256 of the complete unredacted observed source. It
-contains no source text. Display redaction does not change content identity.
+contains no source text. New references use a compact version 2 JSON tuple with
+SHA-256 digests for runtime/file binding and source bytes. Consumers also accept
+version 1 references. Both versions are stateless and have the same lifecycle;
+there is no reference registry or expiry. Treat their encoding as opaque.
+Display redaction does not change content identity.
 An unknown declaration range does not prevent issuance at an exact valid point.
 Invalid UTF-16 boundaries, degraded positions, unavailable source, or a fresh
 source observation that disagrees with the displayed observation prevent issuance.
-The result then contains `symbol_ref_unavailable.reason`. When source was omitted,
+The result then contains `symbol_target_unavailable.reason`. When source was omitted,
 the reason is `source_not_requested`; other sections retain independent outcomes.
 
 Each consumer reads complete current source before its semantic request. It

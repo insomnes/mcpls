@@ -8111,20 +8111,6 @@
           },
           "type": "object"
         },
-        "symbol_ref": {
-          "type": "string"
-        },
-        "symbol_ref_unavailable": {
-          "properties": {
-            "reason": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "reason"
-          ],
-          "type": "object"
-        },
         "symbol_target": {
           "additionalProperties": false,
           "properties": {

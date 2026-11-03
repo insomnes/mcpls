@@ -1,6 +1,6 @@
 //! Content-bound targets for read-only semantic requests.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::Translator;
@@ -11,15 +11,27 @@ use crate::error::{Error, Result, SymbolResolutionData};
 const MAX_REFERENCE_BYTES: usize = 8192;
 const MAX_SOURCE_BYTES: usize = 1_048_576;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SymbolRef {
+struct LegacySymbolRef {
     version: u8,
     context: String,
     file: std::path::PathBuf,
     line: u32,
     character: u32,
     sha256: String,
+}
+
+enum SymbolRef {
+    Legacy(LegacySymbolRef),
+    Compact((u8, String, String, u32, u32)),
+}
+
+fn lowercase_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn rejected(kind: &str, message: &str) -> Error {
@@ -58,6 +70,12 @@ fn valid_point(text: &str, position: Position) -> bool {
 }
 
 impl Translator {
+    /// Runtime identity for constructing independent legacy-reference test fixtures.
+    #[cfg(test)]
+    pub(crate) fn symbol_ref_test_context(&self) -> &str {
+        &self.symbol_ref_context
+    }
+
     /// Read fresh contained bytes, independently of tracked text and timestamps.
     async fn symbol_ref_source(
         &self,
@@ -103,21 +121,48 @@ impl Translator {
         if raw.is_empty() || raw.len() > MAX_REFERENCE_BYTES {
             return Err(invalid());
         }
-        let reference: SymbolRef = serde_json::from_str(raw).map_err(|_| invalid())?;
-        if reference.version != 1
-            || reference.context.is_empty()
-            || !reference.file.is_absolute()
-            || reference.file.as_os_str().as_encoded_bytes().contains(&0)
-            || reference.sha256.len() != 64
-            || !reference.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Err(invalid());
+        // Select the JSON root shape before deserialization: structs also accept
+        // sequences in Serde, but legacy references must remain objects.
+        let reference = match raw.trim_start().as_bytes().first() {
+            Some(b'{') => serde_json::from_str(raw).map(SymbolRef::Legacy),
+            Some(b'[') => serde_json::from_str(raw).map(SymbolRef::Compact),
+            _ => return Err(invalid()),
         }
-        let position =
-            Position::from_client(reference.line, reference.character).map_err(|_| invalid())?;
+        .map_err(|_| invalid())?;
+        let (line, character, sha256) = match &reference {
+            SymbolRef::Legacy(reference)
+                if reference.version == 1
+                    && !reference.context.is_empty()
+                    && reference.file.is_absolute()
+                    && !reference.file.as_os_str().as_encoded_bytes().contains(&0)
+                    && reference.sha256.len() == 64
+                    && reference.sha256.bytes().all(|b| b.is_ascii_hexdigit()) =>
+            {
+                (reference.line, reference.character, &reference.sha256)
+            }
+            SymbolRef::Compact((2, binding, sha256, line, character))
+                if lowercase_digest(binding) && lowercase_digest(sha256) =>
+            {
+                (*line, *character, sha256)
+            }
+            _ => return Err(invalid()),
+        };
+        let position = Position::from_client(line, character).map_err(|_| invalid())?;
         // Authorization derives only from the caller's path and current roots.
         let validated = self.validate_path(path).await.map_err(source_error)?;
-        if reference.context != self.symbol_ref_context || reference.file != validated.as_path() {
+        let expected_file = validated.as_path().to_path_buf();
+        let binding_matches = match &reference {
+            SymbolRef::Legacy(reference) => {
+                reference.context == self.symbol_ref_context && reference.file == expected_file
+            }
+            SymbolRef::Compact((_, binding, _, _, _)) => {
+                *binding
+                    == self
+                        .symbol_ref_binding(&expected_file)
+                        .map_err(|_| invalid())?
+            }
+        };
+        if !binding_matches {
             return Err(rejected(
                 "symbol_ref_context_mismatch",
                 "symbol_ref belongs to a different file or runtime context; resolve the target afresh",
@@ -125,13 +170,13 @@ impl Translator {
         }
         let mut charge = 0;
         let (text, canonical) = self.symbol_ref_source(path, &mut charge).await?;
-        if canonical != reference.file {
+        if canonical != expected_file {
             return Err(rejected(
                 "unverifiable_target",
                 "The file target changed during reference validation",
             ));
         }
-        if format!("{:x}", Sha256::digest(text.as_bytes())) != reference.sha256 {
+        if format!("{:x}", Sha256::digest(text.as_bytes())) != *sha256 {
             return Err(rejected(
                 "stale_target",
                 "Source bytes changed since observation; resolve the target afresh",
@@ -209,7 +254,7 @@ impl Translator {
                 if !valid_point(text, position) {
                     return Err("position_unverifiable");
                 }
-                let raw = self.encode_symbol_ref(canonical.clone(), position, hash.clone())?;
+                let raw = self.encode_symbol_ref(canonical, position, hash.clone())?;
                 Ok(SymbolTargetEnvelope {
                     file_path: canonical.clone(),
                     symbol_ref: raw,
@@ -223,20 +268,27 @@ impl Translator {
         results
     }
 
+    fn symbol_ref_binding(&self, file: &std::path::Path) -> serde_json::Result<String> {
+        let input = serde_json::to_vec(&("mcpls-symbol-ref-v2", &self.symbol_ref_context, file))?;
+        Ok(format!("{:x}", Sha256::digest(input)))
+    }
+
     fn encode_symbol_ref(
         &self,
-        file: std::path::PathBuf,
+        file: &std::path::Path,
         position: Position,
         sha256: String,
     ) -> std::result::Result<String, &'static str> {
-        let reference = SymbolRef {
-            version: 1,
-            context: self.symbol_ref_context.clone(),
-            file,
-            line: position.line().get(),
-            character: position.character().get(),
+        let binding = self
+            .symbol_ref_binding(file)
+            .map_err(|_| "reference_encoding")?;
+        let reference = (
+            2,
+            binding,
             sha256,
-        };
+            position.line().get(),
+            position.character().get(),
+        );
         let raw = serde_json::to_string(&reference).map_err(|_| "reference_encoding")?;
         if raw.len() > MAX_REFERENCE_BYTES {
             return Err("reference_too_large");
@@ -263,7 +315,7 @@ impl Translator {
             if !valid_point(&text, position) {
                 return Err("position_unverifiable");
             }
-            self.encode_symbol_ref(canonical, position, sha256)
+            self.encode_symbol_ref(&canonical, position, sha256)
         }
         .await;
         (result, charge)
