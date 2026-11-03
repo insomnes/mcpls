@@ -128,14 +128,14 @@ const _: () = assert!(
 /// Tool-description sentences shared by every tool carrying `positions_degraded`.
 macro_rules! positions_note_request {
     () => {
-        "`positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact."
+        "`positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact."
     };
 }
 
 /// Tool-description sentence for the tools that accept a symbol name.
 macro_rules! name_addressing_note {
     () => {
-        "Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing."
+        "Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason."
     };
 }
 
@@ -1115,7 +1115,7 @@ impl McplsServer {
 
     /// Collect bounded context for one primary-file symbol.
     #[tool(
-        description = "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. Each requested section has an independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
+        description = "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Each requested section has an independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
         title = "Symbol Context"
     )]
     async fn get_symbol_context(
@@ -8759,6 +8759,7 @@ sleep 0.3
             McpTool::GetSymbolContext => server
                 .get_symbol_context(Parameters(crate::mcp::tools::SymbolContextParams {
                     target: position().into(),
+                    resolve: crate::mcp::tools::ContextResolve::Direct,
                     sections: vec!["source".into()],
                 }))
                 .await
@@ -9677,6 +9678,106 @@ sleep 0.3
     }
 
     /// Public MCP source bundles preserve original file bytes and independent statuses.
+    /// Definition mode follows one reliable target and leaves ambiguous candidates untouched.
+    #[tokio::test]
+    async fn symbol_context_definition_resolves_once_and_rejects_ambiguity() {
+        use crate::test_lsp::{read_framed_message, write_response};
+        for duplicates in [false, true] {
+            let mut fixture = support_fixture(
+                vec![(
+                    "rust",
+                    "rust",
+                    lsp_types::ServerCapabilities {
+                        definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+                        document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(
+                            true,
+                        )),
+                        hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                        ..Default::default()
+                    },
+                )],
+                McpConfig::default(),
+            );
+            let definition = fixture.dir.path().join("definition.rs");
+            std::fs::write(&definition, "fn target() {}\n").unwrap();
+            let definition_uri = url::Url::from_file_path(&definition).unwrap().to_string();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let methods = seen.clone();
+            let mut fake = fixture.fake_servers.pop().unwrap();
+            let responder = tokio::spawn(async move {
+                let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+                loop {
+                    let request = read_framed_message(&mut wire).await;
+                    if request.get("id").is_none() {
+                        continue;
+                    }
+                    methods
+                        .lock()
+                        .await
+                        .push(request["method"].as_str().unwrap().to_owned());
+                    let result = match request["method"].as_str().unwrap() {
+                        "textDocument/definition" => {
+                            let location = serde_json::json!({"uri":definition_uri,"range":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}}});
+                            if duplicates {
+                                serde_json::json!([location, location])
+                            } else {
+                                serde_json::json!([location])
+                            }
+                        }
+                        "textDocument/documentSymbol" => {
+                            serde_json::json!([{"name":"target","kind":12,
+                            "range":{"start":{"line":0,"character":0},"end":{"line":1,"character":0}},
+                            "selectionRange":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}}}])
+                        }
+                        "textDocument/hover" => {
+                            assert_eq!(request["params"]["textDocument"]["uri"], definition_uri);
+                            serde_json::json!({"contents":"target docs"})
+                        }
+                        method => panic!("unexpected semantic request {method}"),
+                    };
+                    write_response(&mut fake.read_half_stdin, &request["id"], result).await;
+                }
+            });
+            let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"resolve":"definition"}
+            })).await;
+            let bundle = &response["result"]["structuredContent"];
+            assert_eq!(
+                bundle["query"]["file_path"],
+                serde_json::json!(fixture.file),
+                "{response}"
+            );
+            if duplicates {
+                assert_eq!(
+                    bundle["resolution"]["reason"], "multiple_definitions",
+                    "{response}"
+                );
+                assert!(bundle["target"].is_null());
+                assert_eq!(
+                    bundle["sections"]["source"]["reason"],
+                    "resolution_not_resolved"
+                );
+                assert_eq!(*seen.lock().await, vec!["textDocument/definition"]);
+            } else {
+                assert_eq!(bundle["resolution"]["status"], "resolved", "{response}");
+                assert_eq!(bundle["target"]["file_path"], serde_json::json!(definition));
+                assert_eq!(
+                    bundle["sections"]["source"]["data"]["text"],
+                    "fn target() {}\n"
+                );
+                assert_eq!(
+                    bundle["sections"]["source"]["data"]["completeness"],
+                    "complete_symbol"
+                );
+                assert_eq!(
+                    bundle["sections"]["hover"]["data"]["contents"],
+                    "target docs"
+                );
+            }
+            responder.abort();
+        }
+    }
+
     #[tokio::test]
     async fn symbol_context_preserves_source_and_null_hover() {
         use sha2::{Digest, Sha256};
@@ -9935,6 +10036,8 @@ sleep 0.3
             serde_json::json!({"sections":["source","source"]}),
             serde_json::json!({"sections":["unknown"]}),
             serde_json::json!({"budget":100}),
+            serde_json::json!({"resolve":null}),
+            serde_json::json!({"resolve":"recursive"}),
             serde_json::json!({"symbol_name":"main"}),
         ] {
             let mut arguments = serde_json::json!({"file_path":"/a.rs","line":1,"character":4});

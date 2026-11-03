@@ -1749,6 +1749,8 @@ mod tests {
 reusable_target_wire! {
     /// Wire form of a symbol context request.
     SymbolContextWire {
+        #[serde(default)]
+        resolve: ContextResolve,
         #[serde(default = "default_context_sections")]
         #[schemars(extend("minItems" = 1, "uniqueItems" = true, "items" = {"type":"string", "enum":["source","hover","outgoing_calls","diagnostics","inlay_hints","highlights"]}))]
         sections: Vec<String>,
@@ -1759,11 +1761,24 @@ fn default_context_sections() -> Vec<String> {
     vec!["source".into(), "hover".into()]
 }
 
+/// Context selection policy.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextResolve {
+    /// Collect context at the supplied point.
+    #[default]
+    Direct,
+    /// Follow one reliable definition in the same workspace.
+    Definition,
+}
+
 /// One target and independently requested context sections.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(try_from = "SymbolContextWire")]
 #[schemars(with = "SymbolContextWire")]
 pub struct SymbolContextParams {
+    /// Context selection policy.
+    pub resolve: ContextResolve,
     /// Validated addressing form.
     pub target: SymbolTargetParams,
     /// Unique requested sections.
@@ -1797,6 +1812,7 @@ impl TryFrom<SymbolContextWire> for SymbolContextParams {
         Ok(Self {
             target,
             sections: wire.sections,
+            resolve: wire.resolve,
         })
     }
 }

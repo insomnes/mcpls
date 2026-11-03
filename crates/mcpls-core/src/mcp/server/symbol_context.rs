@@ -34,9 +34,15 @@ pub(super) fn shape_schema(router: &mut super::ToolRouter<McplsServer>) {
             "type":"object",
             "required":["target","sections","truncated","analysis_freshness","atomic_snapshot"],
             "properties":{
-                "target":{"type":"object","required":["file_path","position","range_fidelity"],
+                "target":{"type":["object","null"],"required":["file_path","position","range_fidelity"],
                     "properties":{"file_path":{"type":"string"},"position":{"type":"object"},
                         "range_fidelity":{"enum":["symbol","unknown"]}}},
+                "query":{"type":"object","required":["file_path","position"],"properties":{"file_path":{"type":"string"},"position":{"type":"object"},"resolved_symbol":{"type":"object"}}},
+                "resolution":{"type":"object","required":["status","candidates","provider_truncated"],"properties":{
+                    "status":{"enum":["resolved","selection_required","no_definition","unavailable","unsupported","error"]},
+                    "reason":{"type":"string","minLength":1},"provider_truncated":{"type":"boolean"},
+                    "positions_degraded":{"enum":["request","response"]},
+                    "candidates":{"type":"array","items":{"type":"object","required":["uri","range"],"properties":{"uri":{"type":"string"},"range":{"type":"object","required":["start","end"],"properties":{"start":{"type":"object"},"end":{"type":"object"}}},"out_of_workspace":{"type":"boolean"}}}}}},
                 "sections":{"type":"object","additionalProperties":{"type":"object","required":["status"],
                     "properties":{"status":{"enum":["ok","empty","partial","unsupported","unavailable","error"]},
                         "reason":{"type":"string"},"data":{"type":"object"}}}},
@@ -313,6 +319,66 @@ pub(super) fn enforce_response_budget(bundle: &mut Value) {
             bundle["truncated"] = json!(true);
         }
     }
+    while result_bytes(bundle) > 131_072 && drop_candidate(bundle) {}
+}
+
+fn definition_point(
+    candidate: &Value,
+) -> Option<(crate::bridge::ClientPath, crate::bridge::Position)> {
+    let start = point(candidate.get("range")?.get("start")?)?;
+    let end = point(candidate.get("range")?.get("end")?)?;
+    if start.0 == 0 || start.1 == 0 || end.0 == 0 || end.1 == 0 || start > end {
+        return None;
+    }
+    let uri = url::Url::parse(candidate.get("uri")?.as_str()?).ok()?;
+    let path = crate::bridge::ClientPath::try_from(uri.to_file_path().ok()?).ok()?;
+    let position = crate::bridge::Position::from_client(
+        u32::try_from(start.0).ok()?,
+        u32::try_from(start.1).ok()?,
+    )
+    .ok()?;
+    Some((path, position))
+}
+
+fn drop_candidate(bundle: &mut Value) -> bool {
+    let removed = bundle
+        .get_mut("resolution")
+        .and_then(|resolution| resolution.get_mut("candidates"))
+        .and_then(Value::as_array_mut)
+        .and_then(Vec::pop)
+        .is_some();
+    if removed {
+        bundle["truncated"] = json!(true);
+    }
+    removed
+}
+
+fn admit_candidates(bundle: &mut Value) {
+    if let Some(candidates) = bundle
+        .get_mut("resolution")
+        .and_then(|resolution| resolution.get_mut("candidates"))
+        .and_then(Value::as_array_mut)
+        && candidates.len() > 256
+    {
+        candidates.truncate(256);
+        bundle["truncated"] = json!(true);
+    }
+    loop {
+        let count = bundle["resolution"]["candidates"]
+            .as_array()
+            .map_or(0, Vec::len);
+        let mut participants = BTreeSet::new();
+        files(bundle, &mut participants);
+        if count <= 256 && participants.len() <= 16 && result_bytes(bundle) <= 131_072 {
+            break;
+        }
+        if !drop_candidate(bundle) {
+            break;
+        }
+    }
+    if bundle["resolution"]["provider_truncated"] == true {
+        bundle["truncated"] = json!(true);
+    }
 }
 
 impl McplsServer {
@@ -327,13 +393,90 @@ impl McplsServer {
         if !params.target.file_path.is_absolute() {
             return Err(McpError::invalid_params("file_path must be absolute", None));
         }
-        let (path, target) = parse_target(params.target.file_path, params.target.target)?;
+        let (mut path, target) = parse_target(params.target.file_path, params.target.target)?;
         let translator = &self.context.translator;
         let resolved = translator
             .resolve_symbol_target(&path, target, AddressableTool::SymbolContext)
             .await
             .map_err(|error| self.render_error(error))?;
-        let position = resolved.position;
+        let mut position = resolved.position;
+        let mut query = json!({"file_path":path.as_path(),"position":Position2D{line:position.line().get(),character:position.character().get()}});
+        let definition = params.resolve == crate::mcp::tools::ContextResolve::Definition;
+        let mut resolved = resolved;
+        if definition && let Some(mut symbol) = resolved.resolved.take() {
+            symbol.redact_server_text(&translator.server_text_redactions());
+            query["resolved_symbol"] = json!(symbol);
+        }
+        let resolution = if definition {
+            let answer = translator
+                .handle_definition(path.clone(), position, ResultContext::None)
+                .await;
+            let mut evidence = json!({"status":"error","reason":"provider_error","candidates":[],"provider_truncated":false});
+            let mut selected = None;
+            match answer {
+                Err(error) => {
+                    if matches!(error, crate::error::Error::CapabilityNotSupported { .. }) {
+                        evidence["status"] = json!("unsupported");
+                        evidence["reason"] = json!("capability_not_supported");
+                    }
+                }
+                Ok(answer) => {
+                    let data = serde_json::to_value(answer).map_err(|_| {
+                        McpError::internal_error("definition serialization failed", None)
+                    })?;
+                    evidence["candidates"] = data["locations"].clone();
+                    evidence["provider_truncated"] = json!(data["truncated"] == true);
+                    if let Some(warning) = data.get("positions_degraded") {
+                        evidence["positions_degraded"] = warning.clone();
+                    } else if let Some(warning) = resolved.positions_degraded {
+                        evidence["positions_degraded"] = json!(warning);
+                    }
+                    let candidates = data["locations"].as_array();
+                    let count = candidates.map_or(0, Vec::len);
+                    let (status, reason) = if data["truncated"] == true {
+                        ("selection_required", "definition_incomplete")
+                    } else if evidence.get("positions_degraded").is_some() {
+                        ("selection_required", "positions_degraded")
+                    } else if count > 1 {
+                        ("selection_required", "multiple_definitions")
+                    } else if count == 0 {
+                        ("no_definition", "no_definition")
+                    } else {
+                        selected = candidates
+                            .and_then(|values| values.first())
+                            .and_then(definition_point);
+                        ("unavailable", "target_unavailable")
+                    };
+                    evidence["status"] = json!(status);
+                    evidence["reason"] = json!(reason);
+                }
+            }
+            let mut selected_target = Value::Null;
+            if let Some((target_path, target_position)) = selected {
+                selected_target = json!({"file_path":target_path.as_path(),"position":Position2D{line:target_position.line().get(),character:target_position.character().get()},"range_fidelity":"unknown"});
+                if translator
+                    .context_target_authorized(&path, &target_path)
+                    .await
+                {
+                    evidence["status"] = json!("resolved");
+                    evidence.as_object_mut().map(|map| map.remove("reason"));
+                    path = target_path;
+                    position = target_position;
+                }
+            }
+            if evidence["status"] != "resolved" {
+                let mut bundle = json!({"query":query,"target":selected_target,"resolution":evidence,"sections":{},"truncated":false,"analysis_freshness":"unknown","atomic_snapshot":false});
+                for name in &params.sections {
+                    bundle["sections"][name] = outcome("unavailable", "resolution_not_resolved");
+                }
+                admit_candidates(&mut bundle);
+                enforce_response_budget(&mut bundle);
+                return Ok(CallToolResult::structured(bundle));
+            }
+            Some(evidence)
+        } else {
+            None
+        };
         let needs_range = params.sections.iter().any(|name| {
             matches!(
                 name.as_str(),
@@ -361,11 +504,18 @@ impl McplsServer {
             target["resolved_symbol"] = json!(symbol);
         }
         let mut bundle = json!({"target":target,"sections":{},"truncated":false,"analysis_freshness":"unknown","atomic_snapshot":false});
+        if let Some(resolution) = resolution {
+            bundle["query"] = query;
+            bundle["resolution"] = resolution;
+        }
         if let Some(degraded) = degraded {
             bundle["positions_degraded"] = json!(degraded);
         }
         for name in &params.sections {
             bundle["sections"][name] = outcome("unavailable", "request_budget");
+        }
+        if definition {
+            admit_candidates(&mut bundle);
         }
         for name in ORDER {
             if !params.sections.iter().any(|section| section == name) {
@@ -443,7 +593,12 @@ impl McplsServer {
                 let count = ORDER
                     .iter()
                     .map(|name| records(&bundle["sections"][*name], name))
-                    .sum::<usize>();
+                    .sum::<usize>()
+                    .saturating_add(
+                        bundle["resolution"]["candidates"]
+                            .as_array()
+                            .map_or(0, Vec::len),
+                    );
                 let mut participants = BTreeSet::new();
                 files(&bundle, &mut participants);
                 let reason = if count > 256 {

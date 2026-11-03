@@ -40,8 +40,55 @@ The result includes `target.file_path`, `target.position` and
 `range_fidelity: "symbol"` and `target.range`. The declaration's selection range
 must contain the target point. Flat, malformed, conflicting or degraded symbols
 and body-only positions give `range_fidelity: "unknown"`. Name addressing also
-retains `target.resolved_symbol`. The tool never follows definitions to guess a
-range.
+retains `target.resolved_symbol`. Direct mode does not follow definitions to guess a range.
+
+## Resolve a definition
+
+Omit `resolve`, or use `"resolve": "direct"`, to preserve direct behavior.
+Use `"resolve": "definition"` to follow one definition before collecting context.
+Explicit null and other values are invalid. All existing position, name,
+`symbol_ref`, and `symbol_target` addressing forms work with either mode.
+
+```json
+{
+  "file_path": "/work/app/main.rs",
+  "line": 12,
+  "character": 8,
+  "resolve": "definition",
+  "sections": ["source", "hover"]
+}
+```
+
+Definition results add `query`, which identifies the normalized original use site,
+and `resolution`, which contains provider-order `candidates` and
+`provider_truncated`. Name addressing retains `query.resolved_symbol`.
+The selected `target` identifies the definition's normalized range start;
+`LocationLink` uses `targetSelectionRange`. A definition location alone does not
+prove a declaration body. The existing hierarchical symbol check qualifies it.
+
+| Resolution status | Reason or meaning |
+|---|---|
+| `resolved` | One complete, reliable file candidate is authorized in the query workspace. |
+| `selection_required` | `definition_incomplete`, `positions_degraded`, or `multiple_definitions`. |
+| `no_definition` | `no_definition`: a complete reliable response has no candidates. |
+| `unavailable` | `target_unavailable`: the sole candidate has no usable file position or fails authorization. |
+| `unsupported` | `capability_not_supported`: definition capability is absent. |
+| `error` | `provider_error`: definition lookup failed after existing handling. |
+
+Incompleteness takes precedence over degradation, then multiplicity. Degradation
+warnings remain in `resolution.positions_degraded`. Duplicates remain ambiguous.
+Unresolved results have null `target`, except a unique file candidate denied by
+authorization retains its descriptor. Every requested section then reports
+`unavailable` with `resolution_not_resolved`. There is no context fanout or source
+acquisition for ambiguity candidates. Select a retained file candidate through
+ordinary absolute-file position addressing; selection is never automatic.
+
+Targets must pass canonical containment in the query's selected workspace before
+context requests or source access. A separately approved workspace is not selected
+automatically. External candidates remain navigation evidence. Once resolved,
+source or section failures preserve the target and resolution. References, when
+issued, identify the selected definition only. Definition metadata is absent in
+direct responses. There is no recursion or whole-body guarantee from navigation.
 
 ## Source observation
 
@@ -95,29 +142,34 @@ produce an unqualified `ok` section.
 |---|---|
 | Compact UTF-8 MCP CallToolResult JSON, including text and structured representations | 131072 bytes |
 | Displayed source text after redaction | 16384 bytes |
-| Returned items across all sections | 256 |
-| Distinct participating paths or URIs, including the target | 16 |
-| Source files attempted | One primary file |
+| Returned items across resolution candidates and all sections | 256 |
+| Distinct participating paths or URIs, including query, target and candidates | 16 |
+| Source paths for source/reference work | Direct: one primary; definition: query and selected primary (at most two) |
 | Complete observed source file | 1048576 bytes |
 | Source acquisition/copy accounting, including lookahead and failed reads | 4194304 bytes |
-| Foreground logical semantic operations | 8 |
-| Foreground semantic wire attempts, including existing retries | 32 |
+| Foreground logical semantic operations | Direct: 8; definition: 9 |
+| Foreground semantic wire attempts, including existing retries | Direct: 32; definition: 36 |
 
 Each source fragment, hover object, outgoing call, call-site range, preparation
 item, diagnostic, hint and highlight counts once. Metadata does not count.
 File identities are lexically normalized; non-file URIs also count.
 
-Admission priority is source, hover, outgoing calls, diagnostics, hints, then
+Resolution candidates have first admission priority. Remaining priority is
+source, hover, outgoing calls, diagnostics, hints, then
 highlights, regardless of request order. Lists retain provider-order prefixes.
-Limits can remove data, but preserve the target, requested status records and
+Locally trimmed candidate suffixes set outer `truncated`, independently of
+`provider_truncated`, and cannot make an ambiguous result resolved.
+Limits can remove data, but preserve query/target identity, requested status records and
 uncertainty. Oversized files report `file_too_large` without discarding
 independent sections.
 
 At most two document-symbol operations, one hover, one call preparation, one
 outgoing query, one diagnostics pull, one hints query and one highlights query
-participate. The tool adds no retry loop. These limits exclude initialization,
+participate. Definition mode adds one definition operation. The tool adds no retry loop. These limits exclude initialization,
 protocol replies, document synchronization, normal background diagnostics and
-existing coordinate-conversion acquisition. They do not bound server computation
+existing coordinate-conversion acquisition. Bounded reference validation and
+issuance reads retain their separate limits and charges; this is not a total
+filesystem-I/O bound. They do not bound server computation
 or the complete upstream response before existing normalization. Existing finite
 document tracking and conversion limits still apply. There is no latency or
 atomic-snapshot guarantee.

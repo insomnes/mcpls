@@ -40,6 +40,23 @@ pub(super) fn source_lines(text: &str) -> Vec<&str> {
 }
 
 impl Translator {
+    /// Authorize a definition without selecting another configured workspace root.
+    pub(crate) async fn context_target_authorized(
+        &self,
+        query: &ClientPath,
+        target: &ClientPath,
+    ) -> bool {
+        let (Ok(query), Ok(target)) = (
+            self.validate_path(query).await,
+            self.validate_path(target).await,
+        ) else {
+            return false;
+        };
+        let query_root = self.workspace_roots.canonical_root_of(query.as_path());
+        query_root.is_some()
+            && query_root == self.workspace_roots.canonical_root_of(target.as_path())
+    }
+
     pub(crate) async fn context_hover(
         &self,
         path: &ClientPath,

@@ -2173,7 +2173,7 @@
   {
     "name": "get_definition",
     "title": "Go to Definition",
-    "description": "Definition location of a symbol. include_targets:true adds portable symbol_target objects; default false. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Definition location of a symbol. include_targets:true adds portable symbol_target objects; default false. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "ResultContext": {
@@ -3308,7 +3308,7 @@
   {
     "name": "get_document_highlights",
     "title": "Document Highlights",
-    "description": "Occurrences of the symbol at position within the same file, each marked `read`, `write` or `text`. A file-local subset of get_references. Capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact.",
+    "description": "Occurrences of the symbol at position within the same file, each marked `read`, `write` or `text`. A file-local subset of get_references. Capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -3965,7 +3965,7 @@
   {
     "name": "get_hover",
     "title": "Hover",
-    "description": "Type and documentation info for a symbol. Returns signatures, docs, and inferred types. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact.",
+    "description": "Type and documentation info for a symbol. Returns signatures, docs, and inferred types. Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact.",
     "inputSchema": {
       "$defs": {
         "SymbolTargetEnvelope": {
@@ -4906,7 +4906,7 @@
   {
     "name": "get_inlay_hints",
     "title": "Inlay Hints",
-    "description": "Inlay hints in range. Returns inferred type/parameter annotations the editor would render inline. Capped at a fixed maximum; `truncated: true` on the result means more hints exist than are returned. The end line must exist in the file; a line past the end is rejected as invalid params. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact.",
+    "description": "Inlay hints in range. Returns inferred type/parameter annotations the editor would render inline. Capped at a fixed maximum; `truncated: true` on the result means more hints exist than are returned. The end line must exist in the file; a line past the end is rejected as invalid params. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -6880,7 +6880,7 @@
   {
     "name": "get_subtypes",
     "title": "Subtypes",
-    "description": "Subtypes (derived classes, implementors) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Subtypes (derived classes, implementors) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "HierarchyItem": {
@@ -7290,7 +7290,7 @@
   {
     "name": "get_supertypes",
     "title": "Supertypes",
-    "description": "Supertypes (base classes, implemented interfaces) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Supertypes (base classes, implemented interfaces) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "HierarchyItem": {
@@ -7700,9 +7700,21 @@
   {
     "name": "get_symbol_context",
     "title": "Symbol Context",
-    "description": "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. Each requested section has an independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
+    "description": "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Each requested section has an independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
     "inputSchema": {
       "$defs": {
+        "ContextResolve": {
+          "oneOf": [
+            {
+              "const": "direct",
+              "type": "string"
+            },
+            {
+              "const": "definition",
+              "type": "string"
+            }
+          ]
+        },
         "SymbolTargetEnvelope": {
           "additionalProperties": false,
           "properties": {
@@ -7750,6 +7762,9 @@
             "integer",
             "null"
           ]
+        },
+        "resolve": {
+          "$ref": "#/$defs/ContextResolve"
         },
         "sections": {
           "default": [
@@ -7857,6 +7872,90 @@
             "response"
           ]
         },
+        "query": {
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "position": {
+              "type": "object"
+            },
+            "resolved_symbol": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "file_path",
+            "position"
+          ],
+          "type": "object"
+        },
+        "resolution": {
+          "properties": {
+            "candidates": {
+              "items": {
+                "properties": {
+                  "out_of_workspace": {
+                    "type": "boolean"
+                  },
+                  "range": {
+                    "properties": {
+                      "end": {
+                        "type": "object"
+                      },
+                      "start": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "start",
+                      "end"
+                    ],
+                    "type": "object"
+                  },
+                  "uri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "uri",
+                  "range"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "positions_degraded": {
+              "enum": [
+                "request",
+                "response"
+              ]
+            },
+            "provider_truncated": {
+              "type": "boolean"
+            },
+            "reason": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "resolved",
+                "selection_required",
+                "no_definition",
+                "unavailable",
+                "unsupported",
+                "error"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "candidates",
+            "provider_truncated"
+          ],
+          "type": "object"
+        },
         "sections": {
           "additionalProperties": {
             "properties": {
@@ -7945,7 +8044,10 @@
             "position",
             "range_fidelity"
           ],
-          "type": "object"
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "truncated": {
           "type": "boolean"
@@ -8209,7 +8311,7 @@
   {
     "name": "go_to_declaration",
     "title": "Go to Declaration",
-    "description": "Declaration location of the symbol at position. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Differs from go-to-definition for languages that separate declaration from definition (C/C++ headers, interface members); servers without a declaration concept may return the definition. An empty result is valid. Capped at a fixed maximum; `truncated: true` on the result means more locations exist than are returned. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Declaration location of the symbol at position. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Differs from go-to-definition for languages that separate declaration from definition (C/C++ headers, interface members); servers without a declaration concept may return the definition. An empty result is valid. Capped at a fixed maximum; `truncated: true` on the result means more locations exist than are returned. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "ResultContext": {
@@ -8657,7 +8759,7 @@
   {
     "name": "go_to_implementation",
     "title": "Go to Implementation",
-    "description": "Implementation locations of a trait method or interface member. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Capped at a fixed maximum for an extremely common trait/interface; `truncated: true` on the result means more implementations exist than are returned. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Implementation locations of a trait method or interface member. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Capped at a fixed maximum for an extremely common trait/interface; `truncated: true` on the result means more implementations exist than are returned. Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "ResultContext": {
@@ -9226,7 +9328,7 @@
   {
     "name": "go_to_type_definition",
     "title": "Go to Type Definition",
-    "description": "Type definition location of an expression or symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Distinct from go-to-definition for variable bindings. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Type definition location of an expression or symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Distinct from go-to-definition for variable bindings. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "ResultContext": {
@@ -9795,7 +9897,7 @@
   {
     "name": "prepare_type_hierarchy",
     "title": "Prepare Type Hierarchy",
-    "description": "Prepare type hierarchy at position. Returns type items (classes, interfaces, structs) to pass to get_supertypes / get_subtypes, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Prepare type hierarchy at position. Returns type items (classes, interfaces, structs) to pass to get_supertypes / get_subtypes, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -10861,8 +10963,8 @@
         "Location": {
           "properties": {
             "out_of_workspace": {
-              "type": "boolean",
-              "description": "Whether this location is not provably inside a configured workspace root (stdlib, a dependency)."
+              "description": "Whether this location is not provably inside a configured workspace root (stdlib, a dependency).",
+              "type": "boolean"
             },
             "range": {
               "$ref": "#/$defs/Range"
