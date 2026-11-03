@@ -2314,17 +2314,23 @@ async fn diagnostics_delta_refresh_recovers_dead_backend() {
         vec![crate::config::ConfiguredRoot::new(fixture.main.clone()).unwrap()];
     let runtime = crate::WorkspaceRuntime::prepare(&config).await.unwrap();
     let cancel = tokio_util::sync::CancellationToken::new();
-    crate::runtime::spawn_lsp_servers_background(
-        runtime.applicable_configs,
+    let supervisor = crate::runtime::spawn_lsp_servers_background(
+        runtime
+            .applicable_configs
+            .into_iter()
+            .map(|config| {
+                config.with_child_working_dir(crate::lsp::ChildWorkingDir::Fixed(
+                    fixture.main.clone(),
+                ))
+            })
+            .collect(),
         runtime.translator.clone(),
         runtime.notification_cache.clone(),
         runtime.subscription_registry.clone(),
         cancel.clone(),
         runtime.workspace_roots.clone(),
         config.workspace.max_concurrent_server_starts,
-    )
-    .await
-    .unwrap();
+    );
     let server = McplsServer::new(
         runtime.translator.clone(),
         runtime.notification_cache.clone(),
@@ -2335,13 +2341,25 @@ async fn diagnostics_delta_refresh_recovers_dead_backend() {
     );
     let (client, task) = connect(server).await;
     let path = fixture.main.join("file.py");
-    let first = call(
-        &client,
-        "diagnostics_delta",
-        json!({"file_path":path,"action":"capture"}),
-    )
+    let first = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match call(
+                &client,
+                "diagnostics_delta",
+                json!({"file_path":path,"action":"capture"}),
+            )
+            .await
+            {
+                Ok(observation) => break observation,
+                Err(rmcp::ServiceError::McpError(error)) if error.code.0 == -32051 => {
+                    tokio::task::yield_now().await
+                }
+                Err(error) => panic!("unexpected initialization error: {error}"),
+            }
+        }
+    })
     .await
-    .unwrap();
+    .expect("static backend initialization did not complete");
     std::fs::write(fixture.main.join(".exit-on-hover"), "").unwrap();
     assert!(
         call(&client, "get_hover", hover(&fixture.main))
@@ -2365,6 +2383,7 @@ async fn diagnostics_delta_refresh_recovers_dead_backend() {
     );
     runtime.translator.shutdown_servers().await;
     cancel.cancel();
+    supervisor.await.unwrap();
     client.cancel().await.unwrap();
     task.await.unwrap();
 }
