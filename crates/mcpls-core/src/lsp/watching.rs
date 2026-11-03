@@ -4,12 +4,14 @@
     reason = "types remain restricted to this crate across private LSP modules"
 )]
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use globset::{GlobBuilder, GlobMatcher};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+use wax::Program as _;
 
 use crate::config::{FileWatchingBackend, FileWatchingConfig};
 use crate::error::{Error, Result};
@@ -248,9 +250,41 @@ impl Backend {
     }
 }
 
+// Normalize only literal spelling differences. Wax owns grammar validation and matching.
+fn compile_glob(pattern: &str) -> std::result::Result<wax::Glob<'static>, wax::BuildError> {
+    let mut expression = String::with_capacity(pattern.len());
+    // None is outside a class; true is its first literal, false is its body.
+    let mut class_first: Option<bool> = None;
+    let mut characters = pattern.chars().peekable();
+    while let Some(character) = characters.next() {
+        if let Some(first) = class_first {
+            if character == ']' && !first {
+                class_first = None;
+            } else {
+                if matches!(character, '[' | ']' | '\\') {
+                    expression.push('\\');
+                }
+                class_first = Some(false);
+            }
+        } else if character == '[' {
+            expression.push(character);
+            if characters.peek() == Some(&'!') {
+                expression.push('!');
+                characters.next();
+            }
+            class_first = Some(true);
+            continue;
+        } else if matches!(character, '$' | '<' | '>' | '(' | ')' | ':' | '\\') {
+            expression.push('\\');
+        }
+        expression.push(character);
+    }
+    wax::Glob::new(&expression).map(wax::Glob::into_owned)
+}
+
 #[derive(Debug)]
 struct Watcher {
-    matcher: GlobMatcher,
+    matcher: wax::Glob<'static>,
     absolute: bool,
     kinds: u8,
 }
@@ -297,9 +331,9 @@ impl Registrations {
                         })
                         != 0
                         && watcher.matcher.is_match(if watcher.absolute {
-                            &path
+                            path.as_path()
                         } else {
-                            &change.name
+                            change.name.as_path()
                         })
                 });
                 if !matches || !seen.insert((path.clone(), change.kind)) {
@@ -377,12 +411,7 @@ impl Registrations {
                             .and_then(|k| u8::try_from(k).ok())
                             .ok_or_else(invalid)?,
                     };
-                    let matcher = GlobBuilder::new(pattern)
-                        .literal_separator(true)
-                        .backslash_escape(false)
-                        .build()
-                        .map_err(|_| invalid())?
-                        .compile_matcher();
+                    let matcher = compile_glob(pattern).map_err(|_| invalid())?;
                     watchers.push(Watcher {
                         matcher,
                         kinds,
