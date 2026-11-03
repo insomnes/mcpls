@@ -79,3 +79,8 @@ The default `agent` profile omits standalone `prepare_type_hierarchy`. Set `[mcp
 ## What's Next
 
 Finish the tool tour with [Server Monitoring and Control](server-control.md).
+
+## Portable symbol targets
+
+Copy an emitted `symbol_target` unchanged into the supported read-only consumers.
+See [portable target inputs, producers, limits, and errors](symbol-context.md#copy-a-portable-target).

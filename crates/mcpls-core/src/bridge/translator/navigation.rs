@@ -651,6 +651,8 @@ impl Translator {
             .map(|item| {
                 let hash = hashes.get(&item.uri).cloned().unwrap_or_default();
                 super::dto::NavigationLocation {
+                    symbol_target: None,
+                    symbol_target_unavailable: None,
                     location: item.location,
                     source: item
                         .source

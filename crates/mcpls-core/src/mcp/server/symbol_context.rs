@@ -41,6 +41,8 @@ pub(super) fn shape_schema(router: &mut super::ToolRouter<McplsServer>) {
                     "properties":{"status":{"enum":["ok","empty","partial","unsupported","unavailable","error"]},
                         "reason":{"type":"string"},"data":{"type":"object"}}}},
                 "truncated":{"type":"boolean"},"analysis_freshness":{"const":"unknown"},
+                "symbol_target":{"type":"object","additionalProperties":false,"required":["file_path","symbol_ref"],"properties":{"file_path":{"type":"string"},"symbol_ref":{"type":"string"}}},
+                "symbol_target_unavailable":{"type":"object","required":["reason"],"properties":{"reason":{"type":"string"}}},
                 "symbol_ref":{"type":"string"},"symbol_ref_unavailable":{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]},
                 "atomic_snapshot":{"const":false},"positions_degraded":{"enum":["request","response"]}
             }
@@ -492,8 +494,15 @@ impl McplsServer {
                 json!(charge.saturating_add(reference_charge as u64));
         }
         match reference {
-            Ok(reference) => bundle["symbol_ref"] = json!(reference),
-            Err(reason) => bundle["symbol_ref_unavailable"] = json!({"reason":reason}),
+            Ok(reference) => {
+                bundle["symbol_target"] =
+                    json!({"file_path":bundle["target"]["file_path"],"symbol_ref":reference});
+                bundle["symbol_ref"] = json!(reference);
+            }
+            Err(reason) => {
+                bundle["symbol_target_unavailable"] = json!({"reason":reason});
+                bundle["symbol_ref_unavailable"] = json!({"reason":reason});
+            }
         }
         enforce_response_budget(&mut bundle);
         Ok(CallToolResult::structured(bundle))

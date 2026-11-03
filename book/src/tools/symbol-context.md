@@ -122,6 +122,73 @@ or the complete upstream response before existing normalization. Existing finite
 document tracking and conversion limits still apply. There is no latency or
 atomic-snapshot guarantee.
 
+## Copy a portable target
+
+`workspace_symbol_search`, `get_document_outline`, and `get_definition` accept
+`include_targets: true`. It defaults to false. Each retained entry then contains
+`symbol_target` or `symbol_target_unavailable.reason`. Workspace symbols and
+outline entries put these fields in `symbols[]`; definitions use `locations[]`.
+`get_symbol_context` always adds the same envelope when it issues a trustworthy
+reference. Its existing descriptive `target` and `symbol_ref` fields remain.
+
+Copy the complete object into any of `get_symbol_context`, `get_hover`,
+`get_definition`, `get_references`, `get_incoming_calls`, or `get_outgoing_calls`:
+
+```json
+{
+  "symbol_target": {
+    "file_path": "/work/app/main.rs",
+    "symbol_ref": "<unchanged emitted reference>"
+  }
+}
+```
+
+The envelope has exactly two required strings: absolute `file_path` and
+`symbol_ref`. Unknown envelope members fail. Omit top-level `file_path`,
+`symbol_ref`, `line`, `character`, `symbol_name`, `symbol_kind`, `container`, and
+hierarchy `item`. Mixing any non-null legacy selector with an envelope fails,
+even when they agree. Optional null selectors count as absent. Non-address
+options, including `sections`, `limit`, `include_source`, and
+`include_declaration`, retain their meaning. Edit tools, standalone hierarchy
+preparation, type hierarchy, implementation and type-definition tools do not
+accept envelopes. Unchanged hierarchy items remain valid continuation inputs.
+
+A target binds the returned exact UTF-16 point and observed complete file bytes.
+Outline targets use hierarchical selection starts. Workspace symbols and
+definitions use their location starts, including destinations in another file.
+The envelope does not certify analyzer freshness or an identifier-token boundary.
+Equal names never cause reselection. If reuse fails, perform discovery again.
+
+List enrichment adds no source acquisition or semantic operations when disabled.
+When enabled, it considers retained entries in result order after existing
+filtering and pagination. It attempts at most 16 entries and 16 distinct files.
+It acquires at most 4194304 bytes, including lookahead and failed-read reservations,
+with at most 1048576 complete source bytes per file. Files share one bounded
+observation per call. A two-second best-effort acquisition deadline also applies.
+There is no caller budget override. The existing 8192-byte reference limit applies.
+Target enrichment adds no semantic lookup. Existing coordinate conversion and
+separately requested source or enclosing context work have independent costs.
+Enrichment never removes or reorders ordinary results.
+
+List unavailability reasons are:
+
+| Reason | Meaning |
+|---|---|
+| `budget_exhausted` | The entry or acquisition allowance is exhausted. |
+| `approximate_position` | A flat outline lacks an exact selection start. |
+| `positions_degraded` | Position conversion cannot establish exact coordinates. |
+| `non_file_uri` | The location has no usable local file URI. |
+| `source_unverifiable` | Source is inaccessible, outside authorized roots, invalid UTF-8, oversized, changed during acquisition, or unavailable before the acquisition deadline. |
+| `position_unverifiable` | The point is outside source or splits a UTF-16 character. |
+| `reference_encoding` | The existing reference cannot be encoded. |
+| `reference_too_large` | The encoded reference exceeds 8192 UTF-8 bytes. |
+
+Context envelopes mirror the existing reference's unavailability reason, including
+`source_not_requested`, `source_unavailable`, `source_changed`, and the shared
+position, acquisition, and encoding reasons. They require no additional reads
+beyond existing reference issuance. All consumers retain the reference validation,
+typed errors, runtime lifecycle, and concurrency limits described below.
+
 ## Reuse an observed target
 
 When source is requested, a trustworthy observation adds an opaque `symbol_ref`

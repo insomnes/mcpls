@@ -573,6 +573,7 @@ impl Translator {
                         | AddressableTool::Hover
                         | AddressableTool::Definition
                         | AddressableTool::References
+                        | AddressableTool::PrepareCallHierarchy
                 ) {
                     return Err(crate::error::Error::InvalidToolParams(
                         "symbol_ref is not supported by this tool".into(),

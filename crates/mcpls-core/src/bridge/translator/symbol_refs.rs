@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::Translator;
-use super::dto::Position;
+use super::dto::{Position, Position2D, SymbolTargetEnvelope, SymbolTargetUnavailable};
 use crate::bridge::ClientPath;
 use crate::error::{Error, Result, SymbolResolutionData};
 
@@ -146,6 +146,104 @@ impl Translator {
         Ok((position, charge))
     }
 
+    /// Enrich only retained discovery entries, with a separate fixed acquisition budget.
+    pub(crate) async fn portable_targets(
+        &self,
+        entries: impl IntoIterator<Item = (String, Position2D)>,
+        unavailable: Option<&'static str>,
+    ) -> Vec<std::result::Result<SymbolTargetEnvelope, SymbolTargetUnavailable>> {
+        let mut remaining = 4_194_304usize;
+        let mut sources = std::collections::HashMap::new();
+        let now = self.clock.now();
+        let deadline = now
+            .checked_add(std::time::Duration::from_secs(2))
+            .unwrap_or(now);
+        let mut results = Vec::new();
+        for (index, (uri, point)) in entries.into_iter().enumerate() {
+            let result = async {
+                if index >= 16 || remaining == 0 {
+                    return Err("budget_exhausted");
+                }
+                if let Some(reason) = unavailable {
+                    return Err(reason);
+                }
+                let uri: lsp_types::Uri = serde_json::from_value(serde_json::Value::String(uri))
+                    .map_err(|_| "non_file_uri")?;
+                let path = crate::bridge::state::uri_to_path(&uri).ok_or("non_file_uri")?;
+                if !sources.contains_key(&path) {
+                    let source = async {
+                        let client = ClientPath::try_from(path.clone())
+                            .map_err(|_| "source_unverifiable")?;
+                        let validated = self
+                            .validate_path(&client)
+                            .await
+                            .map_err(|_| "source_unverifiable")?;
+                        let canonical = validated.as_path().to_path_buf();
+                        let (observation, acquired) = self
+                            .bounded_disk_source(
+                                validated,
+                                remaining,
+                                deadline,
+                                MAX_SOURCE_BYTES,
+                                None,
+                            )
+                            .await;
+                        remaining = remaining.saturating_sub(acquired);
+                        let (text, _) = observation.map_err(|reason| match reason {
+                            super::dto::SourceUnavailableReason::SourceBudget => "budget_exhausted",
+                            _ => "source_unverifiable",
+                        })?;
+                        let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+                        Ok::<_, &'static str>((text, canonical, hash))
+                    }
+                    .await;
+                    sources.insert(path.clone(), source);
+                }
+                let (text, canonical, hash) = sources
+                    .get(&path)
+                    .ok_or("source_unverifiable")?
+                    .as_ref()
+                    .map_err(|reason| *reason)?;
+                let position = Position::from_client(point.line, point.character)
+                    .map_err(|_| "position_unverifiable")?;
+                if !valid_point(text, position) {
+                    return Err("position_unverifiable");
+                }
+                let raw = self.encode_symbol_ref(canonical.clone(), position, hash.clone())?;
+                Ok(SymbolTargetEnvelope {
+                    file_path: canonical.clone(),
+                    symbol_ref: raw,
+                })
+            }
+            .await;
+            results.push(result.map_err(|reason| SymbolTargetUnavailable {
+                reason: reason.into(),
+            }));
+        }
+        results
+    }
+
+    fn encode_symbol_ref(
+        &self,
+        file: std::path::PathBuf,
+        position: Position,
+        sha256: String,
+    ) -> std::result::Result<String, &'static str> {
+        let reference = SymbolRef {
+            version: 1,
+            context: self.symbol_ref_context.clone(),
+            file,
+            line: position.line().get(),
+            character: position.character().get(),
+            sha256,
+        };
+        let raw = serde_json::to_string(&reference).map_err(|_| "reference_encoding")?;
+        if raw.len() > MAX_REFERENCE_BYTES {
+            return Err("reference_too_large");
+        }
+        Ok(raw)
+    }
+
     pub(crate) async fn issue_symbol_ref(
         &self,
         path: &ClientPath,
@@ -165,19 +263,7 @@ impl Translator {
             if !valid_point(&text, position) {
                 return Err("position_unverifiable");
             }
-            let reference = SymbolRef {
-                version: 1,
-                context: self.symbol_ref_context.clone(),
-                file: canonical,
-                line: position.line().get(),
-                character: position.character().get(),
-                sha256,
-            };
-            let raw = serde_json::to_string(&reference).map_err(|_| "reference_encoding")?;
-            if raw.len() > MAX_REFERENCE_BYTES {
-                return Err("reference_too_large");
-            }
-            Ok(raw)
+            self.encode_symbol_ref(canonical, position, sha256)
         }
         .await;
         (result, charge)

@@ -842,9 +842,32 @@ pub struct DocumentSymbolsResult {
     pub positions_degraded: Option<PositionDegradation>,
 }
 
+/// Copyable source-bound target for the six supported read-only consumers.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolTargetEnvelope {
+    /// Absolute authorized file path.
+    pub file_path: std::path::PathBuf,
+    /// Existing opaque content- and runtime-bound reference.
+    pub symbol_ref: String,
+}
+
+/// Why a retained discovery entry has no portable target.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolTargetUnavailable {
+    /// Stable snake_case reason.
+    pub reason: String,
+}
+
 /// One compact navigation entry.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OutlineSymbol {
+    /// Absent unless portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target: Option<SymbolTargetEnvelope>,
+    /// Explicit unavailability when portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
     /// Ancestor names followed by the symbol name.
     pub name_path: Vec<String>,
     /// Numeric LSP symbol kind.
@@ -885,6 +908,12 @@ pub struct FormatDocumentResult {
 /// A workspace symbol.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceSymbol {
+    /// Absent unless portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target: Option<SymbolTargetEnvelope>,
+    /// Explicit unavailability when portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
     /// Name of the symbol.
     pub name: String,
     /// LSP numeric symbol kind (e.g. 12 for Function).
@@ -1156,6 +1185,12 @@ pub struct NavigationResult {
 /// A navigation location and its opt-in source outcome.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NavigationLocation {
+    /// Absent unless portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target: Option<SymbolTargetEnvelope>,
+    /// Explicit unavailability when portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
     /// Original location and enclosing context.
     #[serde(flatten)]
     pub location: ContextualLocation,
@@ -1215,6 +1250,8 @@ impl From<LocationsResult> for NavigationResult {
                 .locations
                 .into_iter()
                 .map(|location| NavigationLocation {
+                    symbol_target: None,
+                    symbol_target_unavailable: None,
                     location,
                     source: None,
                 })
@@ -2060,6 +2097,8 @@ impl ServerText for WorkspaceSymbol {
             kind: _,
             location,
             container_name,
+            symbol_target: _,
+            symbol_target_unavailable: _,
         } = self;
         redactions.note_payload(name);
         if let Some(container) = container_name {

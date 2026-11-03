@@ -68,8 +68,9 @@ pub use translator::{
     ResolvedTarget, RestartFailure, RestartOutcome, RestartServerResult, RestartTarget,
     ResultContext, RouteSupport, SelectionRangesResult, ServerIds, ServerIdsError,
     ServerRestartEntry, SourceOrigin, SourceUnavailableReason, SuppliedVersion, Symbol,
-    SymbolFidelity, SymbolKindFilter, SymbolName, SymbolQuery, SymbolTarget, TabSize, TextEdit,
-    TextField, Translator, TypeHierarchyResult, UnavailableReason,
+    SymbolFidelity, SymbolKindFilter, SymbolName, SymbolQuery, SymbolTarget, SymbolTargetEnvelope,
+    SymbolTargetUnavailable, TabSize, TextEdit, TextField, Translator, TypeHierarchyResult,
+    UnavailableReason,
 };
 pub(crate) use translator::{
     CallHierarchyPrepareResult, CodeActionsResult, DiagnosticsRole, HierarchyOrigin,

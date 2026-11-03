@@ -136,14 +136,43 @@ macro_rules! target_wire {
 /// Add reference addressing without changing legacy edit and hierarchy wires.
 macro_rules! reusable_target_wire {
     ($(#[$meta:meta])* $name:ident { $($extra:tt)* }) => {
-        target_wire!(@wire $(#[$meta])* $name take_legacy_target {
-            /// Opaque reference from `get_symbol_context`; use without other addressing.
-            #[serde(default)]
+        #[derive(Debug, Clone, Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        $(#[$meta])*
+        struct $name {
+            /// Copy an emitted target unchanged; omit all legacy addressing fields.
+            symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
+            /// Absolute path, with a legacy selector.
+            file_path: Option<PathBuf>,
+            /// Line number (1-based), with character.
+            line: Option<u32>,
+            /// UTF-16 column (1-based), with line.
+            character: Option<u32>,
+            /// Symbol name, instead of a position or reference.
+            symbol_name: Option<String>,
+            /// Optional kind qualifier for symbol_name.
+            symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
+            /// Optional immediate container for symbol_name.
+            container: Option<String>,
+            /// Existing opaque reference, with file_path.
             symbol_ref: Option<String>,
             $($extra)*
-        });
+        }
         impl $name {
             fn take_target(&mut self) -> Result<SymbolTargetParams, TargetAddressError> {
+                if let Some(envelope) = self.symbol_target.take() {
+                    if self.file_path.is_some() || self.symbol_ref.is_some() || self.line.is_some()
+                        || self.character.is_some() || self.symbol_name.is_some()
+                        || self.symbol_kind.is_some() || self.container.is_some() {
+                        return Err(TargetAddressError::ReferenceOptions(
+                            "symbol_target cannot be combined with legacy addressing fields"
+                        ));
+                    }
+                    return SymbolTargetParams::from_envelope(envelope);
+                }
+                let file_path = self.file_path.take().ok_or(TargetAddressError::ReferenceOptions(
+                    "give symbol_target or file_path with a legacy target"
+                ))?;
                 if let Some(reference) = self.symbol_ref.take() {
                     if self.line.is_some() || self.character.is_some() || self.symbol_name.is_some()
                         || self.symbol_kind.is_some() || self.container.is_some() {
@@ -151,12 +180,11 @@ macro_rules! reusable_target_wire {
                             "symbol_ref cannot be combined with position, name, or qualifiers"
                         ));
                     }
-                    return Ok(SymbolTargetParams {
-                        file_path: std::mem::take(&mut self.file_path),
-                        target: SymbolTargetInput::Reference(reference),
-                    });
+                    return Ok(SymbolTargetParams { file_path, target: SymbolTargetInput::Reference(reference) });
                 }
-                self.take_legacy_target()
+                SymbolTargetParams::from_parts(file_path, PositionFields {
+                    line: self.line, character: self.character,
+                }, self.symbol_name.take(), self.symbol_kind.take(), self.container.take())
             }
         }
     };
@@ -323,6 +351,20 @@ impl SymbolTargetInput {
 }
 
 impl SymbolTargetParams {
+    fn from_envelope(
+        envelope: crate::bridge::SymbolTargetEnvelope,
+    ) -> Result<Self, TargetAddressError> {
+        if !envelope.file_path.is_absolute() {
+            return Err(TargetAddressError::ReferenceOptions(
+                "symbol_target.file_path must be absolute",
+            ));
+        }
+        Ok(Self {
+            file_path: envelope.file_path,
+            target: SymbolTargetInput::Reference(envelope.symbol_ref),
+        })
+    }
+
     /// Builds the target from the addressing fields of a tool call.
     ///
     /// # Errors
@@ -451,6 +493,56 @@ impl TryFrom<ReferencesWire> for ReferencesParams {
 }
 
 reusable_target_wire! {
+    /// Wire form of [`DefinitionParams`].
+    #[schemars(description = "Parameters for navigating from a symbol to related locations.")]
+    DefinitionWire {
+        #[schemars(description = CONTEXT_DESCRIPTION)]
+        #[serde(default)]
+        context: ResultContext,
+        #[serde(default)]
+        include_targets: bool,
+        #[schemars(description = "Attach bounded source observations; default false.")]
+        #[serde(default)]
+        include_source: bool,
+    }
+}
+
+/// Definition navigation with optional portable targets on retained locations.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(try_from = "DefinitionWire")]
+#[schemars(with = "DefinitionWire")]
+pub struct DefinitionParams {
+    /// Legacy navigation target and options.
+    pub navigation: NavigationParams,
+    /// Attach portable targets; default false.
+    pub include_targets: bool,
+}
+
+#[cfg(test)]
+impl From<PositionParams> for DefinitionParams {
+    fn from(position: PositionParams) -> Self {
+        Self {
+            navigation: position.into(),
+            include_targets: false,
+        }
+    }
+}
+
+impl TryFrom<DefinitionWire> for DefinitionParams {
+    type Error = TargetAddressError;
+    fn try_from(mut wire: DefinitionWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            navigation: NavigationParams {
+                target: wire.take_target()?,
+                context: wire.context,
+                include_source: wire.include_source,
+            },
+            include_targets: wire.include_targets,
+        })
+    }
+}
+
+target_wire! {
     /// Wire form of [`NavigationParams`].
     #[schemars(description = "Parameters for navigating from a symbol to related locations.")]
     NavigationWire {
@@ -692,6 +784,9 @@ pub struct DocumentSymbolsParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocumentOutlineParams {
+    /// Attach portable targets to retained entries; default false.
+    #[serde(default)]
+    pub include_targets: bool,
     /// Absolute file path.
     pub file_path: PathBuf,
     /// Case-sensitive substring of the symbol's own name; at most 1,000 bytes.
@@ -737,6 +832,9 @@ const fn default_insert_spaces() -> bool {
 #[serde(deny_unknown_fields)]
 #[schemars(description = "Parameters for searching symbols across the workspace.")]
 pub struct WorkspaceSymbolParams {
+    /// Attach portable targets to retained entries; default false.
+    #[serde(default)]
+    pub include_targets: bool,
     /// Search query for symbol names (supports partial matching).
     #[schemars(description = "Search query for symbol names (supports partial matching).")]
     pub query: String,
@@ -912,6 +1010,8 @@ impl From<HierarchyItemInput> for HierarchyItem {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CallHierarchyCallsWire {
+    /// Portable target instead of item or legacy addressing.
+    symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
     /// Reuse an item unchanged, instead of a file target.
     item: Option<HierarchyItemInput>,
     /// Absolute path, instead of `item`.
@@ -947,7 +1047,8 @@ impl TryFrom<CallHierarchyCallsWire> for CallHierarchyCallsParams {
 
     fn try_from(wire: CallHierarchyCallsWire) -> Result<Self, Self::Error> {
         if let Some(item) = wire.item {
-            if wire.file_path.is_some()
+            if wire.symbol_target.is_some()
+                || wire.file_path.is_some()
                 || wire.line.is_some()
                 || wire.character.is_some()
                 || wire.symbol_name.is_some()
@@ -957,6 +1058,22 @@ impl TryFrom<CallHierarchyCallsWire> for CallHierarchyCallsParams {
                 return Err("give either `item` or a file target, not both".to_owned());
             }
             return Ok(Self::Item { item: item.into() });
+        }
+        if let Some(envelope) = wire.symbol_target {
+            if wire.file_path.is_some()
+                || wire.line.is_some()
+                || wire.character.is_some()
+                || wire.symbol_name.is_some()
+                || wire.symbol_kind.is_some()
+                || wire.container.is_some()
+            {
+                return Err(
+                    "symbol_target cannot be combined with legacy addressing fields".into(),
+                );
+            }
+            return SymbolTargetParams::from_envelope(envelope)
+                .map(Self::Target)
+                .map_err(|error| error.to_string());
         }
         let file_path = wire
             .file_path

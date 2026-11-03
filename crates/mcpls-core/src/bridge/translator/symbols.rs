@@ -216,6 +216,8 @@ impl Translator {
                         );
                     }
                     entries.push(OutlineSymbol {
+                        symbol_target: None,
+                        symbol_target_unavailable: None,
                         name_path,
                         kind: symbol.kind,
                         position: symbol.selection_range.start,
@@ -230,6 +232,8 @@ impl Translator {
                         let mut name_path: Vec<_> = flat.container_name.into_iter().collect();
                         name_path.push(flat.symbol.name);
                         OutlineSymbol {
+                            symbol_target: None,
+                            symbol_target_unavailable: None,
                             name_path,
                             kind: flat.symbol.kind,
                             position: flat.symbol.range.start,
@@ -370,6 +374,8 @@ impl Translator {
         for raw in raw_symbols {
             let range = ctx.normalize_range(&raw.uri, raw.range).await;
             symbols.push(WorkspaceSymbol {
+                symbol_target: None,
+                symbol_target_unavailable: None,
                 name: raw.name,
                 kind: raw.kind,
                 location: Location {

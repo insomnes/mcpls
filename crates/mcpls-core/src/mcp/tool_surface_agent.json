@@ -2173,7 +2173,7 @@
   {
     "name": "get_definition",
     "title": "Go to Definition",
-    "description": "Definition location of a symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
+    "description": "Definition location of a symbol. include_targets:true adds portable symbol_target objects; default false. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory).",
     "inputSchema": {
       "$defs": {
         "ResultContext": {
@@ -2187,14 +2187,29 @@
               "type": "string"
             }
           ]
+        },
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "character": {
-          "default": null,
-          "description": "Character/column number (1-based). Give with `line`, instead of `symbol_name`.",
+          "description": "UTF-16 column (1-based), with line.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -2203,7 +2218,6 @@
           ]
         },
         "container": {
-          "default": null,
           "type": [
             "string",
             "null"
@@ -2214,16 +2228,22 @@
           "default": "none"
         },
         "file_path": {
-          "description": "Absolute path to the file.",
-          "type": "string"
+          "description": "Absolute path, with a legacy selector.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "include_source": {
           "default": false,
           "type": "boolean"
         },
+        "include_targets": {
+          "default": false,
+          "type": "boolean"
+        },
         "line": {
-          "default": null,
-          "description": "Line number (1-based). Give with `character`, instead of `symbol_name`.",
+          "description": "Line number (1-based), with character.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -2276,27 +2296,31 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "symbol_name": {
-          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "symbol_ref": {
-          "default": null,
           "type": [
             "string",
             "null"
           ]
+        },
+        "symbol_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolTargetEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
-      "required": [
-        "file_path"
-      ],
       "type": "object"
     },
     "outputSchema": {
@@ -2428,6 +2452,26 @@
               "anyOf": [
                 {
                   "$ref": "#/$defs/NavigationSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "symbol_target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolTargetEnvelope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "symbol_target_unavailable": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolTargetUnavailable"
                 },
                 {
                   "type": "null"
@@ -2674,6 +2718,33 @@
               "type": "string"
             }
           ]
+        },
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
+        },
+        "SymbolTargetUnavailable": {
+          "properties": {
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
         },
         "UnavailableReason": {
           "oneOf": [
@@ -3376,7 +3447,7 @@
   {
     "name": "get_document_outline",
     "title": "Document Outline",
-    "description": "Compact symbol page in server order. Restart pagination after edits. Flat positions are approximate. `truncated` means more matches remain; limits do not bound the LSP response. `positions_degraded: \"response\"` (non-UTF-16 servers only) means some returned `character` offsets may be inexact.",
+    "description": "Compact symbol page in server order. include_targets:true adds portable targets or unavailable reasons; default false. Restart pagination after edits. Flat positions are approximate. `truncated` means more matches remain; limits do not bound the LSP response. `positions_degraded: \"response\"` (non-UTF-16 servers only) means some returned `character` offsets may be inexact.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -3384,6 +3455,11 @@
         "file_path": {
           "description": "Absolute file path.",
           "type": "string"
+        },
+        "include_targets": {
+          "default": false,
+          "description": "Attach portable targets to retained entries; default false.",
+          "type": "boolean"
         },
         "kind_filter": {
           "anyOf": [
@@ -3481,6 +3557,26 @@
             },
             "position": {
               "$ref": "#/$defs/Position2D"
+            },
+            "symbol_target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolTargetEnvelope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "symbol_target_unavailable": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolTargetUnavailable"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -3532,6 +3628,33 @@
               "type": "string"
             }
           ]
+        },
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
+        },
+        "SymbolTargetUnavailable": {
+          "properties": {
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3704,12 +3827,30 @@
     "title": "Hover",
     "description": "Type and documentation info for a symbol. Returns signatures, docs, and inferred types. Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing. `positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact.",
     "inputSchema": {
+      "$defs": {
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "description": "Copyable source-bound target for the six supported read-only consumers.",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "character": {
-          "default": null,
-          "description": "Character/column number (1-based). Give with `line`, instead of `symbol_name`.",
+          "description": "UTF-16 column (1-based), with line.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -3718,20 +3859,21 @@
           ]
         },
         "container": {
-          "default": null,
-          "description": "With `symbol_name`: keep only symbols inside a container (type, impl, class, module) of this name.",
+          "description": "Optional immediate container for symbol_name.",
           "type": [
             "string",
             "null"
           ]
         },
         "file_path": {
-          "description": "Absolute path to the file.",
-          "type": "string"
+          "description": "Absolute path, with a legacy selector.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "line": {
-          "default": null,
-          "description": "Line number (1-based). Give with `character`, instead of `symbol_name`.",
+          "description": "Line number (1-based), with character.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -3785,29 +3927,34 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "With `symbol_name`: keep only symbols of this kind, by name (function, method, class, struct, ...)"
+          "description": "Optional kind qualifier for symbol_name."
         },
         "symbol_name": {
-          "default": null,
-          "description": "Name of a symbol defined in this file, instead of `line`/`character`.",
+          "description": "Symbol name, instead of a position or reference.",
           "type": [
             "string",
             "null"
           ]
         },
         "symbol_ref": {
-          "default": null,
-          "description": "Opaque reference from `get_symbol_context`; use without other addressing.",
+          "description": "Existing opaque reference, with file_path.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "symbol_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolTargetEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Copy an emitted target unchanged; omit all legacy addressing fields."
         }
       },
-      "required": [
-        "file_path"
-      ],
       "type": "object"
     },
     "outputSchema": {
@@ -4054,6 +4201,23 @@
             "end"
           ],
           "type": "object"
+        },
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "description": "Copyable source-bound target for the six supported read-only consumers.",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4156,6 +4320,17 @@
             "string",
             "null"
           ]
+        },
+        "symbol_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolTargetEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Portable target instead of item or legacy addressing."
         }
       },
       "type": "object"
@@ -4878,6 +5053,23 @@
             "end"
           ],
           "type": "object"
+        },
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "description": "Copyable source-bound target for the six supported read-only consumers.",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4980,6 +5172,17 @@
             "string",
             "null"
           ]
+        },
+        "symbol_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolTargetEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Portable target instead of item or legacy addressing."
         }
       },
       "type": "object"
@@ -5454,14 +5657,30 @@
               "type": "string"
             }
           ]
+        },
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "description": "Copyable source-bound target for the six supported read-only consumers.",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "character": {
-          "default": null,
-          "description": "Character/column number (1-based). Give with `line`, instead of `symbol_name`.",
+          "description": "UTF-16 column (1-based), with line.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -5470,8 +5689,7 @@
           ]
         },
         "container": {
-          "default": null,
-          "description": "With `symbol_name`: keep only symbols inside a container (type, impl, class, module) of this name.",
+          "description": "Optional immediate container for symbol_name.",
           "type": [
             "string",
             "null"
@@ -5483,8 +5701,11 @@
           "description": "Extra context: `none` (default) or `enclosing_symbol` (innermost symbol, one request per file)."
         },
         "file_path": {
-          "description": "Absolute path to the file.",
-          "type": "string"
+          "description": "Absolute path, with a legacy selector.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "include_declaration": {
           "default": false,
@@ -5505,8 +5726,7 @@
           "type": "integer"
         },
         "line": {
-          "default": null,
-          "description": "Line number (1-based). Give with `character`, instead of `symbol_name`.",
+          "description": "Line number (1-based), with character.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -5568,29 +5788,34 @@
               "type": "null"
             }
           ],
-          "default": null,
-          "description": "With `symbol_name`: keep only symbols of this kind, by name (function, method, class, struct, ...)"
+          "description": "Optional kind qualifier for symbol_name."
         },
         "symbol_name": {
-          "default": null,
-          "description": "Name of a symbol defined in this file, instead of `line`/`character`.",
+          "description": "Symbol name, instead of a position or reference.",
           "type": [
             "string",
             "null"
           ]
         },
         "symbol_ref": {
-          "default": null,
-          "description": "Opaque reference from `get_symbol_context`; use without other addressing.",
+          "description": "Existing opaque reference, with file_path.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "symbol_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolTargetEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Copy an emitted target unchanged; omit all legacy addressing fields."
         }
       },
-      "required": [
-        "file_path"
-      ],
       "type": "object"
     },
     "outputSchema": {
@@ -7257,11 +7482,28 @@
     "title": "Symbol Context",
     "description": "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. Each requested section has an independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
     "inputSchema": {
+      "$defs": {
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "character": {
-          "default": null,
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -7270,17 +7512,18 @@
           ]
         },
         "container": {
-          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "file_path": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "line": {
-          "default": null,
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -7353,27 +7596,31 @@
             {
               "type": "null"
             }
-          ],
-          "default": null
+          ]
         },
         "symbol_name": {
-          "default": null,
           "type": [
             "string",
             "null"
           ]
         },
         "symbol_ref": {
-          "default": null,
           "type": [
             "string",
             "null"
           ]
+        },
+        "symbol_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SymbolTargetEnvelope"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
-      "required": [
-        "file_path"
-      ],
       "type": "object"
     },
     "outputSchema": {
@@ -7421,6 +7668,33 @@
           "type": "string"
         },
         "symbol_ref_unavailable": {
+          "properties": {
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        "symbol_target": {
+          "additionalProperties": false,
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
+        },
+        "symbol_target_unavailable": {
           "properties": {
             "reason": {
               "type": "string"
@@ -10100,11 +10374,16 @@
   {
     "name": "workspace_symbol_search",
     "title": "Workspace Symbol Search",
-    "description": "Search workspace symbols by name. Supports partial matching and fuzzy search. `limit` is capped at a fixed server-side maximum regardless of the value requested; `truncated: true` on the result means more matches exist than are returned. `positions_degraded: \"response\"` (non-UTF-16 servers only) means some returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory). On an empty result, `index_coverage` gives `synced_documents` (documents currently synced) and `server_restarted` (once true, stays true); the server may not index other files, so not proof of absence.",
+    "description": "Search workspace symbols by name. include_targets:true adds portable targets or unavailable reasons; default false. Supports partial matching and fuzzy search. `limit` is capped at a fixed server-side maximum regardless of the value requested; `truncated: true` on the result means more matches exist than are returned. `positions_degraded: \"response\"` (non-UTF-16 servers only) means some returned `character` offsets may be inexact. `out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory). On an empty result, `index_coverage` gives `synced_documents` (documents currently synced) and `server_restarted` (once true, stays true); the server may not index other files, so not proof of absence.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "include_targets": {
+          "default": false,
+          "description": "Attach portable targets to retained entries; default false.",
+          "type": "boolean"
+        },
         "kind_filter": {
           "anyOf": [
             {
@@ -10266,6 +10545,35 @@
           ],
           "type": "object"
         },
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "description": "Copyable source-bound target for the six supported read-only consumers.",
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
+        },
+        "SymbolTargetUnavailable": {
+          "description": "Why a retained discovery entry has no portable target.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
         "WorkspaceSymbol": {
           "description": "A workspace symbol.",
           "properties": {
@@ -10289,6 +10597,28 @@
             "name": {
               "description": "Name of the symbol.",
               "type": "string"
+            },
+            "symbol_target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolTargetEnvelope"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Absent unless portable target enrichment was requested."
+            },
+            "symbol_target_unavailable": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolTargetUnavailable"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Explicit unavailability when portable target enrichment was requested."
             }
           },
           "required": [

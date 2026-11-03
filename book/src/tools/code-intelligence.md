@@ -305,3 +305,8 @@ When `positions_degraded` is present, follow the [position warning](overview.md#
 Use `next_offset` for the next page when `truncated` is true. Restart pagination after document changes.
 The limit bounds returned entries; it does not bound the language server's original response.
 This tool returns navigation information and does not apply edits.
+
+## Portable symbol targets
+
+Copy an emitted `symbol_target` unchanged into the supported read-only consumers.
+See [portable target inputs, producers, limits, and errors](symbol-context.md#copy-a-portable-target).

@@ -42,10 +42,10 @@ use super::session::{
 use super::tool_support::{McpTool, ToolSupportReport, prefixed_tool_name};
 use super::tools::{
     CachedDiagnosticsParams, CallHierarchyCallsParams, CodeActionsParams, CompletionsParams,
-    DeclarationParams, DiagnosticsParams, DocumentOutlineParams, DocumentSymbolsParams,
-    FoldingRangesParams, FormatDocumentParams, FormatRangeParams, InlayHintsParams,
-    NavigationParams, PositionParams, RangeParams, ReferencesParams, RenameParams,
-    RestartServerParams, ServerLogsParams, ServerMessagesParams, SymbolTargetInput,
+    DeclarationParams, DefinitionParams, DiagnosticsParams, DocumentOutlineParams,
+    DocumentSymbolsParams, FoldingRangesParams, FormatDocumentParams, FormatRangeParams,
+    InlayHintsParams, NavigationParams, PositionParams, RangeParams, ReferencesParams,
+    RenameParams, RestartServerParams, ServerLogsParams, ServerMessagesParams, SymbolTargetInput,
     SymbolTargetParams, ToolSupportParams, TypeHierarchyWalkParams, WorkspaceSymbolParams,
 };
 use crate::bridge::resources::{
@@ -997,6 +997,61 @@ impl McplsServer {
             {
                 properties.remove("symbol_ref");
             }
+            if !matches!(
+                tool.name.as_ref(),
+                "get_hover"
+                    | "get_definition"
+                    | "get_references"
+                    | "get_symbol_context"
+                    | "get_incoming_calls"
+                    | "get_outgoing_calls"
+            ) {
+                let schema = Arc::make_mut(&mut tool.input_schema);
+                if let Some(properties) = schema
+                    .get_mut("properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("symbol_target");
+                }
+                if let Some(definitions) = schema
+                    .get_mut("$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    definitions.remove("SymbolTargetEnvelope");
+                }
+                if tool.name.as_ref() == "prepare_call_hierarchy"
+                    && let Some(required) = schema
+                        .entry("required")
+                        .or_insert_with(|| serde_json::json!([]))
+                        .as_array_mut()
+                {
+                    required.push(serde_json::json!("file_path"));
+                }
+            }
+        }
+        // Other navigation tools retain their existing response schema.
+        for name in [
+            "go_to_declaration",
+            "go_to_implementation",
+            "go_to_type_definition",
+        ] {
+            if let Some(route) = router.map.get_mut(name)
+                && let Some(output) = &mut route.attr.output_schema
+                && let Some(definitions) = Arc::make_mut(output)
+                    .get_mut("$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+            {
+                if let Some(properties) = definitions
+                    .get_mut("NavigationLocation")
+                    .and_then(|schema| schema.get_mut("properties"))
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("symbol_target");
+                    properties.remove("symbol_target_unavailable");
+                }
+                definitions.remove("SymbolTargetEnvelope");
+                definitions.remove("SymbolTargetUnavailable");
+            }
         }
         router
     }
@@ -1088,28 +1143,54 @@ impl McplsServer {
 
     /// Get the definition location of a symbol.
     #[tool(
-        description = concat!("Definition location of a symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Definition location of a symbol. include_targets:true adds portable symbol_target objects; default false. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Definition"
     )]
     async fn get_definition(
         &self,
-        Parameters(NavigationParams {
-            target,
-            context,
-            include_source,
-        }): Parameters<NavigationParams>,
+        Parameters(DefinitionParams {
+            navigation:
+                NavigationParams {
+                    target,
+                    context,
+                    include_source,
+                },
+            include_targets,
+        }): Parameters<DefinitionParams>,
     ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
         self.addressed(
             target,
             AddressableTool::Definition,
-            |file_path, position| {
-                translator.handle_definition_with_source(
-                    file_path,
-                    position,
-                    context,
-                    include_source,
-                )
+            |file_path, position| async move {
+                let mut result = translator
+                    .handle_definition_with_source(file_path, position, context, include_source)
+                    .await?;
+                if include_targets {
+                    let entries = result
+                        .locations
+                        .iter()
+                        .map(|entry| {
+                            (
+                                entry.location.uri.clone(),
+                                entry.location.range.start.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let targets = translator
+                        .portable_targets(
+                            entries,
+                            result.positions_degraded.map(|_| "positions_degraded"),
+                        )
+                        .await;
+                    for (entry, target) in result.locations.iter_mut().zip(targets) {
+                        match target {
+                            Ok(target) => entry.symbol_target = Some(target),
+                            Err(reason) => entry.symbol_target_unavailable = Some(reason),
+                        }
+                    }
+                }
+                Ok(result)
             },
         )
         .await
@@ -1365,12 +1446,13 @@ impl McplsServer {
 
     /// Return compact document navigation.
     #[tool(
-        description = concat!("Compact symbol page in server order. Restart pagination after edits. Flat positions are approximate. `truncated` means more matches remain; limits do not bound the LSP response. ", positions_note_response!()),
+        description = concat!("Compact symbol page in server order. include_targets:true adds portable targets or unavailable reasons; default false. Restart pagination after edits. Flat positions are approximate. `truncated` means more matches remain; limits do not bound the LSP response. ", positions_note_response!()),
         title = "Document Outline"
     )]
     async fn get_document_outline(
         &self,
         Parameters(DocumentOutlineParams {
+            include_targets,
             file_path,
             query,
             kind_filter,
@@ -1383,12 +1465,35 @@ impl McplsServer {
         }
         let file_path = parse_client_path(file_path)?;
         let kind_filter = parse_kind_filter(kind_filter, KindFilterField::KindFilter)?;
-        self.structured_result(
-            self.context
-                .translator
-                .handle_document_outline(file_path, query, kind_filter, offset, limit)
-                .await,
-        )
+        let translator = &self.context.translator;
+        let mut result = translator
+            .handle_document_outline(file_path.clone(), query, kind_filter, offset, limit)
+            .await
+            .map_err(|error| self.render_error(error))?;
+        if include_targets {
+            let uri = crate::bridge::path_to_uri(file_path.as_path())
+                .map_err(|error| self.render_error(error))?;
+            let reason = if result.positions_degraded.is_some() {
+                Some("positions_degraded")
+            } else if result.fidelity == crate::bridge::SymbolFidelity::Flat {
+                Some("approximate_position")
+            } else {
+                None
+            };
+            let entries = result
+                .symbols
+                .iter()
+                .map(|entry| (uri.to_string(), entry.position.clone()))
+                .collect::<Vec<_>>();
+            let targets = translator.portable_targets(entries, reason).await;
+            for (entry, target) in result.symbols.iter_mut().zip(targets) {
+                match target {
+                    Ok(target) => entry.symbol_target = Some(target),
+                    Err(reason) => entry.symbol_target_unavailable = Some(reason),
+                }
+            }
+        }
+        self.structured_result(Ok(result))
     }
 
     /// Format a document according to language server rules.
@@ -1418,24 +1523,49 @@ impl McplsServer {
 
     /// Search for symbols across the workspace.
     #[tool(
-        description = concat!("Search workspace symbols by name. Supports partial matching and fuzzy search. `limit` is capped at a fixed server-side maximum regardless of the value requested; `truncated: true` on the result means more matches exist than are returned. ", positions_note_response!(), " ", out_of_workspace_note!(), " ", index_coverage_note!()),
+        description = concat!("Search workspace symbols by name. include_targets:true adds portable targets or unavailable reasons; default false. Supports partial matching and fuzzy search. `limit` is capped at a fixed server-side maximum regardless of the value requested; `truncated: true` on the result means more matches exist than are returned. ", positions_note_response!(), " ", out_of_workspace_note!(), " ", index_coverage_note!()),
         title = "Workspace Symbol Search"
     )]
     async fn workspace_symbol_search(
         &self,
         Parameters(WorkspaceSymbolParams {
+            include_targets,
             query,
             kind_filter,
             limit,
         }): Parameters<WorkspaceSymbolParams>,
     ) -> Result<Json<WorkspaceSymbolResult>, McpError> {
         let kind_filter = parse_kind_filter(kind_filter, KindFilterField::KindFilter)?;
-        self.structured_result(
-            self.context
-                .translator
-                .handle_workspace_symbol(query, kind_filter, limit)
-                .await,
-        )
+        let translator = &self.context.translator;
+        let mut result = translator
+            .handle_workspace_symbol(query, kind_filter, limit)
+            .await
+            .map_err(|error| self.render_error(error))?;
+        if include_targets {
+            let entries = result
+                .symbols
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.location.uri.clone(),
+                        entry.location.range.start.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let targets = translator
+                .portable_targets(
+                    entries,
+                    result.positions_degraded.map(|_| "positions_degraded"),
+                )
+                .await;
+            for (entry, target) in result.symbols.iter_mut().zip(targets) {
+                match target {
+                    Ok(target) => entry.symbol_target = Some(target),
+                    Err(reason) => entry.symbol_target_unavailable = Some(reason),
+                }
+            }
+        }
+        self.structured_result(Ok(result))
     }
 
     /// Get code actions for a range.
@@ -2975,6 +3105,10 @@ mod tests {
     }
 
     /// As [`at`], for the tools that also take a `context`.
+    fn definition(params: Parameters<PositionParams>) -> Parameters<DefinitionParams> {
+        Parameters(params.0.into())
+    }
+
     fn nav(params: Parameters<PositionParams>) -> Parameters<NavigationParams> {
         Parameters(params.0.into())
     }
@@ -3738,7 +3872,7 @@ mod tests {
                     .await
                     .map(|_| ()),
                 server
-                    .get_definition(nav(Parameters(position(line, character))))
+                    .get_definition(definition(Parameters(position(line, character))))
                     .await
                     .map(|_| ()),
                 server
@@ -4054,7 +4188,7 @@ mod tests {
             character: 5,
         });
 
-        let result = server.get_definition(nav(params)).await;
+        let result = server.get_definition(definition(params)).await;
         assert!(result.is_err());
     }
 
@@ -4813,6 +4947,7 @@ mod tests {
     async fn test_workspace_symbol_search_tool_with_params() {
         let server = create_test_server();
         let params = Parameters(WorkspaceSymbolParams {
+            include_targets: false,
             query: "User".to_string(),
             kind_filter: None,
             limit: 100,
@@ -8686,6 +8821,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::GetDocumentOutline => server
                 .get_document_outline(Parameters(DocumentOutlineParams {
+                    include_targets: false,
                     file_path: PathBuf::from(file_path.clone()),
                     query: None,
                     kind_filter: None,
@@ -8705,6 +8841,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::WorkspaceSymbolSearch => server
                 .workspace_symbol_search(Parameters(WorkspaceSymbolParams {
+                    include_targets: false,
                     query: "main".to_string(),
                     kind_filter: None,
                     limit: 10,
@@ -9304,6 +9441,240 @@ sleep 0.3
         assert!(server.get_tool("p_get_hover").is_some());
         assert!(server.get_tool("get_hover").is_none());
     }
+    /// Public discovery envelopes keep exact points through all six consumers.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one public matrix verifies producer-consumer identity and rejection without dispatch"
+    )]
+    async fn portable_targets_roundtrip_and_reject_stale_over_mcp() {
+        use crate::test_lsp::{read_framed_message, write_response};
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
+                    hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                    definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+                    references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
+                    call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let original = "mod a { fn same() {} }\nmod b { fn same() {} }\n";
+        std::fs::write(&fixture.file, original).unwrap();
+        let uri = crate::bridge::path_to_uri(&fixture.file)
+            .unwrap()
+            .to_string();
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                seen.lock().await.push(request.clone());
+                let point = request["params"]["position"].clone();
+                let range =
+                    serde_json::json!({"start":point,"end":{"line":point["line"],"character":15}});
+                let item = serde_json::json!({"name":"same","kind":12,"uri":uri,"range":range,"selectionRange":range,"data":{"point":point,"opaque":[1,{"x":true}]}});
+                let result = match request["method"].as_str().unwrap() {
+                    "textDocument/documentSymbol" => serde_json::json!((0..2).map(|line| serde_json::json!({
+                        "name":"same","kind":12,"range":{"start":{"line":line,"character":8},"end":{"line":line,"character":20}},
+                        "selectionRange":{"start":{"line":line,"character":11},"end":{"line":line,"character":15}}
+                    })).collect::<Vec<_>>()),
+                    "workspace/symbol" => serde_json::json!((0..if request["params"]["query"] == "many" { 17 } else { 2 }).map(|line| serde_json::json!({"name":"same","kind":12,"location":{"uri":uri,"range":{"start":{"line":line % 2,"character":11},"end":{"line":line % 2,"character":15}}}})).collect::<Vec<_>>()),
+                    "textDocument/hover" => serde_json::json!({"contents":format!("point:{}:{}",point["line"],point["character"])}),
+                    "textDocument/definition" | "textDocument/references" => serde_json::json!([{"uri":uri,"range":range}]),
+                    "textDocument/prepareCallHierarchy" => serde_json::json!([item]),
+                    "callHierarchy/incomingCalls" => serde_json::json!([{"from":request["params"]["item"],"fromRanges":[]}]),
+                    "callHierarchy/outgoingCalls" => serde_json::json!([{"to":request["params"]["item"],"fromRanges":[]}]),
+                    method => panic!("unexpected semantic request: {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], result).await;
+            }
+        });
+        for enabled in [false, true] {
+            let before = requests.lock().await.len();
+            let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                "name":"workspace_symbol_search", "arguments":{"query":"many","include_targets":enabled}
+            })).await;
+            let symbols = response["result"]["structuredContent"]["symbols"]
+                .as_array()
+                .expect("retained symbol list");
+            assert_eq!(symbols.len(), 17);
+            assert_eq!(
+                requests.lock().await.len(),
+                before + 1,
+                "enrichment adds no semantic operation"
+            );
+            for (index, entry) in symbols.iter().enumerate() {
+                if !enabled {
+                    assert!(
+                        entry.get("symbol_target").is_none()
+                            && entry.get("symbol_target_unavailable").is_none()
+                    );
+                } else if index < 16 {
+                    assert!(entry["symbol_target"].is_object(), "{entry}");
+                } else {
+                    assert_eq!(
+                        entry["symbol_target_unavailable"]["reason"],
+                        "budget_exhausted"
+                    );
+                }
+            }
+        }
+        let producers = [
+            (
+                "workspace_symbol_search",
+                serde_json::json!({"query":"same","include_targets":true}),
+                "symbols",
+                1,
+            ),
+            (
+                "get_document_outline",
+                serde_json::json!({"file_path":fixture.file,"include_targets":true}),
+                "symbols",
+                1,
+            ),
+            (
+                "get_definition",
+                serde_json::json!({"file_path":fixture.file,"line":2,"character":12,"include_targets":true}),
+                "locations",
+                0,
+            ),
+            (
+                "get_symbol_context",
+                serde_json::json!({"file_path":fixture.file,"line":2,"character":12,"sections":["source"]}),
+                "",
+                0,
+            ),
+        ];
+        let consumers = [
+            "get_symbol_context",
+            "get_hover",
+            "get_definition",
+            "get_references",
+            "get_incoming_calls",
+            "get_outgoing_calls",
+        ];
+        let mut target = serde_json::Value::Null;
+        for (producer, arguments, list, index) in producers {
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({"name":producer,"arguments":arguments}),
+            )
+            .await;
+            let result = &response["result"]["structuredContent"];
+            target = if list.is_empty() {
+                result["symbol_target"].clone()
+            } else {
+                result[list][index]["symbol_target"].clone()
+            };
+            assert!(target.is_object(), "{producer}: {response}");
+            for consumer in consumers {
+                let before = requests.lock().await.len();
+                let mut arguments = serde_json::json!({"symbol_target":target});
+                if consumer == "get_symbol_context" {
+                    arguments["sections"] = serde_json::json!(["hover"]);
+                }
+                let response = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    serde_json::json!({"name":consumer,"arguments":arguments}),
+                )
+                .await;
+                assert!(
+                    response.get("error").is_none(),
+                    "{producer} -> {consumer}: {response}"
+                );
+                let result = &response["result"]["structuredContent"];
+                assert!(result.is_object(), "{response}");
+                let observed = requests.lock().await;
+                let semantic = observed
+                    .iter()
+                    .skip(before)
+                    .find(|request| request["params"].get("position").is_some())
+                    .expect("consumer dispatched original point");
+                assert_eq!(
+                    semantic["params"]["position"],
+                    serde_json::json!({"line":1,"character":11}),
+                    "{producer} -> {consumer}"
+                );
+                if consumer == "get_hover" || consumer == "get_symbol_context" {
+                    assert!(result.to_string().contains("point:1:11"), "{response}");
+                }
+                if consumer.ends_with("_calls") {
+                    let walk = observed.last().unwrap();
+                    assert_eq!(
+                        walk["params"]["item"]["data"]["point"],
+                        serde_json::json!({"line":1,"character":11})
+                    );
+                    assert_eq!(
+                        walk["params"]["item"]["data"]["opaque"],
+                        serde_json::json!([1,{"x":true}])
+                    );
+                    assert!(result.to_string().contains("same"), "{response}");
+                }
+            }
+        }
+        for consumer in consumers {
+            for (field, value) in [
+                ("file_path", serde_json::json!(fixture.file)),
+                ("symbol_ref", serde_json::json!("extra")),
+                ("line", serde_json::json!(2)),
+                ("character", serde_json::json!(12)),
+                ("symbol_name", serde_json::json!("same")),
+                ("symbol_kind", serde_json::json!(12)),
+                ("container", serde_json::json!("b")),
+                ("item", serde_json::json!({})),
+            ] {
+                let before = requests.lock().await.len();
+                let mut arguments = serde_json::json!({"symbol_target":target});
+                arguments[field] = value;
+                let response = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    serde_json::json!({"name":consumer,"arguments":arguments}),
+                )
+                .await;
+                assert!(
+                    response.get("error").is_some() || response["result"]["isError"] == true,
+                    "{consumer} mixed {field}: {response}"
+                );
+                assert_eq!(
+                    requests.lock().await.len(),
+                    before,
+                    "mixed addressing must not dispatch"
+                );
+            }
+        }
+        std::fs::write(&fixture.file, original.replace("same", "away")).unwrap();
+        for consumer in consumers {
+            let before = requests.lock().await.len();
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({"name":consumer,"arguments":{"symbol_target":target}}),
+            )
+            .await;
+            assert_eq!(
+                response["error"]["data"]["kind"], "stale_target",
+                "{consumer}: {response}"
+            );
+            assert_eq!(
+                requests.lock().await.len(),
+                before,
+                "rejected target must not dispatch"
+            );
+        }
+        responder.abort();
+    }
+
     /// Public MCP source bundles preserve original file bytes and independent statuses.
     #[tokio::test]
     async fn symbol_context_preserves_source_and_null_hover() {

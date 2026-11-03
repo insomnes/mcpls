@@ -223,6 +223,57 @@ impl McplsServer {
                 | "get_tool_support"
         );
         let arguments = request.arguments.get_or_insert_default();
+        let envelope = arguments
+            .get("symbol_target")
+            .filter(|value| !value.is_null());
+        if envelope.is_some()
+            && !matches!(
+                name.as_str(),
+                "get_symbol_context"
+                    | "get_hover"
+                    | "get_definition"
+                    | "get_references"
+                    | "get_incoming_calls"
+                    | "get_outgoing_calls"
+            )
+        {
+            return Err(McpError::invalid_params(
+                "symbol_target is not supported by this tool",
+                None,
+            ));
+        }
+        let envelope_file = if let Some(envelope) = envelope {
+            if [
+                "file_path",
+                "symbol_ref",
+                "line",
+                "character",
+                "symbol_name",
+                "symbol_kind",
+                "container",
+                "item",
+            ]
+            .iter()
+            .any(|key| arguments.get(*key).is_some_and(|value| !value.is_null()))
+            {
+                return Err(McpError::invalid_params(
+                    "symbol_target cannot be combined with legacy addressing fields or item",
+                    None,
+                ));
+            }
+            let envelope: crate::bridge::SymbolTargetEnvelope =
+                serde_json::from_value(envelope.clone())
+                    .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+            if !envelope.file_path.is_absolute() {
+                return Err(McpError::invalid_params(
+                    "symbol_target.file_path must be absolute",
+                    None,
+                ));
+            }
+            Some(envelope.file_path)
+        } else {
+            None
+        };
         if name == "diagnostics_delta" {
             super::diagnostics_delta::validate(&Value::Object(arguments.clone()))?;
         }
@@ -261,7 +312,9 @@ impl McplsServer {
                 .call(ToolCallContext::new(self, request, context))
                 .await;
         };
-        let file = if name == "get_tool_support"
+        let file = if envelope_file.is_some() {
+            envelope_file.clone()
+        } else if name == "get_tool_support"
             && arguments.get("file_path").is_some_and(Value::is_null)
         {
             None
@@ -287,7 +340,16 @@ impl McplsServer {
             let canonical = tokio::fs::canonicalize(&file)
                 .await
                 .map_err(|_| DispatchError::invalid(&file).wire())?;
-            arguments.insert("file_path".into(), json!(canonical));
+            if envelope_file.is_some() {
+                if let Some(envelope) = arguments
+                    .get_mut("symbol_target")
+                    .and_then(Value::as_object_mut)
+                {
+                    envelope.insert("file_path".into(), json!(canonical));
+                }
+            } else {
+                arguments.insert("file_path".into(), json!(canonical));
+            }
             Some(canonical)
         } else {
             None

@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Discovery results can include a copyable `symbol_target` for symbol context, hover, definition, references, and direct incoming/outgoing calls. Set `include_targets: true` on workspace search, outline, or definition; context emits targets with its existing source-bound references. Fixed acquisition limits and explicit unavailable reasons preserve ordinary discovery results. Legacy selectors and hierarchy continuation remain supported.
+
 - `diagnostics_delta` captures bounded caller-held baselines and compares exact diagnostic occurrences. Complete comparable reports qualify removed baseline indices; incomplete evidence reports uncertain removals. Cached mode does not start analysis. Baselines invalidate across runtime or diagnostics-server replacement, and source freshness remains unknown. The agent and full catalogs now expose 29 and 32 tools.
 
 - Opt-in Linux Watchman file watching supports standard LSP dynamic registrations, shared workspace coverage, operator-managed native exclusions, and explicit backend failure reporting. Watching remains disabled by default.
