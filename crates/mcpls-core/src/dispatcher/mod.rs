@@ -1116,6 +1116,10 @@ impl Resident {
             self.selection.config.mcp.clone(),
         ))
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one demand path preserves backend errors before server startup and recovery backoff"
+    )]
     pub(crate) async fn demand(
         self: &Arc<Self>,
         dispatcher: &Arc<Dispatcher>,
@@ -1140,6 +1144,12 @@ impl Resident {
                 continue;
             }
             let id = start.config.server_config().id();
+            // Backend loss must not be hidden by ordinary startup backoff.
+            if let Some(backend) = &start.config.watching {
+                backend.check().map_err(|error| {
+                    DispatchError::new("workspace_unavailable", error.to_string())
+                })?;
+            }
             let mut state = start.state.lock().await;
             if runtime
                 .translator

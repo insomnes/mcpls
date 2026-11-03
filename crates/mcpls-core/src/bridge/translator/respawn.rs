@@ -317,6 +317,15 @@ impl Translator {
         backoff: BackoffPolicy,
         routing: NotificationRouting<'_>,
     ) -> Result<()> {
+        // Coverage loss remains the failure reason until a fresh runtime owns
+        // valid coverage, even when ordinary server respawn is in backoff.
+        let backend = match &config {
+            RespawnConfig::Unvetted(config) => config.watching.as_ref(),
+            RespawnConfig::Vetted(config) => config.watching.as_ref(),
+        };
+        if let Some(backend) = backend {
+            backend.check()?;
+        }
         if backoff == BackoffPolicy::Honor
             && let Some(remaining) = self.respawn_backoff_remaining(id)
         {
