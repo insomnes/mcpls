@@ -71,14 +71,19 @@ prove a declaration body. The existing hierarchical symbol check qualifies it.
 | `resolved` | One complete, reliable file candidate is authorized in the query workspace. |
 | `selection_required` | `definition_incomplete`, `positions_degraded`, or `multiple_definitions`. |
 | `no_definition` | `no_definition`: a complete reliable response has no candidates. |
-| `unavailable` | `target_unavailable`: the sole candidate has no usable file position or fails authorization. |
+| `unavailable` | `target_unavailable`: the sole candidate has no usable file position or fails authorization. `response_budget`: its required descriptor cannot fit the result cap. |
 | `unsupported` | `capability_not_supported`: definition capability is absent. |
 | `error` | `provider_error`: definition lookup failed after existing handling. |
 
 Incompleteness takes precedence over degradation, then multiplicity. Degradation
 warnings remain in `resolution.positions_degraded`. Duplicates remain ambiguous.
 Unresolved results have null `target`, except a unique file candidate denied by
-authorization retains its descriptor. Every requested section then reports
+authorization retains its descriptor when the mandatory response fits. If the
+selected descriptor alone exceeds the complete result cap after candidate and
+optional-data removal, resolution becomes `unavailable/response_budget`, target is
+null, and outer `truncated` is true before any target-context work. Candidate
+evidence retains only a fitting prefix; provider truncation remains independent.
+Every requested section then reports
 `unavailable` with `resolution_not_resolved`. There is no context fanout or source
 acquisition for ambiguity candidates. Select a retained file candidate through
 ordinary absolute-file position addressing; selection is never automatic.
@@ -107,7 +112,9 @@ up-to-five-line window and reports `partial` with `range_unavailable`.
 identifies the complete unredacted observed file, rather than the excerpt.
 `redacted: true` means displayed text differs through secret redaction;
 completeness still describes coverage. `source_acquisition_bytes` reports the
-existing bounded acquisition charge, including failed-read reservations.
+existing bounded acquisition charge, including failed-read reservations. Requested
+source sections retain completed query-reference validation charges even when
+definition resolution is unresolved or its selected descriptor exceeds the cap.
 Workspace containment applies to source access, including symlink targets.
 
 ## Semantic scope and uncertainty

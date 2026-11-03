@@ -163,7 +163,7 @@ macro_rules! availability_note {
 /// Tool-description sentence for the tools whose results flag `out_of_workspace`.
 macro_rules! out_of_workspace_note {
     () => {
-        "`out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory)."
+        "`out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory)."
     };
 }
 
@@ -1115,7 +1115,7 @@ impl McplsServer {
 
     /// Collect bounded context for one primary-file symbol.
     #[tool(
-        description = "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Each requested section has an independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
+        description = "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Requested sections have independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
         title = "Symbol Context"
     )]
     async fn get_symbol_context(
@@ -9680,6 +9680,10 @@ sleep 0.3
     /// Public MCP source bundles preserve original file bytes and independent statuses.
     /// Definition mode follows one reliable target and leaves ambiguous candidates untouched.
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one public workflow checks definition resolution and query-reference accounting"
+    )]
     async fn symbol_context_definition_resolves_once_and_rejects_ambiguity() {
         use crate::test_lsp::{read_framed_message, write_response};
         for duplicates in [false, true] {
@@ -9774,6 +9778,110 @@ sleep 0.3
                     "target docs"
                 );
             }
+            if duplicates {
+                let direct = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                    "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"sections":["source"]}
+                })).await;
+                let reference = direct["result"]["structuredContent"]["symbol_ref"]
+                    .as_str()
+                    .unwrap();
+                seen.lock().await.clear();
+                let reused = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                    "name":"get_symbol_context","arguments":{"file_path":fixture.file,"symbol_ref":reference,"resolve":"definition","sections":["source"]}
+                })).await;
+                let source = &reused["result"]["structuredContent"]["sections"]["source"];
+                assert_eq!(source["reason"], "resolution_not_resolved", "{reused}");
+                assert_eq!(
+                    source["source_acquisition_bytes"],
+                    std::fs::metadata(&fixture.file).unwrap().len()
+                );
+                assert_eq!(*seen.lock().await, vec!["textDocument/definition"]);
+            }
+            responder.abort();
+        }
+    }
+
+    /// Oversized selected metadata returns a bounded failure without target fanout.
+    #[tokio::test]
+    async fn symbol_context_definition_bounds_selected_metadata() {
+        use crate::test_lsp::{read_framed_message, write_response};
+        for oversized in [false, true] {
+            let mut fixture = support_fixture(
+                vec![(
+                    "rust",
+                    "rust",
+                    lsp_types::ServerCapabilities {
+                        definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+                        document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(
+                            true,
+                        )),
+                        hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                        ..Default::default()
+                    },
+                )],
+                McpConfig::default(),
+            );
+            let uri = format!(
+                "file:///outside/{}.rs",
+                if oversized {
+                    "x".repeat(70_000)
+                } else {
+                    "target".into()
+                }
+            );
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let methods = seen.clone();
+            let mut fake = fixture.fake_servers.pop().unwrap();
+            let responder = tokio::spawn(async move {
+                let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+                loop {
+                    let request = read_framed_message(&mut wire).await;
+                    if request.get("id").is_none() {
+                        continue;
+                    }
+                    methods
+                        .lock()
+                        .await
+                        .push(request["method"].as_str().unwrap().to_owned());
+                    assert_eq!(
+                        request["method"], "textDocument/definition",
+                        "unexpected target fanout"
+                    );
+                    write_response(&mut fake.read_half_stdin, &request["id"], serde_json::json!([
+                        {"uri":uri,"range":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}}}
+                    ])).await;
+                }
+            });
+            let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"resolve":"definition"}
+            })).await;
+            let result = &response["result"];
+            let bundle = &result["structuredContent"];
+            assert!(serde_json::to_vec(result).unwrap().len() <= 131_072);
+            assert_eq!(
+                bundle["query"]["file_path"],
+                serde_json::json!(fixture.file)
+            );
+            assert_eq!(bundle["resolution"]["status"], "unavailable");
+            assert_eq!(bundle["resolution"]["provider_truncated"], false);
+            if oversized {
+                assert_eq!(bundle["resolution"]["reason"], "response_budget");
+                assert_eq!(bundle["truncated"], true);
+                assert!(bundle["target"].is_null());
+                assert_eq!(bundle["resolution"]["candidates"], serde_json::json!([]));
+            } else {
+                assert_eq!(bundle["resolution"]["reason"], "target_unavailable");
+                assert_eq!(bundle["target"]["file_path"], "/outside/target.rs");
+            }
+            for section in ["source", "hover"] {
+                assert_eq!(
+                    bundle["sections"][section]["reason"],
+                    "resolution_not_resolved"
+                );
+            }
+            assert!(bundle.get("symbol_ref").is_none());
+            assert!(bundle.get("symbol_target").is_none());
+            assert_eq!(*seen.lock().await, vec!["textDocument/definition"]);
             responder.abort();
         }
     }

@@ -381,6 +381,23 @@ fn admit_candidates(bundle: &mut Value) {
     }
 }
 
+fn unresolved_bundle(
+    query: &Value,
+    target: &Value,
+    resolution: &Value,
+    sections: &[String],
+    query_charge: usize,
+) -> Value {
+    let mut bundle = json!({"query":query,"target":target,"resolution":resolution,"sections":{},"truncated":false,"analysis_freshness":"unknown","atomic_snapshot":false});
+    for name in sections {
+        bundle["sections"][name] = outcome("unavailable", "resolution_not_resolved");
+        if name == "source" && query_charge > 0 {
+            bundle["sections"][name]["source_acquisition_bytes"] = json!(query_charge);
+        }
+    }
+    bundle
+}
+
 impl McplsServer {
     #[expect(
         clippy::too_many_lines,
@@ -464,10 +481,34 @@ impl McplsServer {
                     position = target_position;
                 }
             }
+            let mut metadata_overflow = false;
+            if !selected_target.is_null() {
+                let mut minimal_resolution = evidence.clone();
+                minimal_resolution["candidates"] = json!([]);
+                let minimum = unresolved_bundle(
+                    &query,
+                    &selected_target,
+                    &minimal_resolution,
+                    &params.sections,
+                    resolved.source_acquisition_bytes,
+                );
+                if result_bytes(&minimum) > 131_072 {
+                    metadata_overflow = true;
+                    selected_target = Value::Null;
+                    evidence["status"] = json!("unavailable");
+                    evidence["reason"] = json!("response_budget");
+                }
+            }
             if evidence["status"] != "resolved" {
-                let mut bundle = json!({"query":query,"target":selected_target,"resolution":evidence,"sections":{},"truncated":false,"analysis_freshness":"unknown","atomic_snapshot":false});
-                for name in &params.sections {
-                    bundle["sections"][name] = outcome("unavailable", "resolution_not_resolved");
+                let mut bundle = unresolved_bundle(
+                    &query,
+                    &selected_target,
+                    &evidence,
+                    &params.sections,
+                    resolved.source_acquisition_bytes,
+                );
+                if metadata_overflow {
+                    bundle["truncated"] = json!(true);
                 }
                 admit_candidates(&mut bundle);
                 enforce_response_budget(&mut bundle);
