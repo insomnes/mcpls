@@ -7,7 +7,8 @@
 //! text: rustdoc sections and code fences are cut, a description keeps its
 //! first paragraph up to a byte cap (whole sentences, or nothing), and a
 //! definition that several tools carry keeps only a one-line form. It changes `description` annotations only, so
-//! property names, types, `required` lists and `$ref`s are untouched.
+//! property names and validation constraints are preserved. Explicit compatibility
+//! shaping also repeats shared object fields in the affected union branches.
 //! Completion, reference, hierarchy and edit tools omit output descriptions to keep source outcomes
 //! and previews within the tool-size budget; tool descriptions explain the fields.
 
@@ -267,6 +268,177 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
                 }
             }
         }
+        shape_client_contract(tool);
+    }
+}
+
+/// Keep each affected union alternative self-contained for clients that render
+/// composition branches without their sibling object fields. These are the
+/// concrete flattened DTOs in the public tool contract, not a general rewrite.
+fn shape_client_contract(tool: &mut Tool) {
+    if tool.name == "get_diagnostics" {
+        let input = Arc::make_mut(&mut tool.input_schema);
+        let properties = input.get("properties").cloned();
+        distribute_object_fields(input);
+        if let Some(properties) = properties {
+            input.insert("properties".into(), properties);
+        }
+    }
+    let Some(output) = tool.output_schema.as_mut() else {
+        return;
+    };
+    let output = Arc::make_mut(output);
+    if matches!(tool.name.as_ref(), "get_tool_support" | "restart_server") {
+        // Tool descriptions explain these bounded result fields. Keep the
+        // restart coalescing fact, which is specific to the individual entry.
+        let coalesced = output
+            .get("$defs")
+            .and_then(|v| v.pointer("/ServerRestartEntry/oneOf/0/properties/coalesced/description"))
+            .cloned();
+        let refusal = output
+            .get("$defs")
+            .and_then(|v| v.pointer("/RestartFailure/oneOf/0/description"))
+            .cloned();
+        let mut schema = Schema::from(std::mem::take(output));
+        RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0))).transform(&mut schema);
+        if let Value::Object(shaped) = Value::from(schema) {
+            *output = shaped;
+        }
+        if let Some(description) = coalesced {
+            output
+                .get_mut("$defs")
+                .unwrap()
+                .pointer_mut("/ServerRestartEntry/oneOf/0/properties/coalesced")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("description".into(), description);
+        }
+        if let Some(description) = refusal {
+            output
+                .get_mut("$defs")
+                .unwrap()
+                .pointer_mut("/RestartFailure/oneOf/0")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("description".into(), description);
+        }
+    }
+
+    let path: &[&str] = match tool.name.as_ref() {
+        "get_incoming_calls" | "get_outgoing_calls" => &["$defs", "Indexed"],
+        "get_tool_support" => &["$defs", "RouteShape"],
+        "restart_server" => &["$defs", "ServerRestartEntry"],
+        "rename_symbol" => &[],
+        "get_diagnostics" => &["anyOf", "1", "properties", "results", "items"],
+        _ => return,
+    };
+    let mut value = Value::Object(std::mem::take(output));
+    let pointer = path.iter().fold(String::new(), |mut path, part| {
+        path.push('/');
+        path.push_str(part);
+        path
+    });
+    if let Some(object) = value.pointer_mut(&pointer).and_then(Value::as_object_mut) {
+        distribute_object_fields(object);
+    }
+    if matches!(
+        tool.name.as_ref(),
+        "get_incoming_calls" | "get_outgoing_calls"
+    ) {
+        // Inline only the preparation branch's finite leaves. Expanding every
+        // reference would duplicate unrelated call results and exceed the budget.
+        let definitions = value["$defs"].clone();
+        if let Some(preparation) = value.pointer_mut("/$defs/Indexed/anyOf/1") {
+            for name in ["PreparationStatus", "PositionDegradation", "HierarchyItem"] {
+                inline_leaf_reference(preparation, &format!("#/$defs/{name}"), &definitions[name]);
+            }
+            if let Some(selection) =
+                preparation.pointer_mut("/properties/items/items/properties/selectionRange")
+            {
+                *selection = definitions["Range"].clone();
+                inline_leaf_reference(selection, "#/$defs/Position2D", &definitions["Position2D"]);
+            }
+        }
+    }
+    if let Value::Object(shaped) = value {
+        *output = shaped;
+    }
+}
+
+fn distribute_object_fields(object: &mut JsonObject) {
+    let key = if object.contains_key("oneOf") {
+        "oneOf"
+    } else {
+        "anyOf"
+    };
+    let Some(Value::Array(mut branches)) = object.remove(key) else {
+        return;
+    };
+    let properties = object
+        .remove("properties")
+        .and_then(|p| p.as_object().cloned())
+        .unwrap_or_default();
+    let required = object
+        .remove("required")
+        .and_then(|r| r.as_array().cloned())
+        .unwrap_or_default();
+    for branch in &mut branches {
+        let Some(branch) = branch.as_object_mut() else {
+            continue;
+        };
+        branch.insert("type".into(), Value::String("object".into()));
+        if let Some(additional) = object.get("additionalProperties") {
+            branch.insert("additionalProperties".into(), additional.clone());
+        }
+        let fields = branch
+            .entry("properties")
+            .or_insert_with(|| Value::Object(JsonObject::new()))
+            .as_object_mut()
+            .expect("object branch properties");
+        for (name, schema) in &properties {
+            // status already has a narrower const in diagnostic outcome branches.
+            fields.entry(name.clone()).or_insert_with(|| schema.clone());
+        }
+        if !required.is_empty() {
+            let fields = branch
+                .entry("required")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("object branch required");
+            for field in &required {
+                if !fields.contains(field) {
+                    fields.push(field.clone());
+                }
+            }
+        }
+    }
+    object.insert(key.into(), Value::Array(branches));
+}
+
+fn inline_leaf_reference(value: &mut Value, reference: &str, definition: &Value) {
+    match value {
+        Value::Object(object) => {
+            if object.get("$ref").and_then(Value::as_str) == Some(reference) {
+                object.remove("$ref");
+                if let Some(fields) = definition.as_object() {
+                    for (key, field) in fields {
+                        object.entry(key.clone()).or_insert_with(|| field.clone());
+                    }
+                }
+            } else {
+                for child in object.values_mut() {
+                    inline_leaf_reference(child, reference, definition);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                inline_leaf_reference(child, reference, definition);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -746,14 +918,56 @@ mod tests {
         }
     }
 
+    /// Public discovery must expose complete alternatives without weakening
+    /// the diagnostics selector or outcome constraints.
     #[test]
-    fn test_shaping_changes_only_description_annotations() {
+    fn test_discovered_diagnostics_alternatives_expose_named_fields() {
+        let tools = shaped_tools();
+        let tool = tools.iter().find(|t| t.name == "get_diagnostics").unwrap();
+        let input = serde_json::to_value(&tool.input_schema).unwrap();
+        for branch in input["oneOf"].as_array().unwrap() {
+            for field in ["file_path", "file_paths", "context"] {
+                assert!(branch["properties"].get(field).is_some(), "{field}");
+            }
+        }
+        let output = serde_json::to_value(&tool.output_schema).unwrap();
+        for branch in output["anyOf"][1]["properties"]["results"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+        {
+            for field in [
+                "input_index",
+                "file_path",
+                "status",
+                "truncated",
+                "report",
+                "error",
+                "omitted_diagnostics",
+            ] {
+                assert!(branch["properties"].get(field).is_some(), "{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_unaffected_schemas_change_only_description_annotations() {
         let unshaped = McplsServer::unshaped_tool_router().list_all();
         let shaped = shaped_tools();
         assert_eq!(unshaped.len(), shaped.len());
         for (before, after) in unshaped.iter().zip(&shaped) {
             assert_eq!(before.name, after.name);
             assert_eq!(before.description, after.description, "{}", before.name);
+            if matches!(
+                before.name.as_ref(),
+                "get_diagnostics"
+                    | "get_incoming_calls"
+                    | "get_outgoing_calls"
+                    | "get_tool_support"
+                    | "rename_symbol"
+                    | "restart_server"
+            ) {
+                continue;
+            }
             for (old, new) in schemas_of(before).zip(schemas_of(after)) {
                 assert_eq!(
                     without_annotations(&Value::Object(old.clone())),
@@ -835,6 +1049,8 @@ mod tests {
                                 | "format_range"
                                 | "get_code_actions"
                                 | "get_diagnostics"
+                                | "get_tool_support"
+                                | "restart_server"
                         )
                 {
                     continue;

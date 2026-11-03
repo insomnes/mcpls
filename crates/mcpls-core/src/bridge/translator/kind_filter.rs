@@ -361,7 +361,7 @@ impl KindFilter for SymbolKindFilter {
     fn schema() -> Schema {
         schemars::json_schema!({
             "type": "string",
-            "anyOf": [{"enum": Self::spellings()}, {"pattern": "^[0-9]+$"}],
+            "anyOf": [{"type": "string", "enum": Self::spellings()}, {"type": "string", "pattern": "^[0-9]+$"}],
         })
     }
 }

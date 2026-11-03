@@ -2204,10 +2204,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -2709,14 +2711,62 @@
       "additionalProperties": false,
       "oneOf": [
         {
+          "additionalProperties": false,
+          "properties": {
+            "context": {
+              "$ref": "#/$defs/ResultContext",
+              "default": "none",
+              "description": "Extra context: `none` (default) or `enclosing_symbol` (innermost symbol, one request per file)."
+            },
+            "file_path": {
+              "description": "Absolute path to the file.",
+              "type": "string"
+            },
+            "file_paths": {
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "pattern": "^/",
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
           "required": [
             "file_path"
-          ]
+          ],
+          "type": "object"
         },
         {
+          "additionalProperties": false,
+          "properties": {
+            "context": {
+              "$ref": "#/$defs/ResultContext",
+              "default": "none",
+              "description": "Extra context: `none` (default) or `enclosing_symbol` (innermost symbol, one request per file)."
+            },
+            "file_path": {
+              "description": "Absolute path to the file.",
+              "type": "string"
+            },
+            "file_paths": {
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "pattern": "^/",
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
           "required": [
             "file_paths"
-          ]
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -3085,14 +3135,55 @@
                       ]
                     },
                     "properties": {
+                      "error": {
+                        "properties": {
+                          "code": {
+                            "type": "integer"
+                          },
+                          "message": {
+                            "type": "string"
+                          },
+                          "retryable": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable"
+                        ],
+                        "type": "object"
+                      },
+                      "file_path": {
+                        "type": "string"
+                      },
+                      "input_index": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "omitted_diagnostics": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "report": {
+                        "$ref": "#/$defs/DiagnosticsReport"
+                      },
                       "status": {
                         "const": "ok"
+                      },
+                      "truncated": {
+                        "type": "boolean"
                       }
                     },
                     "required": [
                       "report",
-                      "omitted_diagnostics"
-                    ]
+                      "omitted_diagnostics",
+                      "input_index",
+                      "file_path",
+                      "status",
+                      "truncated"
+                    ],
+                    "type": "object"
                   },
                   {
                     "not": {
@@ -3101,64 +3192,55 @@
                       ]
                     },
                     "properties": {
-                      "status": {
-                        "const": "error"
-                      }
-                    },
-                    "required": [
-                      "error"
-                    ]
-                  }
-                ],
-                "properties": {
-                  "error": {
-                    "properties": {
-                      "code": {
-                        "type": "integer"
+                      "error": {
+                        "properties": {
+                          "code": {
+                            "type": "integer"
+                          },
+                          "message": {
+                            "type": "string"
+                          },
+                          "retryable": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "code",
+                          "message",
+                          "retryable"
+                        ],
+                        "type": "object"
                       },
-                      "message": {
+                      "file_path": {
                         "type": "string"
                       },
-                      "retryable": {
+                      "input_index": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "omitted_diagnostics": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "report": {
+                        "$ref": "#/$defs/DiagnosticsReport"
+                      },
+                      "status": {
+                        "const": "error"
+                      },
+                      "truncated": {
                         "type": "boolean"
                       }
                     },
                     "required": [
-                      "code",
-                      "message",
-                      "retryable"
+                      "error",
+                      "input_index",
+                      "file_path",
+                      "status",
+                      "truncated"
                     ],
                     "type": "object"
-                  },
-                  "file_path": {
-                    "type": "string"
-                  },
-                  "input_index": {
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "omitted_diagnostics": {
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "report": {
-                    "$ref": "#/$defs/DiagnosticsReport"
-                  },
-                  "status": {
-                    "enum": [
-                      "ok",
-                      "error"
-                    ]
-                  },
-                  "truncated": {
-                    "type": "boolean"
                   }
-                },
-                "required": [
-                  "input_index",
-                  "file_path",
-                  "status",
-                  "truncated"
                 ],
                 "type": "object"
               },
@@ -3366,10 +3448,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -3718,10 +3802,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -3743,11 +3829,11 @@
         },
         "symbol_ref": {
           "default": null,
+          "description": "Opaque reference from `get_symbol_context`; use without other addressing.",
           "type": [
             "string",
             "null"
-          ],
-          "description": "Opaque reference from `get_symbol_context`; use without other addressing."
+          ]
         }
       },
       "required": [
@@ -4079,10 +4165,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -4208,10 +4296,23 @@
                   },
                   "type": "array"
                 },
+                "indexing_in_progress": {
+                  "type": "boolean"
+                },
                 "positions_degraded": {
                   "anyOf": [
                     {
                       "$ref": "#/$defs/PositionDegradation"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "resolved_symbol": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ResolvedSymbol"
                     },
                     {
                       "type": "null"
@@ -4227,22 +4328,128 @@
               },
               "required": [
                 "status",
-                "calls"
+                "calls",
+                "indexing_in_progress"
               ],
               "type": "object"
             },
             {
               "properties": {
+                "indexing_in_progress": {
+                  "type": "boolean"
+                },
                 "items": {
                   "items": {
-                    "$ref": "#/$defs/HierarchyItem"
+                    "properties": {
+                      "data": {},
+                      "detail": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dispatcher_context": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "format": "uint32",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "out_of_workspace": {
+                        "type": "boolean"
+                      },
+                      "range": {
+                        "$ref": "#/$defs/Range"
+                      },
+                      "selectionRange": {
+                        "properties": {
+                          "end": {
+                            "properties": {
+                              "character": {
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "line": {
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "line",
+                              "character"
+                            ],
+                            "type": "object"
+                          },
+                          "start": {
+                            "properties": {
+                              "character": {
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "line": {
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "line",
+                              "character"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "start",
+                          "end"
+                        ],
+                        "type": "object"
+                      },
+                      "uri": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "kind",
+                      "uri",
+                      "range",
+                      "selectionRange"
+                    ],
+                    "type": "object"
                   },
                   "type": "array"
                 },
                 "positions_degraded": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/PositionDegradation"
+                      "oneOf": [
+                        {
+                          "const": "response",
+                          "type": "string"
+                        },
+                        {
+                          "const": "request",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "resolved_symbol": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ResolvedSymbol"
                     },
                     {
                       "type": "null"
@@ -4250,7 +4457,20 @@
                   ]
                 },
                 "status": {
-                  "$ref": "#/$defs/PreparationStatus"
+                  "oneOf": [
+                    {
+                      "const": "no_item",
+                      "type": "string"
+                    },
+                    {
+                      "const": "selection_required",
+                      "type": "string"
+                    },
+                    {
+                      "const": "preparation_incomplete",
+                      "type": "string"
+                    }
+                  ]
                 },
                 "truncated": {
                   "type": "boolean"
@@ -4258,28 +4478,11 @@
               },
               "required": [
                 "status",
-                "items"
+                "items",
+                "indexing_in_progress"
               ],
               "type": "object"
             }
-          ],
-          "properties": {
-            "indexing_in_progress": {
-              "type": "boolean"
-            },
-            "resolved_symbol": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ResolvedSymbol"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "indexing_in_progress"
           ],
           "type": "object"
         },
@@ -4753,10 +4956,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -4837,10 +5042,23 @@
                   },
                   "type": "array"
                 },
+                "indexing_in_progress": {
+                  "type": "boolean"
+                },
                 "positions_degraded": {
                   "anyOf": [
                     {
                       "$ref": "#/$defs/PositionDegradation"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "resolved_symbol": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ResolvedSymbol"
                     },
                     {
                       "type": "null"
@@ -4856,22 +5074,128 @@
               },
               "required": [
                 "status",
-                "calls"
+                "calls",
+                "indexing_in_progress"
               ],
               "type": "object"
             },
             {
               "properties": {
+                "indexing_in_progress": {
+                  "type": "boolean"
+                },
                 "items": {
                   "items": {
-                    "$ref": "#/$defs/HierarchyItem"
+                    "properties": {
+                      "data": {},
+                      "detail": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dispatcher_context": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "format": "uint32",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "out_of_workspace": {
+                        "type": "boolean"
+                      },
+                      "range": {
+                        "$ref": "#/$defs/Range"
+                      },
+                      "selectionRange": {
+                        "properties": {
+                          "end": {
+                            "properties": {
+                              "character": {
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "line": {
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "line",
+                              "character"
+                            ],
+                            "type": "object"
+                          },
+                          "start": {
+                            "properties": {
+                              "character": {
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "line": {
+                                "format": "uint32",
+                                "minimum": 0,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "line",
+                              "character"
+                            ],
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "start",
+                          "end"
+                        ],
+                        "type": "object"
+                      },
+                      "uri": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "kind",
+                      "uri",
+                      "range",
+                      "selectionRange"
+                    ],
+                    "type": "object"
                   },
                   "type": "array"
                 },
                 "positions_degraded": {
                   "anyOf": [
                     {
-                      "$ref": "#/$defs/PositionDegradation"
+                      "oneOf": [
+                        {
+                          "const": "response",
+                          "type": "string"
+                        },
+                        {
+                          "const": "request",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "resolved_symbol": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ResolvedSymbol"
                     },
                     {
                       "type": "null"
@@ -4879,7 +5203,20 @@
                   ]
                 },
                 "status": {
-                  "$ref": "#/$defs/PreparationStatus"
+                  "oneOf": [
+                    {
+                      "const": "no_item",
+                      "type": "string"
+                    },
+                    {
+                      "const": "selection_required",
+                      "type": "string"
+                    },
+                    {
+                      "const": "preparation_incomplete",
+                      "type": "string"
+                    }
+                  ]
                 },
                 "truncated": {
                   "type": "boolean"
@@ -4887,28 +5224,11 @@
               },
               "required": [
                 "status",
-                "items"
+                "items",
+                "indexing_in_progress"
               ],
               "type": "object"
             }
-          ],
-          "properties": {
-            "indexing_in_progress": {
-              "type": "boolean"
-            },
-            "resolved_symbol": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ResolvedSymbol"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "indexing_in_progress"
           ],
           "type": "object"
         },
@@ -5199,10 +5519,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -5224,11 +5546,11 @@
         },
         "symbol_ref": {
           "default": null,
+          "description": "Opaque reference from `get_symbol_context`; use without other addressing.",
           "type": [
             "string",
             "null"
-          ],
-          "description": "Opaque reference from `get_symbol_context`; use without other addressing."
+          ]
         }
       },
       "required": [
@@ -6234,10 +6556,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -6642,10 +6966,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -6979,10 +7305,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -7054,6 +7382,20 @@
           },
           "type": "object"
         },
+        "symbol_ref": {
+          "type": "string"
+        },
+        "symbol_ref_unavailable": {
+          "properties": {
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
         "target": {
           "properties": {
             "file_path": {
@@ -7078,20 +7420,6 @@
         },
         "truncated": {
           "type": "boolean"
-        },
-        "symbol_ref": {
-          "type": "string"
-        },
-        "symbol_ref_unavailable": {
-          "type": "object",
-          "properties": {
-            "reason": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "reason"
-          ]
         }
       },
       "required": [
@@ -7134,18 +7462,23 @@
     "outputSchema": {
       "$defs": {
         "Capability": {
-          "description": "LSP server capability the tool is gated on.",
           "type": "string"
         },
         "RouteShape": {
-          "description": "One route of a tool: the languages that share this support status.",
           "oneOf": [
             {
-              "description": "The routed server is registered and advertises the tool's capability.",
               "properties": {
+                "languages": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
                 "server": {
-                  "$ref": "#/$defs/ServerId",
-                  "description": "The server the call would be dispatched to."
+                  "$ref": "#/$defs/ServerId"
                 },
                 "status": {
                   "const": "supported",
@@ -7159,11 +7492,18 @@
               "type": "object"
             },
             {
-              "description": "Registered and publishing diagnostics, but with no pull provider: answers come from the push cache.",
               "properties": {
+                "languages": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
                 "server": {
-                  "$ref": "#/$defs/ServerId",
-                  "description": "The server the call would be dispatched to."
+                  "$ref": "#/$defs/ServerId"
                 },
                 "status": {
                   "const": "push_only",
@@ -7177,15 +7517,21 @@
               "type": "object"
             },
             {
-              "description": "The routed server is registered but does not advertise the capability.",
               "properties": {
                 "capability": {
-                  "$ref": "#/$defs/Capability",
-                  "description": "The capability the server does not advertise."
+                  "$ref": "#/$defs/Capability"
+                },
+                "languages": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
                 },
                 "server": {
-                  "$ref": "#/$defs/ServerId",
-                  "description": "The server the call would be dispatched to."
+                  "$ref": "#/$defs/ServerId"
                 },
                 "status": {
                   "const": "capability_not_advertised",
@@ -7200,8 +7546,16 @@
               "type": "object"
             },
             {
-              "description": "The routed server has not finished initializing, or its capabilities\nare not known yet.",
               "properties": {
+                "languages": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
                 "status": {
                   "const": "initializing",
                   "type": "string"
@@ -7213,8 +7567,16 @@
               "type": "object"
             },
             {
-              "description": "No server is routed for this tool.",
               "properties": {
+                "languages": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
                 "status": {
                   "const": "no_server",
                   "type": "string"
@@ -7226,55 +7588,36 @@
               "type": "object"
             }
           ],
-          "properties": {
-            "languages": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            }
-          },
           "type": "object"
         },
         "ServerId": {
-          "description": "Unique identity of a configured LSP server within a workspace.",
           "type": "string"
         },
         "ToolCoverage": {
-          "description": "How widely a tool is usable across the languages in the report.",
           "oneOf": [
             {
               "const": "all",
-              "description": "Supported for every listed language.",
               "type": "string"
             },
             {
               "const": "some",
-              "description": "Supported for some listed languages but not all.",
               "type": "string"
             },
             {
               "const": "none",
-              "description": "Supported for no listed language (or nothing is configured).",
               "type": "string"
             },
             {
               "const": "unknown",
-              "description": "Not supported anywhere yet, but at least one server is still initializing.",
               "type": "string"
             },
             {
               "const": "always",
-              "description": "Answered by mcpls itself; independent of language servers.",
               "type": "string"
             }
           ]
         },
         "ToolEntry": {
-          "description": "One tool in the report.",
           "properties": {
             "coverage": {
               "$ref": "#/$defs/ToolCoverage"
@@ -7875,10 +8218,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -8442,10 +8787,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -8997,10 +9344,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"
@@ -9370,8 +9719,31 @@
             "dropped": {
               "$ref": "#/$defs/DroppedEdits"
             },
+            "position": {
+              "$ref": "#/$defs/Position2D"
+            },
+            "positions_degraded": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PositionDegradation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "preparation": {
               "$ref": "#/$defs/RenamePreparation"
+            },
+            "resolved_symbol": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResolvedSymbol"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "status": {
               "const": "proposed",
@@ -9381,12 +9753,36 @@
           "required": [
             "status",
             "preparation",
-            "changes"
+            "changes",
+            "position"
           ],
           "type": "object"
         },
         {
           "properties": {
+            "position": {
+              "$ref": "#/$defs/Position2D"
+            },
+            "positions_degraded": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PositionDegradation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resolved_symbol": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResolvedSymbol"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "server_message": {
               "type": [
                 "string",
@@ -9399,38 +9795,11 @@
             }
           },
           "required": [
-            "status"
+            "status",
+            "position"
           ],
           "type": "object"
         }
-      ],
-      "properties": {
-        "position": {
-          "$ref": "#/$defs/Position2D"
-        },
-        "positions_degraded": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PositionDegradation"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "resolved_symbol": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ResolvedSymbol"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "position"
       ],
       "type": "object"
     },
@@ -9476,27 +9845,22 @@
     "outputSchema": {
       "$defs": {
         "IndexingState": {
-          "description": "Workspace-indexing readiness of a routed LSP server.",
           "oneOf": [
             {
               "const": "unknown",
-              "description": "No recognized workspace-readiness signal has been observed for this\nserver yet.",
               "type": "string"
             },
             {
               "const": "loading",
-              "description": "A recognized signal reported that indexing is still in progress.",
               "type": "string"
             },
             {
               "const": "ready",
-              "description": "A recognized signal reported that the initial workspace load is\ncomplete.",
               "type": "string"
             }
           ]
         },
         "RestartFailure": {
-          "description": "Why a restart failed.",
           "oneOf": [
             {
               "description": "Refused before the old process was stopped, which keeps serving.",
@@ -9506,7 +9870,6 @@
                   "type": "string"
                 },
                 "message": {
-                  "description": "Why the restart was refused.",
                   "type": "string"
                 }
               },
@@ -9517,14 +9880,12 @@
               "type": "object"
             },
             {
-              "description": "The replacement process could not be started.",
               "properties": {
                 "kind": {
                   "const": "spawn_failed",
                   "type": "string"
                 },
                 "message": {
-                  "description": "Why the spawn failed.",
                   "type": "string"
                 }
               },
@@ -9535,14 +9896,12 @@
               "type": "object"
             },
             {
-              "description": "The replacement started but did not complete the `initialize` handshake.",
               "properties": {
                 "kind": {
                   "const": "initialize_failed",
                   "type": "string"
                 },
                 "message": {
-                  "description": "Why initialization failed.",
                   "type": "string"
                 }
               },
@@ -9553,7 +9912,6 @@
               "type": "object"
             },
             {
-              "description": "mcpls is shutting down, so no replacement was started.",
               "properties": {
                 "kind": {
                   "const": "shutting_down",
@@ -9568,26 +9926,24 @@
           ]
         },
         "ServerId": {
-          "description": "Unique identity of a configured LSP server within a workspace.",
           "type": "string"
         },
         "ServerRestartEntry": {
-          "description": "One server's entry in a [`RestartServerResult`].",
           "oneOf": [
             {
-              "description": "The server runs a freshly initialized process.",
               "properties": {
                 "coalesced": {
                   "description": "Another restart of this server finished while the request waited, so none was repeated.",
                   "type": "boolean"
                 },
                 "indexing_state": {
-                  "$ref": "#/$defs/IndexingState",
-                  "description": "Indexing readiness of the new process."
+                  "$ref": "#/$defs/IndexingState"
                 },
                 "push_notifications_degraded": {
-                  "description": "Push diagnostics for this server are still not live.",
                   "type": "boolean"
+                },
+                "server_id": {
+                  "$ref": "#/$defs/ServerId"
                 },
                 "status": {
                   "const": "restarted",
@@ -9598,16 +9954,18 @@
                 "status",
                 "coalesced",
                 "indexing_state",
-                "push_notifications_degraded"
+                "push_notifications_degraded",
+                "server_id"
               ],
               "type": "object"
             },
             {
-              "description": "The restart failed; see [`RestartFailure`].",
               "properties": {
                 "reason": {
-                  "$ref": "#/$defs/RestartFailure",
-                  "description": "Why it failed."
+                  "$ref": "#/$defs/RestartFailure"
+                },
+                "server_id": {
+                  "$ref": "#/$defs/ServerId"
                 },
                 "status": {
                   "const": "failed",
@@ -9616,18 +9974,20 @@
               },
               "required": [
                 "status",
-                "reason"
+                "reason",
+                "server_id"
               ],
               "type": "object"
             },
             {
-              "description": "The server was restarted too recently; retry after `retry_in_ms`.",
               "properties": {
                 "retry_in_ms": {
-                  "description": "Milliseconds until a restart is allowed again.",
                   "format": "uint64",
                   "minimum": 0,
                   "type": "integer"
+                },
+                "server_id": {
+                  "$ref": "#/$defs/ServerId"
                 },
                 "status": {
                   "const": "throttled",
@@ -9636,29 +9996,34 @@
               },
               "required": [
                 "status",
-                "retry_in_ms"
+                "retry_in_ms",
+                "server_id"
               ],
               "type": "object"
             },
             {
-              "description": "The server has not finished its initial startup; retry shortly.",
               "properties": {
+                "server_id": {
+                  "$ref": "#/$defs/ServerId"
+                },
                 "status": {
                   "const": "initializing",
                   "type": "string"
                 }
               },
               "required": [
-                "status"
+                "status",
+                "server_id"
               ],
               "type": "object"
             },
             {
-              "description": "The server never started (or failed at startup), so there is no\nprocess to restart.",
               "properties": {
                 "message": {
-                  "description": "Why the server is not running.",
                   "type": "string"
+                },
+                "server_id": {
+                  "$ref": "#/$defs/ServerId"
                 },
                 "status": {
                   "const": "not_running",
@@ -9667,19 +10032,11 @@
               },
               "required": [
                 "status",
-                "message"
+                "message",
+                "server_id"
               ],
               "type": "object"
             }
-          ],
-          "properties": {
-            "server_id": {
-              "$ref": "#/$defs/ServerId",
-              "description": "The server this entry reports on."
-            }
-          },
-          "required": [
-            "server_id"
           ],
           "type": "object"
         }
@@ -9687,7 +10044,6 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "servers": {
-          "description": "Per-server outcomes.",
           "items": {
             "$ref": "#/$defs/ServerRestartEntry"
           },
@@ -9746,10 +10102,12 @@
                     "event",
                     "operator",
                     "typeparameter"
-                  ]
+                  ],
+                  "type": "string"
                 },
                 {
-                  "pattern": "^[0-9]+$"
+                  "pattern": "^[0-9]+$",
+                  "type": "string"
                 }
               ],
               "type": "string"

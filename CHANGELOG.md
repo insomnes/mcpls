@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Preserve finite input and result fields in client-generated tool declarations, including diagnostic selectors and batch outcomes, hierarchy preparation fields, route languages, rename metadata, restart server IDs, and numeric symbol-kind strings. Runtime validation and recursive document-symbol schemas are unchanged.
+
 - Breaking change: `get_completions` now defaults to 20 provider-ordered candidates with documentation disabled. `limit` accepts 1 through 100; `include_documentation: true` opts in. Labels, details, and documentation are clipped to 512, 2048, and 4096 UTF-8 bytes after existing display redaction. The final compact structured JSON is at most 65536 bytes. `omitted_count`, `truncated`, and item `truncated_fields` report local omissions and clipping; clipped labels are partial. `provider_is_incomplete` preserves the provider boolean or null when none was supplied, independently of local truncation. Output bounds do not bound the original LSP response or provider work.
 
 - The default MCP catalog now exposes 27 tools. Set `[mcp].tool_profile = "full"` for all 30, including folding ranges, selection ranges, and standalone type preparation. Discovery, dispatch and support reports share the selected static catalog.
