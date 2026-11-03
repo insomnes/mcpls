@@ -83,6 +83,8 @@ url = """
                         "--skip-git-repo-check",
                         "--ignore-rules",
                         "--json",
+                        "--sandbox",
+                        "workspace-write",
                         "-C",
                         str(output),
                         prompt,
@@ -95,6 +97,10 @@ url = """
                 )
         if result.returncode:
             raise RuntimeError(f"Codex exited with {result.returncode}")
+        if not metadata.is_file():
+            raise RuntimeError(
+                "Codex produced no declarations.json; inspect events.jsonl"
+            )
         declarations = json.loads(metadata.read_text())
         names = [tool["name"] for tool in declarations]
         if not names or len(names) != len(set(names)):

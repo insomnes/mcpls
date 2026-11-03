@@ -304,25 +304,21 @@ fn shape_client_contract(tool: &mut Tool) {
         if let Value::Object(shaped) = Value::from(schema) {
             *output = shaped;
         }
-        if let Some(description) = coalesced {
-            output
-                .get_mut("$defs")
-                .unwrap()
-                .pointer_mut("/ServerRestartEntry/oneOf/0/properties/coalesced")
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .insert("description".into(), description);
-        }
-        if let Some(description) = refusal {
-            output
-                .get_mut("$defs")
-                .unwrap()
-                .pointer_mut("/RestartFailure/oneOf/0")
-                .unwrap()
-                .as_object_mut()
-                .unwrap()
-                .insert("description".into(), description);
+        for (description, pointer) in [
+            (
+                coalesced,
+                "/ServerRestartEntry/oneOf/0/properties/coalesced",
+            ),
+            (refusal, "/RestartFailure/oneOf/0"),
+        ] {
+            if let Some(description) = description
+                && let Some(object) = output
+                    .get_mut("$defs")
+                    .and_then(|definitions| definitions.pointer_mut(pointer))
+                    .and_then(Value::as_object_mut)
+            {
+                object.insert("description".into(), description);
+            }
         }
     }
 
@@ -349,16 +345,20 @@ fn shape_client_contract(tool: &mut Tool) {
     ) {
         // Inline only the preparation branch's finite leaves. Expanding every
         // reference would duplicate unrelated call results and exceed the budget.
-        let definitions = value["$defs"].clone();
+        let definitions = value.get("$defs").cloned().unwrap_or_default();
         if let Some(preparation) = value.pointer_mut("/$defs/Indexed/anyOf/1") {
             for name in ["PreparationStatus", "PositionDegradation", "HierarchyItem"] {
-                inline_leaf_reference(preparation, &format!("#/$defs/{name}"), &definitions[name]);
+                if let Some(definition) = definitions.get(name) {
+                    inline_leaf_reference(preparation, &format!("#/$defs/{name}"), definition);
+                }
             }
             if let Some(selection) =
                 preparation.pointer_mut("/properties/items/items/properties/selectionRange")
+                && let (Some(range), Some(position)) =
+                    (definitions.get("Range"), definitions.get("Position2D"))
             {
-                *selection = definitions["Range"].clone();
-                inline_leaf_reference(selection, "#/$defs/Position2D", &definitions["Position2D"]);
+                *selection = range.clone();
+                inline_leaf_reference(selection, "#/$defs/Position2D", position);
             }
         }
     }
@@ -392,21 +392,25 @@ fn distribute_object_fields(object: &mut JsonObject) {
         if let Some(additional) = object.get("additionalProperties") {
             branch.insert("additionalProperties".into(), additional.clone());
         }
-        let fields = branch
+        let Some(fields) = branch
             .entry("properties")
             .or_insert_with(|| Value::Object(JsonObject::new()))
             .as_object_mut()
-            .expect("object branch properties");
+        else {
+            continue;
+        };
         for (name, schema) in &properties {
             // status already has a narrower const in diagnostic outcome branches.
             fields.entry(name.clone()).or_insert_with(|| schema.clone());
         }
         if !required.is_empty() {
-            let fields = branch
+            let Some(fields) = branch
                 .entry("required")
                 .or_insert_with(|| Value::Array(Vec::new()))
                 .as_array_mut()
-                .expect("object branch required");
+            else {
+                continue;
+            };
             for field in &required {
                 if !fields.contains(field) {
                     fields.push(field.clone());
