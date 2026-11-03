@@ -9285,7 +9285,7 @@ sleep 0.3
         );
         assert_eq!(
             bundle["sections"]["source"]["source_acquisition_bytes"],
-            original.len()
+            original.len() * 2
         );
         assert_eq!(bundle["sections"]["hover"]["status"], "empty");
         assert_eq!(bundle["analysis_freshness"], "unknown");
@@ -9300,6 +9300,112 @@ sleep 0.3
             ]
         );
         assert_eq!(std::fs::read_to_string(&fixture.file).unwrap(), original);
+        responder.abort();
+    }
+
+    /// Reusable targets reject changed tracked source before any semantic request.
+    #[tokio::test]
+    async fn symbol_ref_roundtrip_and_stale_source_over_mcp() {
+        use crate::test_lsp::{read_framed_message, write_response};
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                    definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+                    references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let original = "// 😀\nfn main() {}\n";
+        std::fs::write(&fixture.file, original).unwrap();
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                let result = match request["method"].as_str().unwrap() {
+                    "textDocument/hover" => serde_json::json!({"contents":"target docs"}),
+                    "textDocument/documentSymbol"
+                    | "textDocument/definition"
+                    | "textDocument/references" => serde_json::json!([]),
+                    method => panic!("unexpected method {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], result).await;
+            }
+        });
+        let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+            "name":"get_symbol_context", "arguments":{"file_path":fixture.file,"line":2,"character":4,"sections":["source"]}
+        })).await;
+        let reference = response["result"]["structuredContent"]["symbol_ref"]
+            .as_str()
+            .expect("issued reference")
+            .to_owned();
+        for name in [
+            "get_hover",
+            "get_definition",
+            "get_references",
+            "get_symbol_context",
+        ] {
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":name,"arguments":{"file_path":fixture.file,"symbol_ref":reference}
+                }),
+            )
+            .await;
+            assert!(response.get("error").is_none(), "{response}");
+            assert!(
+                response["result"].get("structuredContent").is_some(),
+                "{response}"
+            );
+            let explicit = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":name,"arguments":{"file_path":fixture.file,"line":2,"character":4}
+                }),
+            )
+            .await;
+            assert_eq!(
+                response["result"]["structuredContent"], explicit["result"]["structuredContent"],
+                "{name}"
+            );
+        }
+        std::fs::write(&fixture.file, original.replace("main", "away")).unwrap();
+        for name in [
+            "get_hover",
+            "get_definition",
+            "get_references",
+            "get_symbol_context",
+        ] {
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":name,"arguments":{"file_path":fixture.file,"symbol_ref":reference}
+                }),
+            )
+            .await;
+            assert_eq!(
+                response["error"]["data"]["kind"], "stale_target",
+                "{response}"
+            );
+        }
+        std::fs::write(&fixture.file, original).unwrap();
+        let response = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({
+                "name":"get_hover","arguments":{"file_path":fixture.file,"symbol_ref":reference}
+            }),
+        )
+        .await;
+        assert!(response.get("error").is_none(), "{response}");
         responder.abort();
     }
 

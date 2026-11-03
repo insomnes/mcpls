@@ -1496,6 +1496,13 @@
             "string",
             "null"
           ]
+        },
+        "symbol_ref": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3005,6 +3012,14 @@
             "string",
             "null"
           ]
+        },
+        "symbol_ref": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Opaque reference from `get_symbol_context`; use without other addressing."
         }
       },
       "required": [
@@ -4478,6 +4493,14 @@
             "string",
             "null"
           ]
+        },
+        "symbol_ref": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Opaque reference from `get_symbol_context`; use without other addressing."
         }
       },
       "required": [
@@ -6248,6 +6271,13 @@
             "string",
             "null"
           ]
+        },
+        "symbol_ref": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -6320,6 +6350,20 @@
         },
         "truncated": {
           "type": "boolean"
+        },
+        "symbol_ref": {
+          "type": "string"
+        },
+        "symbol_ref_unavailable": {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ]
         }
       },
       "required": [

@@ -62,6 +62,7 @@ mod selection_range;
 mod servers;
 mod support;
 mod symbol_context;
+mod symbol_refs;
 mod symbols;
 #[cfg(test)]
 mod testing;
@@ -121,6 +122,8 @@ pub struct HierarchyOrigin {
 /// `textDocument/didOpen`/`didChange` notify.
 #[derive(Debug)]
 pub struct Translator {
+    /// Identity survives child restart, but not context replacement.
+    symbol_ref_context: String,
     /// Per-server state, one slot per routing identity. Locked only for a
     /// short synchronous section, never across an LSP request, and never
     /// together with `router`.
@@ -207,6 +210,7 @@ impl Translator {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            symbol_ref_context: crate::dispatcher::opaque(),
             servers: StdMutex::new(Servers::default()),
             phase: StdMutex::new(Phase::default()),
             startup_redactions: Arc::default(),

@@ -77,6 +77,9 @@ macro_rules! range_wire {
 /// position or by name, followed by the tool's own fields.
 macro_rules! target_wire {
     ($(#[$meta:meta])* $name:ident { $($extra:tt)* }) => {
+        target_wire!(@wire $(#[$meta])* $name take_target { $($extra)* });
+    };
+    (@wire $(#[$meta:meta])* $name:ident $method:ident { $($extra:tt)* }) => {
         #[derive(Debug, Clone, Deserialize, JsonSchema)]
         #[serde(deny_unknown_fields)]
         $(#[$meta])*
@@ -114,7 +117,7 @@ macro_rules! target_wire {
         impl $name {
             /// Moves the addressing fields out into the target, leaving them
             /// empty; the tool's own fields stay in place.
-            fn take_target(&mut self) -> Result<SymbolTargetParams, TargetAddressError> {
+            fn $method(&mut self) -> Result<SymbolTargetParams, TargetAddressError> {
                 SymbolTargetParams::from_parts(
                     std::mem::take(&mut self.file_path),
                     PositionFields {
@@ -125,6 +128,35 @@ macro_rules! target_wire {
                     self.symbol_kind.take(),
                     self.container.take(),
                 )
+            }
+        }
+    };
+}
+
+/// Add reference addressing without changing legacy edit and hierarchy wires.
+macro_rules! reusable_target_wire {
+    ($(#[$meta:meta])* $name:ident { $($extra:tt)* }) => {
+        target_wire!(@wire $(#[$meta])* $name take_legacy_target {
+            /// Opaque reference from `get_symbol_context`; use without other addressing.
+            #[serde(default)]
+            symbol_ref: Option<String>,
+            $($extra)*
+        });
+        impl $name {
+            fn take_target(&mut self) -> Result<SymbolTargetParams, TargetAddressError> {
+                if let Some(reference) = self.symbol_ref.take() {
+                    if self.line.is_some() || self.character.is_some() || self.symbol_name.is_some()
+                        || self.symbol_kind.is_some() || self.container.is_some() {
+                        return Err(TargetAddressError::ReferenceOptions(
+                            "symbol_ref cannot be combined with position, name, or qualifiers"
+                        ));
+                    }
+                    return Ok(SymbolTargetParams {
+                        file_path: std::mem::take(&mut self.file_path),
+                        target: SymbolTargetInput::Reference(reference),
+                    });
+                }
+                self.take_legacy_target()
             }
         }
     };
@@ -209,7 +241,7 @@ pub struct RangeParams {
     pub end_character: u32,
 }
 
-target_wire! {
+reusable_target_wire! {
     /// Wire form of [`SymbolTargetParams`]: a file plus either a position or a
     /// symbol name.
     #[schemars(
@@ -240,6 +272,8 @@ pub struct SymbolTargetParams {
 /// tool-result error.
 #[derive(Debug, Clone)]
 pub enum SymbolTargetInput {
+    /// Opaque observed target reference.
+    Reference(String),
     /// A 1-based position, unchecked.
     Position {
         /// Line number (1-based).
@@ -268,6 +302,7 @@ impl SymbolTargetInput {
     /// [`Error::InvalidToolParams`] for a `symbol_kind` that names no kind.
     pub fn into_target(self) -> Result<SymbolTarget, Error> {
         match self {
+            Self::Reference(reference) => Ok(SymbolTarget::Reference(reference)),
             Self::Position { line, character } => Ok(SymbolTarget::Position(
                 Position::from_client(line, character)?,
             )),
@@ -345,7 +380,7 @@ impl From<PositionParams> for SymbolTargetParams {
     }
 }
 
-target_wire! {
+reusable_target_wire! {
     /// Wire form of [`ReferencesParams`].
     #[schemars(description = "Parameters for finding all references to a symbol.")]
     ReferencesWire {
@@ -415,7 +450,7 @@ impl TryFrom<ReferencesWire> for ReferencesParams {
     }
 }
 
-target_wire! {
+reusable_target_wire! {
     /// Wire form of [`NavigationParams`].
     #[schemars(description = "Parameters for navigating from a symbol to related locations.")]
     NavigationWire {
@@ -1594,7 +1629,7 @@ mod tests {
     }
 }
 
-target_wire! {
+reusable_target_wire! {
     /// Wire form of a symbol context request.
     SymbolContextWire {
         #[serde(default = "default_context_sections")]

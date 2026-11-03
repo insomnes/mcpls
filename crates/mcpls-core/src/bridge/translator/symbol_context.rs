@@ -16,7 +16,7 @@ const fn key(position: &super::dto::Position2D) -> (u32, u32) {
     (position.line, position.character)
 }
 
-fn source_lines(text: &str) -> Vec<&str> {
+pub(super) fn source_lines(text: &str) -> Vec<&str> {
     let mut lines = Vec::new();
     let bytes = text.as_bytes();
     let mut start = 0;

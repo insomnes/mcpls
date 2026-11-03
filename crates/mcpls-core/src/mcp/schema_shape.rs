@@ -190,6 +190,15 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
     let usage = DefinitionUsage::count(&tools);
     for tool in &mut tools {
         shape_schema(Arc::make_mut(&mut tool.input_schema), &usage);
+        if !matches!(
+            tool.name.as_ref(),
+            "get_hover" | "get_definition" | "get_references" | "get_symbol_context"
+        ) && let Some(properties) = Arc::make_mut(&mut tool.input_schema)
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        {
+            properties.remove("symbol_ref");
+        }
         if matches!(
             tool.name.as_ref(),
             "get_symbol_context"

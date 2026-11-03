@@ -41,6 +41,7 @@ pub(super) fn shape_schema(router: &mut super::ToolRouter<McplsServer>) {
                     "properties":{"status":{"enum":["ok","empty","partial","unsupported","unavailable","error"]},
                         "reason":{"type":"string"},"data":{"type":"object"}}}},
                 "truncated":{"type":"boolean"},"analysis_freshness":{"const":"unknown"},
+                "symbol_ref":{"type":"string"},"symbol_ref_unavailable":{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]},
                 "atomic_snapshot":{"const":false},"positions_degraded":{"enum":["request","response"]}
             }
         });
@@ -464,6 +465,36 @@ impl McplsServer {
                 }
             }
         }
+        let (reference, reference_charge) = if !params.sections.iter().any(|name| name == "source")
+        {
+            (Err("source_not_requested"), 0)
+        } else if bundle.get("positions_degraded").is_some()
+            || bundle["sections"].as_object().is_some_and(|sections| {
+                sections.values().any(|section| {
+                    section
+                        .get("data")
+                        .is_some_and(|data| data.get("positions_degraded").is_some())
+                })
+            })
+        {
+            (Err("positions_degraded"), 0)
+        } else if let Some(hash) = bundle["sections"]["source"]["data"]["sha256"].as_str() {
+            translator.issue_symbol_ref(&path, position, hash).await
+        } else {
+            (Err("source_unavailable"), 0)
+        };
+        if reference_charge > 0 {
+            let charge = bundle["sections"]["source"]["source_acquisition_bytes"]
+                .as_u64()
+                .unwrap_or(0);
+            bundle["sections"]["source"]["source_acquisition_bytes"] =
+                json!(charge.saturating_add(reference_charge as u64));
+        }
+        match reference {
+            Ok(reference) => bundle["symbol_ref"] = json!(reference),
+            Err(reason) => bundle["symbol_ref_unavailable"] = json!({"reason":reason}),
+        }
+        enforce_response_budget(&mut bundle);
         Ok(CallToolResult::structured(bundle))
     }
 }

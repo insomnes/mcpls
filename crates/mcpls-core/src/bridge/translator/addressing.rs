@@ -83,6 +83,8 @@ pub struct SymbolQuery {
 /// How a tool addresses its target: by 1-based position or by symbol name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolTarget {
+    /// Opaque reference to an observed source position.
+    Reference(String),
     /// An exact 1-based position.
     Position(Position),
     /// A symbol resolved by name within the file.
@@ -562,6 +564,25 @@ impl Translator {
         tool: AddressableTool,
     ) -> Result<ResolvedTarget> {
         let query = match target {
+            SymbolTarget::Reference(reference) => {
+                if !matches!(
+                    tool,
+                    AddressableTool::SymbolContext
+                        | AddressableTool::Hover
+                        | AddressableTool::Definition
+                        | AddressableTool::References
+                ) {
+                    return Err(crate::error::Error::InvalidToolParams(
+                        "symbol_ref is not supported by this tool".into(),
+                    ));
+                }
+                let position = self.validate_symbol_ref(file_path, &reference).await?;
+                return Ok(ResolvedTarget {
+                    position,
+                    resolved: None,
+                    positions_degraded: None,
+                });
+            }
             SymbolTarget::Position(position) => {
                 return Ok(ResolvedTarget {
                     position,

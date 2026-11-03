@@ -241,7 +241,7 @@ impl Translator {
             .await
     }
 
-    async fn bounded_disk_source(
+    pub(super) async fn bounded_disk_source(
         &self,
         validated: WorkspacePath,
         remaining: usize,
@@ -311,6 +311,10 @@ impl Translator {
                     }
                 }
                 bytes.extend_from_slice(chunk.get(..read).unwrap_or_default());
+            }
+            let after = file.get_ref().metadata().map_err(|_| Missing::ReadFailed)?;
+            if metadata.len() != after.len() || metadata.modified().ok() != after.modified().ok() {
+                return Err(Missing::ReadFailed);
             }
             Ok(bytes)
         })

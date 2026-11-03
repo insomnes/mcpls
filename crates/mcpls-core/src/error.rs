@@ -1294,6 +1294,13 @@ impl fmt::Display for SymbolCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "resolution", rename_all = "snake_case")]
 pub enum SymbolResolutionData {
+    /// A reusable observed target was rejected.
+    Reference {
+        /// Stable rejection category.
+        kind: String,
+        /// Explanation suitable for the caller.
+        message: String,
+    },
     /// The name matches several symbols; nothing was picked.
     Ambiguous {
         /// The requested name.
@@ -1329,6 +1336,7 @@ pub enum SymbolResolutionData {
 impl fmt::Display for SymbolResolutionData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Reference { message, .. } => f.write_str(message),
             Self::Ambiguous {
                 name,
                 candidates,

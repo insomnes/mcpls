@@ -121,3 +121,62 @@ existing coordinate-conversion acquisition. They do not bound server computation
 or the complete upstream response before existing normalization. Existing finite
 document tracking and conversion limits still apply. There is no latency or
 atomic-snapshot guarantee.
+
+## Reuse an observed target
+
+When source is requested, a trustworthy observation adds an opaque `symbol_ref`
+to the result. Keep this string unchanged. Pass it with `file_path` to
+`get_symbol_context`, `get_hover`, `get_definition`, or `get_references`:
+
+```json
+{
+  "file_path": "/work/app/main.rs",
+  "symbol_ref": "<symbol_ref from get_symbol_context>"
+}
+```
+
+Use the reference instead of position or name addressing. Do not combine it
+with `line`, `character`, `symbol_name`, `symbol_kind`, `container`, or a cursor.
+Other supported options keep their meanings. Edit tools do not accept references.
+Both tool profiles expose the supported reference consumers.
+
+The reference binds an exact 1-based UTF-16 position, the authorized file and
+runtime context, and SHA-256 of the complete unredacted observed source. It
+contains no source text. Display redaction does not change content identity.
+An unknown declaration range does not prevent issuance at an exact valid point.
+Invalid UTF-16 boundaries, degraded positions, unavailable source, or a fresh
+source observation that disagrees with the displayed observation prevent issuance.
+The result then contains `symbol_ref_unavailable.reason`. When source was omitted,
+the reason is `source_not_requested`; other sections retain independent outcomes.
+
+Each consumer reads complete current source before its semantic request. It
+checks content independently of file size, timestamps, and tracked-text caches.
+Typed JSON-RPC errors have `data.kind` and an explanatory message:
+
+| `data.kind` | Meaning |
+|---|---|
+| `stale_target` | Current source bytes differ from the observation. |
+| `invalid_symbol_ref` | The string is malformed, structurally invalid, unsupported, empty, or longer than 8192 UTF-8 bytes. |
+| `symbol_ref_context_mismatch` | The file or runtime context differs. |
+| `unverifiable_target` | Complete current UTF-8 source or exact coordinates cannot be established. |
+
+Existing authorization errors still apply. Resolve the target afresh after
+rejection. Consumers do not relocate or rebase the reference automatically.
+
+References have no clock expiry or per-reference eviction. They remain valid
+while their runtime context and exact source bytes remain available. Restoring
+the original bytes permits reuse. Restarting an LSP child preserves references;
+replacing or evicting its workspace backend context, or restarting mcpls,
+invalidates them. References grant no path access and are not portable between
+mcpls processes.
+
+Each complete source observation is bounded to 1 MiB. Issuance performs an
+additional fresh contained disk observation to confirm the source section's
+identity. Existing source accounting and response limits still apply. Read,
+encoding, size, or detected acquisition-race failures prevent trustworthy reuse.
+
+Content identity does not prove analyzer freshness. Validation observes bytes
+before semantic dispatch; a change after that observation can produce a result
+or a typed failure. Collection is not atomic with filesystem writes or LSP
+analysis. No guarantee covers undetectable concurrent rewrites or other files.
+Existing freshness and position-degradation signals remain authoritative.
