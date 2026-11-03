@@ -17,20 +17,34 @@ const SOURCE_BYTES: usize = 4 * FILE_BYTES;
 const EXCERPT_BYTES: usize = 2048;
 pub(super) const OUTPUT_BYTES: usize = 64 * 1024;
 
+/// Output selection for a references request.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceMode {
+    /// Return individual locations (the default).
+    #[default]
+    Locations,
+    /// Return bounded groups by exact provider URI.
+    Files,
+}
+
 /// Selection and source options for a references request.
 #[derive(Debug, Clone)]
 pub struct ReferenceOptions {
-    /// Maximum returned matches, between 1 and 10000 inclusive.
+    /// Output mode; locations by default.
+    pub mode: ReferenceMode,
+    /// Maximum returned locations or file groups, between 1 and 10000 inclusive.
     pub limit: usize,
     /// Absolute lexical path selecting a file or directory subtree.
     pub path_filter: Option<PathBuf>,
-    /// Attach bounded source outcomes to retained locations.
+    /// Attach bounded source outcomes to retained locations or group examples.
     pub include_source: bool,
 }
 
 impl Default for ReferenceOptions {
     fn default() -> Self {
         Self {
+            mode: ReferenceMode::Locations,
             limit: 10,
             path_filter: None,
             include_source: false,
@@ -57,12 +71,113 @@ pub(super) fn lexical_path(path: &Path) -> Option<PathBuf> {
 }
 
 impl ReferenceOptions {
+    pub(super) fn validate(&mut self) -> crate::error::Result<()> {
+        if !(1..=10_000).contains(&self.limit) {
+            return Err(crate::error::Error::InvalidToolParams(
+                "limit must be between 1 and 10000".into(),
+            ));
+        }
+        if let Some(path) = &self.path_filter {
+            self.path_filter = Some(lexical_path(path).ok_or_else(|| {
+                crate::error::Error::InvalidToolParams(
+                    "path_filter must be an absolute path".into(),
+                )
+            })?);
+        }
+        Ok(())
+    }
+
     pub(super) fn matches(&self, uri: &lsp_types::Uri) -> bool {
         self.path_filter.as_ref().is_none_or(|filter| {
             crate::bridge::state::uri_to_path(uri)
                 .and_then(|path| lexical_path(&path))
                 .is_some_and(|path| path.starts_with(filter))
         })
+    }
+}
+
+/// Bounded file-mode selection; the provider response is consumed without cloning it.
+pub(super) struct ReferenceFileSelection {
+    pub retained: Vec<lsp_types::Location>,
+    pub matched_count: usize,
+    details: Vec<(usize, Option<PathBuf>)>,
+    summary: super::dto::ReferenceFileSummary,
+}
+
+impl ReferenceFileSelection {
+    pub fn new(response: Vec<lsp_types::Location>, options: &ReferenceOptions) -> Self {
+        let received_count = response.len();
+        let mut processed_count: usize = 0;
+        let mut uri_bytes: usize = 0;
+        let mut groups = HashMap::<lsp_types::Uri, usize>::new();
+        let mut retained = Vec::with_capacity(options.limit.min(response.len()));
+        let mut matched_count: usize = 0;
+        for location in response {
+            if processed_count == 100_000
+                || location.uri.as_ref().len() > 8_388_608_usize.saturating_sub(uri_bytes)
+            {
+                break;
+            }
+            let matching = options.matches(&location.uri);
+            if matching && groups.len() == 10_000 && !groups.contains_key(&location.uri) {
+                break;
+            }
+            processed_count = processed_count.saturating_add(1);
+            uri_bytes = uri_bytes.saturating_add(location.uri.as_ref().len());
+            if matching {
+                matched_count = matched_count.saturating_add(1);
+                let count = groups.entry(location.uri.clone()).or_default();
+                *count = count.saturating_add(1);
+                if *count == 1 && retained.len() < options.limit {
+                    retained.push(location);
+                }
+            }
+        }
+        let details = retained
+            .iter()
+            .map(|location| {
+                let path = crate::bridge::state::uri_to_path(&location.uri)
+                    .and_then(|path| lexical_path(&path));
+                (groups.get(&location.uri).copied().unwrap_or_default(), path)
+            })
+            .collect();
+        Self {
+            retained,
+            matched_count,
+            details,
+            summary: super::dto::ReferenceFileSummary {
+                files: Vec::new(),
+                received_count,
+                processed_count,
+                counts_complete: processed_count == received_count,
+                file_count: groups.len(),
+                omitted_file_count: 0,
+                output_truncated: false,
+                counting_basis: "received_locations_including_duplicates".into(),
+                limits: super::dto::ReferenceFileLimits {
+                    max_processed_locations: 100_000,
+                    max_uri_bytes: 8_388_608,
+                    max_files: 10_000,
+                    max_output_bytes: OUTPUT_BYTES,
+                },
+            },
+        }
+    }
+
+    pub fn finish(mut self, locations: Vec<ReferenceLocation>) -> super::dto::ReferenceFileSummary {
+        self.summary.files = locations
+            .into_iter()
+            .zip(self.details)
+            .map(|(example, (count, file_path))| super::dto::ReferenceFile {
+                uri: example.uri.clone(),
+                path_filter_unavailable: file_path.is_none().then(|| "unsupported_uri".into()),
+                file_path,
+                count,
+                example,
+            })
+            .collect();
+        self.summary.bound_output();
+        self.summary
     }
 }
 
@@ -566,6 +681,131 @@ mod tests {
         (result, work)
     }
 
+    // A group limit must not hide later files or stop duplicate counting.
+    #[tokio::test]
+    async fn reference_files_count_duplicates_and_preserve_first_seen_order() {
+        let dir = TempDir::new().unwrap();
+        let a = canonical_dir(&dir).join("a.rs");
+        let b = canonical_dir(&dir).join("b.rs");
+        let c = canonical_dir(&dir).join("c.rs");
+        let mut response = vec![location(&a, 0); 10_001];
+        response.extend([location(&b, 2), location(&a, 3), location(&c, 4)]);
+        let (result, _) = request(
+            &dir,
+            response,
+            ReferenceOptions {
+                mode: ReferenceMode::Files,
+                limit: 2,
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+        assert!(result.result.locations.is_empty());
+        assert_eq!(result.matched_count, 10_004);
+        let summary = result.file_summary.unwrap();
+        assert!(summary.counts_complete);
+        assert_eq!(summary.processed_count, 10_004);
+        assert_eq!(summary.file_count, 3);
+        assert_eq!(summary.omitted_file_count, 1);
+        assert!(summary.output_truncated);
+        assert_eq!(summary.files[0].count, 10_002);
+        assert_eq!(summary.files[0].file_path.as_ref(), Some(&a));
+        assert_eq!(summary.files[1].file_path.as_ref(), Some(&b));
+        assert_eq!(summary.files[1].example.range.start.line, 3);
+        assert!(
+            summary
+                .files
+                .iter()
+                .all(|file| file.example.source.is_none())
+        );
+        let (details, _) = request(
+            &dir,
+            vec![location(&a, 0), location(&b, 2)],
+            ReferenceOptions {
+                path_filter: Some(b),
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+        assert_eq!(details.matched_count, 1);
+        assert!(details.file_summary.is_none());
+    }
+
+    // The processing cap includes nonmatching entries and reports lower bounds.
+    #[tokio::test]
+    async fn reference_files_stop_before_item_cap_and_keep_filter_empty_distinct() {
+        let dir = TempDir::new().unwrap();
+        let a = canonical_dir(&dir).join("a.rs");
+        let b = canonical_dir(&dir).join("b.rs");
+        let mut nonmatching = location(&a, 0);
+        nonmatching["uri"] = json!("custom:a");
+        let (result, _) = request(
+            &dir,
+            vec![nonmatching; 100_001],
+            ReferenceOptions {
+                mode: ReferenceMode::Files,
+                path_filter: Some(b),
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+        assert!(result.result.truncated);
+        assert_eq!(result.matched_count, 0);
+        assert!(result.index_coverage.is_none());
+        let summary = result.file_summary.unwrap();
+        assert_eq!(summary.received_count, 100_001);
+        assert_eq!(summary.processed_count, 100_000);
+        assert!(!summary.counts_complete);
+        assert!(!summary.output_truncated);
+        assert!(summary.files.is_empty());
+    }
+
+    // Unsupported URIs remain visible, and JSON escaping counts toward 64 KiB.
+    #[tokio::test]
+    async fn reference_files_bound_serialized_summary_and_retain_unsupported_uris() {
+        let dir = TempDir::new().unwrap();
+        let mut response = Vec::new();
+        for index in 0..100 {
+            let mut item = location(&canonical_dir(&dir).join("a.rs"), 0);
+            item["uri"] = json!(format!("custom:/{index}/{}", "x".repeat(1000)));
+            response.push(item);
+        }
+        let (result, _) = request(
+            &dir,
+            response,
+            ReferenceOptions {
+                mode: ReferenceMode::Files,
+                limit: 100,
+                include_source: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+        assert_eq!(result.matched_count, 100);
+        assert!(result.result.truncated);
+        let summary = result.file_summary.unwrap();
+        assert!(serde_json::to_vec(&summary).unwrap().len() <= OUTPUT_BYTES);
+        assert_eq!(summary.file_count, 100);
+        assert_eq!(summary.files.len() + summary.omitted_file_count, 100);
+        assert!(summary.counts_complete);
+        assert!(summary.files.len() > 1);
+        for file in summary.files {
+            assert!(file.file_path.is_none());
+            assert_eq!(
+                file.path_filter_unavailable.as_deref(),
+                Some("unsupported_uri")
+            );
+            assert!(matches!(
+                file.example.source,
+                Some(ReferenceSource::Unavailable { .. })
+            ));
+        }
+    }
+
     // These public handler requests prove positive enrichment and disabled work,
     // without depending on the implementation's private call graph.
     async fn navigation_request(
@@ -777,6 +1017,7 @@ mod tests {
             &dir,
             response,
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 2,
                 path_filter: Some(wanted),
                 include_source: false,
@@ -812,6 +1053,7 @@ mod tests {
             &dir,
             vec![location(&path, 2); 101],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 101,
                 include_source: true,
                 ..Default::default()
@@ -848,6 +1090,7 @@ mod tests {
             &dir,
             vec![location(&query, 0), location(&long, 1), location(&long, 0)],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -878,6 +1121,7 @@ mod tests {
             &dir,
             response,
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -898,6 +1142,7 @@ mod tests {
             &dir,
             vec![location(&path, 0); 100],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -936,6 +1181,7 @@ mod tests {
             &dir,
             vec![location(&path, 0)],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -966,6 +1212,7 @@ mod tests {
             &dir,
             response,
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -990,6 +1237,7 @@ mod tests {
                 location(&oversized, 0),
             ],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1017,6 +1265,7 @@ mod tests {
             &dir,
             vec![location(&link, 0), location(&secret, 0)],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1048,6 +1297,7 @@ mod tests {
             &dir,
             vec![location(&path, 0)],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1082,6 +1332,7 @@ mod tests {
             &dir,
             vec![location(&path, 0)],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1121,6 +1372,7 @@ mod tests {
             &dir,
             vec![location(&path, 0)],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1149,6 +1401,7 @@ mod tests {
             &dir,
             response,
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1191,6 +1444,7 @@ mod tests {
             &dir,
             response,
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1244,6 +1498,7 @@ mod tests {
                 &dir,
                 vec![location(&path, 0), location(&second, 0)],
                 ReferenceOptions {
+                    mode: crate::bridge::ReferenceMode::Locations,
                     limit: 100,
                     include_source: true,
                     path_filter: None,
@@ -1273,6 +1528,7 @@ mod tests {
             &dir,
             vec![location(&oversized, 0); 32],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1291,6 +1547,7 @@ mod tests {
             &dir,
             vec![location(&short, 0); 100],
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1328,6 +1585,7 @@ mod tests {
             &dir,
             response,
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,
@@ -1378,6 +1636,7 @@ mod tests {
             &dir,
             response,
             ReferenceOptions {
+                mode: crate::bridge::ReferenceMode::Locations,
                 limit: 100,
                 include_source: true,
                 path_filter: None,

@@ -53,7 +53,7 @@ mod prepare_range_tests;
 mod previews;
 mod pull_support;
 mod references;
-pub use references::ReferenceOptions;
+pub use references::{ReferenceMode, ReferenceOptions};
 mod respawn;
 mod restart;
 mod routing;

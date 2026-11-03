@@ -426,7 +426,10 @@ reusable_target_wire! {
     /// Wire form of [`ReferencesParams`].
     #[schemars(description = "Parameters for finding all references to a symbol.")]
     ReferencesWire {
-        #[schemars(description = "Maximum matching references, 1 through 10000; default 10.", range(min = 1, max = 10000))]
+        #[schemars(description = "locations (default) or files grouped by exact provider URI; limit bounds groups in files mode.")]
+        #[serde(default)]
+        mode: crate::bridge::ReferenceMode,
+        #[schemars(description = "Maximum returned locations or file groups, 1 through 10000; default 10.", range(min = 1, max = 10000))]
         #[serde(default = "reference_limit")]
         limit: usize,
         #[schemars(description = "Absolute file or directory path. Lexical component matching, no glob or symlink resolution.")]
@@ -481,6 +484,7 @@ impl TryFrom<ReferencesWire> for ReferencesParams {
         }
         Ok(Self {
             options: crate::bridge::ReferenceOptions {
+                mode: wire.mode,
                 limit: wire.limit,
                 path_filter: wire.path_filter.clone(),
                 include_source: wire.include_source,
@@ -1402,6 +1406,26 @@ mod tests {
         assert_eq!(query.name.as_str(), "parse");
         assert_eq!(query.kind, Some(lsp_types::SymbolKind::Function));
         assert_eq!(query.container.unwrap().as_str(), "Config");
+    }
+
+    #[test]
+    fn reference_mode_is_opt_in_and_rejects_null_or_unknown_values() {
+        let parse = |mode| {
+            serde_json::from_value::<ReferencesParams>(serde_json::json!({
+                "file_path": "/a.rs", "line": 1, "character": 1, "mode": mode
+            }))
+        };
+        assert_matches!(
+            parse("files").unwrap().options.mode,
+            crate::bridge::ReferenceMode::Files
+        );
+        assert_matches!(
+            parse("locations").unwrap().options.mode,
+            crate::bridge::ReferenceMode::Locations
+        );
+        assert!(parse("unknown").is_err());
+        let null = serde_json::json!({"file_path":"/a.rs","line":1,"character":1,"mode":null});
+        assert!(serde_json::from_value::<ReferencesParams>(null).is_err());
     }
 
     #[test]

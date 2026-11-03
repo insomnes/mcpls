@@ -107,7 +107,8 @@ and have no atomic consistency guarantee with LSP locations or later reads.
 
 Returns references reported by the language server, in server order, including duplicates.
 
-Arguments: addressing as above, `include_declaration` (default `false`), optional `context`,
+Arguments: addressing as above, `mode` (`"locations"` by default, or `"files"`),
+`include_declaration` (default `false`), optional `context`,
 `limit` (default 10, integer 1 through 10000), optional absolute `path_filter`,
 and `include_source` (default `false`). Relative filters are rejected.
 
@@ -125,12 +126,53 @@ and `include_source` (default `false`). Relative filters are rejected.
 The filter selects that exact file or descendants by lexical path components.
 It decodes file URIs and collapses `.` and `..` without resolving symlinks.
 It supports no globs. Non-file URIs do not match a filter.
-Filtering scans the complete received response before applying the limit.
+In locations mode, filtering scans the complete received response before applying the limit.
 `matched_count` counts matching locations in that response, independently of `limit`.
 `truncated: true` means matching locations were omitted. Neither field guarantees workspace-wide coverage.
 The ordered prefix is not a representative usage audit. Continuation is deferred;
 there is no cursor or offset. Increase `limit` or narrow `path_filter` for follow-up queries.
 Smaller output does not guarantee less work by the LSP backend.
+
+
+Use `mode:"files"` to choose the next file to inspect. The default mode is
+`"locations"`; explicit `null` and unknown modes fail. In files mode, `locations`
+is empty and `file_summary.files` contains groups in first-seen provider order.
+Each group has the exact provider `uri`, `count` including duplicates, and the
+first matching `example` with the usual location, warning, context, and optional
+source fields. Different URI spellings remain separate, even for the same file.
+
+`limit` bounds groups in this mode, with the same default 10 and range 1..10000.
+Filtering precedes grouping. Counts include all matching locations in the
+processed prefix, even when their groups are omitted from output. The summary
+reports `received_count`, `processed_count` (including nonmatching locations),
+`file_count`, `omitted_file_count`, `counts_complete`, `output_truncated`,
+`counting_basis:"received_locations_including_duplicates"`, and `limits`.
+
+Processing stops before exceeding 100000 locations, 8388608 aggregate UTF-8 URI
+bytes, or 10000 distinct matching URIs. With `counts_complete:false`, group
+counts, `matched_count`, and `file_count` are lower bounds for the received array.
+These counts never guarantee complete workspace coverage. Group limits alone do
+not make counts incomplete. `output_truncated:true` means known groups were
+omitted by `limit` or the byte budget. Top-level `truncated:true` also covers
+incomplete processing. An empty provider response retains `index_coverage`;
+a nonempty response emptied by filtering does not.
+
+The compact UTF-8 JSON for the entire `file_summary`, including example context
+and source, is limited to 65536 bytes. Output keeps a prefix of whole groups.
+Only selected examples receive normalization and optional enrichment; final byte
+trimming can omit some selected groups. Existing source and context limits apply.
+The `limits` fields are `max_processed_locations`, `max_uri_bytes`, `max_files`,
+and `max_output_bytes`, with the values above. This bounds additional local work
+and output; it does not bound the already received LSP response or backend work.
+
+For a supported file URI, `file_path` is an absolute lexical path. Query files
+first, then pass the chosen `file_path` as `path_filter` with `mode:"locations"`
+to inspect details. For example, use `{"mode":"files","limit":5}` with your
+symbol address, then add `{"path_filter":"/work/app/src/usage.rs"}` to a new
+locations query. URI aliases can map to the same filter path. Unsupported URIs
+remain visible with `file_path:null` and
+`path_filter_unavailable:"unsupported_uri"`. Requested source failures remain
+explicit. Source and positions do not form an atomic snapshot.
 
 Each location preserves `uri`, `range`, advisory `out_of_workspace`, and optional `enclosing_symbol`.
 With source enabled, `source` has one of these shapes:

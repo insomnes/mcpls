@@ -700,16 +700,7 @@ impl Translator {
         context: ResultContext,
         mut options: super::ReferenceOptions,
     ) -> Result<ReferencesResult> {
-        if !(1..=10_000).contains(&options.limit) {
-            return Err(Error::InvalidToolParams(
-                "limit must be between 1 and 10000".into(),
-            ));
-        }
-        if let Some(path) = &options.path_filter {
-            options.path_filter = Some(super::references::lexical_path(path).ok_or_else(|| {
-                Error::InvalidToolParams("path_filter must be an absolute path".into())
-            })?);
-        }
+        options.validate()?;
         let Positioned {
             result: response,
             ctx,
@@ -725,20 +716,37 @@ impl Translator {
             )
             .await?;
 
-        let response = response.unwrap_or_default();
+        let mut response = response.unwrap_or_default();
         let index_coverage = response
             .is_empty()
             .then(|| self.index_coverage(doc.server_id()));
-        let mut retained = Vec::with_capacity(options.limit.min(response.len()));
-        let mut matched_count: usize = 0;
-        for location in response {
-            if options.matches(&location.uri) {
-                matched_count = matched_count.saturating_add(1);
-                if retained.len() < options.limit {
-                    retained.push(location);
+        let files_mode = matches!(options.mode, super::ReferenceMode::Files);
+        let mut selection = if files_mode {
+            Some(super::references::ReferenceFileSelection::new(
+                std::mem::take(&mut response),
+                &options,
+            ))
+        } else {
+            None
+        };
+        let (retained, matched_count) = if let Some(selection) = &mut selection {
+            (
+                std::mem::take(&mut selection.retained),
+                selection.matched_count,
+            )
+        } else {
+            let mut retained = Vec::with_capacity(options.limit.min(response.len()));
+            let mut matched_count: usize = 0;
+            for location in response {
+                if options.matches(&location.uri) {
+                    matched_count = matched_count.saturating_add(1);
+                    if retained.len() < options.limit {
+                        retained.push(location);
+                    }
                 }
             }
-        }
+            (retained, matched_count)
+        };
         let mut locations = Vec::with_capacity(retained.len());
         for location in retained {
             let range = ctx.normalize_range(&location.uri, location.range).await;
@@ -769,15 +777,22 @@ impl Translator {
         if options.include_source {
             self.reference_sources(&mut locations).await;
         }
+        let file_summary =
+            selection.map(|selection| selection.finish(std::mem::take(&mut locations)));
         Ok(ReferencesResult {
             result: super::dto::ReferenceLocationsResult {
-                truncated: matched_count > locations.len(),
+                truncated: file_summary
+                    .as_ref()
+                    .map_or(matched_count > locations.len(), |summary| {
+                        summary.output_truncated || !summary.counts_complete
+                    }),
                 locations,
                 positions_degraded: result.positions_degraded,
                 enrichment: result.enrichment,
             },
             matched_count,
             index_coverage,
+            file_summary,
         })
     }
 

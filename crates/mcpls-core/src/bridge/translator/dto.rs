@@ -1357,7 +1357,7 @@ impl std::ops::Deref for ReferenceLocation {
 pub struct ReferenceLocationsResult {
     /// Matching locations in server order, including duplicates.
     pub locations: Vec<ReferenceLocation>,
-    /// Matching locations were omitted by the requested limit.
+    /// Matching locations or known file groups were omitted, or file counting is incomplete.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
     /// Position conversion warning.
@@ -1368,15 +1368,126 @@ pub struct ReferenceLocationsResult {
     pub enrichment: Option<EnrichmentSummary>,
 }
 
+/// One group of references with identical provider URI.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceFile {
+    /// Exact provider URI; URI aliases remain separate groups.
+    pub uri: String,
+    /// Absolute lexical path usable as `path_filter`, when supported.
+    pub file_path: Option<std::path::PathBuf>,
+    /// Why path filtering cannot address this URI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_filter_unavailable: Option<String>,
+    /// Number of processed matches, including duplicates.
+    pub count: usize,
+    /// First matching location for this URI.
+    pub example: ReferenceLocation,
+}
+
+/// Fixed limits applied to file summaries.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceFileLimits {
+    /// Maximum examined provider locations.
+    pub max_processed_locations: usize,
+    /// Maximum aggregate UTF-8 URI bytes examined.
+    pub max_uri_bytes: usize,
+    /// Maximum distinct matching URI groups.
+    pub max_files: usize,
+    /// Maximum compact serialized summary bytes, including enrichment.
+    pub max_output_bytes: usize,
+}
+
+/// Bounded distribution of the received references, not workspace coverage.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceFileSummary {
+    /// Groups in first-seen provider order.
+    pub files: Vec<ReferenceFile>,
+    /// Number of locations in the received provider array.
+    pub received_count: usize,
+    /// Number examined, including nonmatching locations.
+    pub processed_count: usize,
+    /// Whether the entire received array was examined; otherwise counts are lower bounds.
+    pub counts_complete: bool,
+    /// Distinct matching URIs in the processed prefix.
+    pub file_count: usize,
+    /// Known groups omitted by the group limit or byte budget.
+    pub omitted_file_count: usize,
+    /// Whether known groups were omitted from output.
+    pub output_truncated: bool,
+    /// Counts describe received locations and include duplicates.
+    pub counting_basis: String,
+    /// Fixed processing and output limits.
+    pub limits: ReferenceFileLimits,
+}
+
+impl ReferenceFileSummary {
+    /// Keep a whole-group prefix under the compact JSON byte budget.
+    pub(super) fn bound_output(&mut self) {
+        // Serialization counts bytes without allocating a second serialized result.
+        #[derive(Default)]
+        struct Bytes(usize);
+        impl std::io::Write for Bytes {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.saturating_add(bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        fn size(value: &impl Serialize) -> usize {
+            let mut bytes = Bytes::default();
+            if serde_json::to_writer(&mut bytes, value).is_err() {
+                usize::MAX
+            } else {
+                bytes.0
+            }
+        }
+        let files = std::mem::take(&mut self.files);
+        let mut group_bytes: usize = 0;
+        let mut kept = Vec::new();
+        for file in files {
+            let candidate_bytes = group_bytes
+                .saturating_add(usize::from(!kept.is_empty()))
+                .saturating_add(size(&file));
+            self.omitted_file_count = self.file_count.saturating_sub(kept.len().saturating_add(1));
+            self.output_truncated = self.omitted_file_count > 0;
+            if size(self).saturating_add(candidate_bytes) > self.limits.max_output_bytes {
+                break;
+            }
+            group_bytes = candidate_bytes;
+            kept.push(file);
+        }
+        self.omitted_file_count = self.file_count.saturating_sub(kept.len());
+        self.output_truncated = self.omitted_file_count > 0;
+        // Metadata digit counts can grow when the last candidate was omitted.
+        while !kept.is_empty()
+            && size(self).saturating_add(group_bytes) > self.limits.max_output_bytes
+        {
+            let Some(removed) = kept.pop() else {
+                break;
+            };
+            group_bytes = group_bytes
+                .saturating_sub(size(&removed).saturating_add(usize::from(!kept.is_empty())));
+            self.omitted_file_count = self.file_count.saturating_sub(kept.len());
+            self.output_truncated = self.omitted_file_count > 0;
+        }
+        self.files = kept;
+    }
+}
+
 /// Result of a references request: the locations plus an optional index-coverage note.
 ///
 /// A separate type from [`LocationsResult`] so the note's schema is paid for by one tool only.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReferencesResult {
+    /// Present only in files mode; locations is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_summary: Option<ReferenceFileSummary>,
     /// The locations found.
     #[serde(flatten)]
     pub result: ReferenceLocationsResult,
-    /// Number of matching locations in the complete server response.
+    /// Matching processed locations; a lower bound when file-summary counts are incomplete.
     pub matched_count: usize,
     /// Set only when the original server response is empty: what the routed server's answer covers.
     ///
@@ -1925,11 +2036,21 @@ impl ServerText for ReferencesResult {
             result,
             index_coverage: _,
             matched_count: _,
+            file_summary,
         } = self;
         for item in &mut result.locations {
             item.location.redact_server_text(redactions);
         }
         super::references::redact_sources(&mut result.locations, redactions);
+        if let Some(summary) = file_summary {
+            let mut remaining = super::references::OUTPUT_BYTES;
+            for file in &mut summary.files {
+                file.example.location.redact_server_text(redactions);
+                super::references::redact_source(&mut file.example, redactions, &mut remaining);
+            }
+            summary.bound_output();
+            result.truncated = summary.output_truncated || !summary.counts_complete;
+        }
     }
 }
 
