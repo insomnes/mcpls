@@ -194,6 +194,7 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
         if matches!(
             tool.name.as_ref(),
             "get_symbol_context"
+                | "get_references"
                 | "get_incoming_calls"
                 | "get_outgoing_calls"
                 | "get_supertypes"

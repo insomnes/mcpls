@@ -138,7 +138,8 @@ to inspect details. For example, use `{"mode":"files","limit":5}` with your
 symbol address, then add `{"path_filter":"/work/app/src/usage.rs"}` to a new
 locations query. URI aliases can map to the same filter path. Unsupported URIs
 remain visible with `file_path:null` and
-`path_filter_unavailable:"unsupported_uri"`. Requested source failures remain
+`path_filter_unavailable:"unsupported_uri"`. This also applies when the decoded
+path cannot be represented as a UTF-8 JSON string. Requested source failures remain
 explicit. Source and positions do not form an atomic snapshot.
 
 ### Optional navigation source

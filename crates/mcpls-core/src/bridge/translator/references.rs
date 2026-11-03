@@ -137,7 +137,8 @@ impl ReferenceFileSelection {
             .iter()
             .map(|location| {
                 let path = crate::bridge::state::uri_to_path(&location.uri)
-                    .and_then(|path| lexical_path(&path));
+                    .and_then(|path| lexical_path(&path))
+                    .filter(|path| path.to_str().is_some());
                 (groups.get(&location.uri).copied().unwrap_or_default(), path)
             })
             .collect();
@@ -731,6 +732,46 @@ mod tests {
         .await;
         assert_eq!(details.matched_count, 1);
         assert!(details.file_summary.is_none());
+    }
+
+    // A valid provider URI must survive when its path cannot be sent as JSON.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reference_files_preserve_non_utf8_path_and_following_group() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = TempDir::new().unwrap();
+        let bad = canonical_dir(&dir).join(std::ffi::OsString::from_vec(b"bad\xff.rs".to_vec()));
+        let normal = canonical_dir(&dir).join("normal.rs");
+        std::fs::write(&bad, "fn bad() {}\n").unwrap();
+        std::fs::write(&normal, "fn normal() {}\n").unwrap();
+        for include_source in [false, true] {
+            let (result, _) = request(
+                &dir,
+                vec![location(&bad, 0), location(&normal, 0)],
+                ReferenceOptions {
+                    mode: ReferenceMode::Files,
+                    include_source,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+            assert!(!result.result.truncated);
+            assert_eq!(result.matched_count, 2);
+            let summary = result.file_summary.unwrap();
+            assert_eq!(summary.files.len(), 2);
+            assert_eq!(summary.omitted_file_count, 0);
+            assert!(summary.files[0].uri.ends_with("bad%FF.rs"));
+            assert!(summary.files[0].file_path.is_none());
+            assert_eq!(
+                summary.files[0].path_filter_unavailable.as_deref(),
+                Some("unsupported_uri")
+            );
+            assert_eq!(summary.files[0].count, 1);
+            assert_eq!(summary.files[1].file_path.as_ref(), Some(&normal));
+            assert_eq!(summary.files[0].example.source.is_some(), include_source);
+            assert!(serde_json::to_vec(&summary).unwrap().len() <= OUTPUT_BYTES);
+        }
     }
 
     // The processing cap includes nonmatching entries and reports lower bounds.
