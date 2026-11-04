@@ -198,7 +198,8 @@ struct Admission {
     parent: usize,
     nodes: usize,
     edges: usize,
-    previous_ranges: Option<(usize, usize)>,
+    previous_ranges: Option<(usize, usize, usize)>,
+    normalized_edge: Option<Value>,
     data_bytes: usize,
 }
 
@@ -211,6 +212,7 @@ struct Graph {
     scope: PathBuf,
     origin: HierarchyOrigin,
     admissions: Vec<Admission>,
+    raw_ranges: Vec<Vec<Range>>,
 }
 impl Graph {
     fn usage(&self, field: &str) -> usize {
@@ -407,6 +409,7 @@ impl Translator {
             scope,
             origin,
             admissions: Vec::new(),
+            raw_ranges: Vec::new(),
         };
         let response = match start {
             CallGraphStart::Target(file, target) => {
@@ -505,11 +508,17 @@ impl Translator {
                     .as_array_mut()
                     .unwrap()
                     .truncate(admitted.edges);
-                if let Some((index, len)) = admitted.previous_ranges {
-                    graph.value["edges"][index]["from_ranges"]
-                        .as_array_mut()
-                        .unwrap()
-                        .truncate(len);
+                graph.raw_ranges.truncate(admitted.edges);
+                if let Some((index, len, raw_len)) = admitted.previous_ranges {
+                    graph.raw_ranges[index].truncate(raw_len);
+                    if let Some(previous) = admitted.normalized_edge {
+                        graph.value["edges"][index] = previous;
+                    } else {
+                        graph.value["edges"][index]["from_ranges"]
+                            .as_array_mut()
+                            .unwrap()
+                            .truncate(len);
+                    }
                 }
                 graph.value["nodes"]
                     .as_array_mut()
@@ -794,7 +803,15 @@ impl Translator {
                             match self.graph_relationship(graph, index, depth, record).await {
                                 Ok(()) => processed += 1,
                                 Err(reason) => {
-                                    graph.interrupted(index, reason, true);
+                                    if reason == "branch_failed" {
+                                        graph.value["nodes"][index]["expansion_status"] =
+                                            json!("failed");
+                                        graph.reason(reason, false);
+                                        graph.warning(reason);
+                                        graph.add("omitted_relationships", 1);
+                                    } else {
+                                        graph.interrupted(index, reason, true);
+                                    }
                                     break;
                                 }
                             }
@@ -911,6 +928,17 @@ impl Translator {
         if edge_index.is_none() && graph.usage("edges") >= MAX_EDGES {
             return Err("max_edges");
         }
+        // Decode every bounded call-site range before retaining either peer or
+        // edge state. A malformed relationship cannot leave an orphan node.
+        let ranges = record["fromRanges"].as_array_mut().ok_or("branch_failed")?;
+        let mut decoded = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            graph.add("ranges_examined", 1);
+            decoded.push(
+                serde_json::from_value::<lsp_types::Range>(range.take())
+                    .map_err(|_| "branch_failed")?,
+            );
+        }
         if new {
             let source = self.graph_source_identity(&raw, allowed);
             raw.data = None;
@@ -953,13 +981,9 @@ impl Translator {
             self.document_tracker.clone(),
             self.workspace_roots.clone(),
         );
-        let ranges = record["fromRanges"].as_array_mut().ok_or("branch_failed")?;
-        let mut raw_ranges = Vec::with_capacity(ranges.len());
-        let mut converted = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            graph.add("ranges_examined", 1);
-            let range: lsp_types::Range =
-                serde_json::from_value(range.take()).map_err(|_| "branch_failed")?;
+        let mut raw_ranges = Vec::with_capacity(decoded.len());
+        let mut converted = Vec::with_capacity(decoded.len());
+        for range in decoded {
             raw_ranges.push(raw_range(range));
             if caller_allowed {
                 converted.push(ctx.normalize_range(&caller_uri, range).await);
@@ -969,8 +993,9 @@ impl Translator {
         if let Some(d) = ctx.positions_degraded() {
             graph.degraded(d);
         }
-        let ranges = if normalized { converted } else { raw_ranges };
         let old_edge = edge_index.map(|i| graph.value["edges"][i].clone());
+        let changed_to_raw = edge_index
+            .is_some_and(|i| graph.value["edges"][i]["positions_base"] == 1 && !normalized);
         let previous_ranges = edge_index.map(|i| {
             (
                 i,
@@ -978,18 +1003,42 @@ impl Translator {
                     .as_array()
                     .unwrap()
                     .len(),
+                graph.raw_ranges[i].len(),
             )
         });
         if let Some(edge_index) = edge_index {
+            for range in raw_ranges {
+                if !graph.raw_ranges[edge_index].contains(&range) {
+                    graph.raw_ranges[edge_index].push(range);
+                }
+            }
             let edge = &mut graph.value["edges"][edge_index];
-            let kept = edge["from_ranges"].as_array_mut().unwrap();
-            for range in ranges {
-                let range = serde_json::to_value(range).map_err(|_| "branch_failed")?;
-                if !kept.contains(&range) {
-                    kept.push(range);
+            if !normalized || edge["positions_base"] == 0 {
+                edge["from_ranges"] = json!(graph.raw_ranges[edge_index]);
+                edge["positions_base"] = json!(0);
+                edge["positions_encoding"] = json!(graph.origin.encoding.encoding.to_lsp());
+            } else {
+                let kept = edge["from_ranges"].as_array_mut().unwrap();
+                for range in converted {
+                    let range = json!(range);
+                    if !kept.contains(&range) {
+                        kept.push(range);
+                    }
                 }
             }
         } else {
+            let mut distinct_raw = Vec::new();
+            for range in raw_ranges {
+                if !distinct_raw.contains(&range) {
+                    distinct_raw.push(range);
+                }
+            }
+            graph.raw_ranges.push(distinct_raw);
+            let ranges = if normalized {
+                converted
+            } else {
+                graph.raw_ranges[edges_before].clone()
+            };
             let mut distinct = Vec::new();
             for range in ranges {
                 if !distinct.contains(&range) {
@@ -1002,8 +1051,10 @@ impl Translator {
         if !graph.fits() {
             if let Some(edge_index) = edge_index {
                 graph.value["edges"][edge_index] = old_edge.unwrap();
+                graph.raw_ranges[edge_index].truncate(previous_ranges.unwrap().2);
             } else {
                 graph.value["edges"].as_array_mut().unwrap().pop();
+                graph.raw_ranges.pop();
             }
             if new {
                 graph.pending.pop();
@@ -1019,6 +1070,7 @@ impl Translator {
             nodes: nodes_before,
             edges: edges_before,
             previous_ranges,
+            normalized_edge: if changed_to_raw { old_edge } else { None },
             data_bytes: data_before,
         });
         Ok(())

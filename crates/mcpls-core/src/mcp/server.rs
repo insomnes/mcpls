@@ -1604,7 +1604,7 @@ impl McplsServer {
 
     /// Traverse a bounded caller or callee graph.
     #[tool(
-        description = "Bounded caller or callee graph. Required direction: incoming or outgoing. Give file_path with line/character or symbol_name, symbol_target, or unchanged item. depth defaults to 2 (1..8); max_nodes defaults to 30 (1..256). Nodes have minimum hop depth and explicit expansion_status; edges always point caller to callee and from_ranges belong to the caller URI. Budgets and uncertainty are explicit; analysis_freshness is unknown and atomic_snapshot is false. Inbound frame parsing and analyzer internal work use existing limits.",
+        description = "Bounded caller/callee graph. Required direction: incoming or outgoing. Use a file position/name, symbol_target, or unchanged item. depth:2 (1..8); max_nodes:30 (1..256). Edges point caller to callee; ranges belong to caller URI. Shared budgets and partial statuses are explicit. Freshness is unknown; no atomic snapshot. Analyzer work and inbound parsing use existing limits.",
         title = "Call Graph"
     )]
     async fn get_call_graph(
@@ -7106,6 +7106,139 @@ sleep 0.3
                 .iter()
                 .all(|r| r["params"]["textDocument"]["uri"] != "untitled:excluded")
         );
+    }
+
+    /// Script the real LSP boundary for call-graph response regressions.
+    async fn call_graph_wire_responses(
+        direction: &str,
+        utf8: bool,
+        scenario: impl FnOnce(
+            &Path,
+        ) -> (
+            serde_json::Value,
+            std::collections::HashMap<String, serde_json::Value>,
+        ),
+    ) -> serde_json::Value {
+        use crate::test_lsp::{fake_lsp_client, read_framed_message, write_response};
+        let mut fixture = hierarchy_wire_fixture();
+        std::fs::write(
+            &fixture.file,
+            if utf8 { "🦀abcdef\n" } else { "fn f() {}\n" },
+        )
+        .unwrap();
+        let (prepared, responses) = scenario(&fixture.file);
+        let (client, mut fake) = fake_lsp_client();
+        let id = crate::config::ServerId::from_static("rust");
+        fixture
+            .server
+            .context
+            .translator
+            .register_client(id.clone(), client.clone());
+        fixture.server.context.translator.register_server(
+            id,
+            crate::lsp::LspServer::new_for_test_with_client(
+                lsp_types::ServerCapabilities {
+                    call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                    ..Default::default()
+                },
+                if utf8 {
+                    lsp_types::PositionEncodingKind::UTF8
+                } else {
+                    lsp_types::PositionEncodingKind::UTF16
+                },
+                client,
+            ),
+        );
+        fixture.fake_servers.clear();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                let response = match request["method"].as_str().unwrap() {
+                    "textDocument/prepareCallHierarchy" => prepared.clone(),
+                    "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls" => responses
+                        .get(request["params"]["item"]["name"].as_str().unwrap())
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!([])),
+                    method => panic!("unexpected LSP request: {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], response).await;
+            }
+        });
+        let result=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({"name":"get_call_graph","arguments":{"file_path":fixture.file,"line":1,"character":1,"direction":direction,"depth":2}})).await;
+        responder.abort();
+        assert!(result.get("error").is_none(), "{result}");
+        result["result"]["structuredContent"].clone()
+    }
+
+    /// Every merged edge uses raw coordinates if either record cannot convert,
+    /// in both directions and regardless of which record arrives first.
+    #[tokio::test]
+    async fn test_call_graph_merged_range_fidelity_over_mcp() {
+        for direction in ["incoming", "outgoing"] {
+            for raw_first in [false, true] {
+                let mut ranges = vec![
+                    serde_json::json!({"start":{"line":0,"character":4},"end":{"line":0,"character":5}}),
+                    serde_json::json!({"start":{"line":99,"character":1},"end":{"line":99,"character":2}}),
+                ];
+                if raw_first {
+                    ranges.reverse();
+                }
+                let expected = ranges.clone();
+                let result=call_graph_wire_responses(direction,true,|file| {
+                    let mut root=hierarchy_lsp_item(file);root["name"]=serde_json::json!("A");
+                    root["range"]=serde_json::json!({"start":{"line":0,"character":0},"end":{"line":0,"character":0}});root["selectionRange"]=root["range"].clone();
+                    let mut peer=root.clone();peer["name"]=serde_json::json!("B");
+                    let field=if direction=="incoming" {"from"} else {"to"};
+                    let records=ranges.into_iter().map(|r|serde_json::json!({field:peer,"fromRanges":[r]})).collect::<Vec<_>>();
+                    (serde_json::json!([root]),std::collections::HashMap::from([("A".into(),serde_json::json!(records))]))
+                }).await;
+                assert_eq!(result["nodes"].as_array().unwrap().len(), 2);
+                assert_eq!(result["edges"].as_array().unwrap().len(), 1);
+                assert_eq!(result["edges"][0]["positions_base"], 0, "{result}");
+                assert_eq!(result["edges"][0]["positions_encoding"], "utf-8");
+                assert_eq!(
+                    result["edges"][0]["from_ranges"],
+                    serde_json::json!(expected)
+                );
+                assert_eq!(result["usage"]["ranges_examined"], 2);
+            }
+        }
+    }
+
+    /// Invalid relationship ranges fail their branch without retaining an orphan
+    /// peer, while a queued independent branch still returns its valid edge.
+    #[tokio::test]
+    async fn test_call_graph_invalid_range_is_atomic_over_mcp() {
+        let result=call_graph_wire_responses("outgoing",false,|file| {
+            let make=|name:&str| {let mut item=hierarchy_lsp_item(file);item["name"]=serde_json::json!(name);item};
+            let range=serde_json::json!({"start":{"line":0,"character":0},"end":{"line":0,"character":1}});
+            let relation=|name:&str|serde_json::json!({"to":make(name),"fromRanges":[range]});
+            let mut bad=relation("D");bad["fromRanges"][0]["start"]["line"]=serde_json::json!("invalid");
+            (serde_json::json!([make("A")]),std::collections::HashMap::from([("A".into(),serde_json::json!([relation("B"),relation("C")])),("B".into(),serde_json::json!([bad])),("C".into(),serde_json::json!([relation("E")]))]))
+        }).await;
+        let nodes = result["nodes"].as_array().unwrap();
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|n| n["item"]["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C", "E"]
+        );
+        assert_eq!(nodes[1]["expansion_status"], "failed");
+        assert_eq!(nodes[2]["expansion_status"], "expanded");
+        assert_eq!(result["edges"].as_array().unwrap().len(), 3);
+        assert_eq!(result["warnings"], serde_json::json!(["branch_failed"]));
+        assert!(
+            !result["stop_reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("child_truncated"))
+        );
+        assert_eq!(result["usage"]["omitted_relationships"], 1);
     }
 
     /// Both direct addressing forms return real relationships and forward opaque

@@ -96,6 +96,8 @@ call sites in first-seen order. Opaque `data` participates in identity.
 `positions_encoding` and `positions_base` accompany every node and edge.
 Normalized coordinates use UTF-16 with base 1. When reliable conversion is
 unavailable, original LSP coordinates retain their negotiated encoding and base 0.
+If any record for a merged edge cannot convert, the entire edge retains its
+original raw ranges in first-seen order under that one coordinate convention.
 Raw items have no normalized-item continuation token and are not expanded.
 A degraded preparation returns its entire stopped `items` list in raw coordinates,
 with top-level `positions_encoding` and `positions_base:0`. This also applies

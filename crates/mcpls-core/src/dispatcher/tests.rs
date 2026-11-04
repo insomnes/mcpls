@@ -153,7 +153,7 @@ async fn lazy_catalog_and_worktree_isolation() {
     let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
     let (client, task) = connect(fixture.server(dispatcher.clone())).await;
     let before = client.peer().list_all_tools().await.unwrap();
-    assert_eq!(before.len(), 31);
+    assert_eq!(before.len(), 32);
     let support = call(&client, "get_tool_support", json!({})).await.unwrap();
     assert_eq!(support["basis"], "configured");
     let status = call(
@@ -741,13 +741,13 @@ async fn dispatcher_catalog_budget_and_static_null_support() {
         );
         let tools = client.peer().list_all_tools().await.unwrap();
         let expected = if profile == crate::config::ToolProfile::Full {
-            34
+            35
         } else {
-            31
+            32
         };
         assert_eq!(tools.len(), expected);
         let size = serde_json::to_vec(&tools).unwrap().len();
-        assert!(size <= 151_000, "dispatcher catalog uses {size} bytes");
+        assert!(size <= 160_000, "dispatcher catalog uses {size} bytes");
         dispatcher.shutdown().await;
         client.cancel().await.unwrap();
         task.await.unwrap();

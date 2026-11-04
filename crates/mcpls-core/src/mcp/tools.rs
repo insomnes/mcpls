@@ -1053,11 +1053,11 @@ pub struct CallGraphParams {
 struct CallGraphWire {
     /// Follow callers or callees.
     direction: crate::bridge::CallGraphDirection,
-    /// Maximum hops (default 2, 1 through 8).
+    /// Maximum hops.
     #[serde(default = "graph_default_depth")]
     #[schemars(range(min = 1, max = 8))]
     depth: usize,
-    /// Retained nodes including root (default 30, 1 through 256).
+    /// Retained nodes, including root.
     #[serde(default = "graph_default_nodes")]
     #[schemars(range(min = 1, max = 256))]
     max_nodes: usize,

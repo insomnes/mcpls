@@ -1557,23 +1557,15 @@
   {
     "name": "get_call_graph",
     "title": "Call Graph",
-    "description": "Bounded caller or callee graph. Required direction: incoming or outgoing. Give file_path with line/character or symbol_name, symbol_target, or unchanged item. depth defaults to 2 (1..8); max_nodes defaults to 30 (1..256). Nodes have minimum hop depth and explicit expansion_status; edges always point caller to callee and from_ranges belong to the caller URI. Budgets and uncertainty are explicit; analysis_freshness is unknown and atomic_snapshot is false. Inbound frame parsing and analyzer internal work use existing limits.",
+    "description": "Bounded caller/callee graph. Required direction: incoming or outgoing. Use a file position/name, symbol_target, or unchanged item. depth:2 (1..8); max_nodes:30 (1..256). Edges point caller to callee; ranges belong to caller URI. Shared budgets and partial statuses are explicit. Freshness is unknown; no atomic snapshot. Analyzer work and inbound parsing use existing limits.",
     "inputSchema": {
       "$defs": {
         "CallGraphDirection": {
-          "description": "Direction followed by a bounded call graph.",
-          "oneOf": [
-            {
-              "const": "incoming",
-              "description": "Follow caller relationships.",
-              "type": "string"
-            },
-            {
-              "const": "outgoing",
-              "description": "Follow callee relationships.",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "incoming",
+            "outgoing"
+          ],
+          "type": "string"
         },
         "HierarchyItem": {
           "additionalProperties": false,
@@ -1665,7 +1657,7 @@
         },
         "SymbolTargetEnvelope": {
           "additionalProperties": false,
-          "description": "Copyable source-bound target for the six supported read-only consumers.",
+          "description": "Unchanged source-bound target.",
           "properties": {
             "file_path": {
               "type": "string"
@@ -1702,15 +1694,14 @@
         },
         "depth": {
           "default": 2,
-          "description": "Maximum hops (default 2, 1 through 8).",
+          "description": "Maximum hops.",
           "format": "uint",
           "maximum": 8,
           "minimum": 1,
           "type": "integer"
         },
         "direction": {
-          "$ref": "#/$defs/CallGraphDirection",
-          "description": "Follow callers or callees."
+          "$ref": "#/$defs/CallGraphDirection"
         },
         "file_path": {
           "description": "Absolute file path.",
@@ -1741,7 +1732,7 @@
         },
         "max_nodes": {
           "default": 30,
-          "description": "Retained nodes including root (default 30, 1 through 256).",
+          "description": "Retained nodes, including root.",
           "format": "uint",
           "maximum": 256,
           "minimum": 1,
@@ -1821,17 +1812,59 @@
     },
     "outputSchema": {
       "$defs": {
+        "HierarchyItem": {
+          "properties": {
+            "data": {},
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dispatcher_context": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "Numeric LSP symbol kind.",
+              "maximum": 4294967295,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "out_of_workspace": {
+              "type": "boolean"
+            },
+            "range": {
+              "$ref": "#/$defs/Range"
+            },
+            "selectionRange": {
+              "$ref": "#/$defs/Range"
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "kind",
+            "uri",
+            "range",
+            "selectionRange"
+          ],
+          "type": "object"
+        },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
+          "description": "Coordinates follow enclosing positions_base and positions_encoding.",
           "properties": {
             "character": {
-              "format": "uint32",
+              "maximum": 4294967295,
               "minimum": 0,
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
-              "format": "uint32",
+              "maximum": 4294967295,
               "minimum": 0,
               "type": "integer"
             }
@@ -1843,15 +1876,13 @@
           "type": "object"
         },
         "Range": {
-          "description": "Range in a document (1-based for MCP).",
+          "description": "Range in the enclosing coordinate convention.",
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D",
-              "description": "End position."
+              "$ref": "#/$defs/Position2D"
             },
             "start": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Start position."
+              "$ref": "#/$defs/Position2D"
             }
           },
           "required": [
@@ -1863,15 +1894,12 @@
       },
       "properties": {
         "analysis_freshness": {
-          "const": "unknown",
-          "description": "Analyzer freshness is not established."
+          "const": "unknown"
         },
         "atomic_snapshot": {
-          "const": false,
-          "description": "Observations are not an atomic source snapshot."
+          "const": false
         },
         "direction": {
-          "description": "Traversal direction.",
           "enum": [
             "incoming",
             "outgoing"
@@ -1882,57 +1910,15 @@
           "items": {
             "properties": {
               "callee": {
-                "description": "Callee node ID.",
                 "type": "string"
               },
               "caller": {
-                "description": "Caller node ID.",
                 "type": "string"
               },
               "from_ranges": {
-                "description": "Distinct caller-document call sites in first-seen order.",
+                "description": "Distinct caller call sites in first-seen order.",
                 "items": {
-                  "properties": {
-                    "end": {
-                      "properties": {
-                        "character": {
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "line": {
-                          "minimum": 0,
-                          "type": "integer"
-                        }
-                      },
-                      "required": [
-                        "line",
-                        "character"
-                      ],
-                      "type": "object"
-                    },
-                    "start": {
-                      "properties": {
-                        "character": {
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "line": {
-                          "minimum": 0,
-                          "type": "integer"
-                        }
-                      },
-                      "required": [
-                        "line",
-                        "character"
-                      ],
-                      "type": "object"
-                    }
-                  },
-                  "required": [
-                    "start",
-                    "end"
-                  ],
-                  "type": "object"
+                  "$ref": "#/$defs/Range"
                 },
                 "type": "array"
               },
@@ -1944,7 +1930,6 @@
                 ]
               },
               "positions_encoding": {
-                "description": "Call-site coordinate encoding.",
                 "enum": [
                   "utf-8",
                   "utf-16",
@@ -1964,106 +1949,46 @@
           "type": "array"
         },
         "indexing_in_progress": {
-          "description": "A sampled route reported indexing.",
           "type": "boolean"
         },
         "items": {
           "description": "Bounded preparation candidates; present only when preparation stops.",
           "items": {
-            "description": "A call or type hierarchy item.",
-            "properties": {
-              "data": {
-                "description": "Opaque data to pass back unchanged."
-              },
-              "detail": {
-                "description": "More detail for this item.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "dispatcher_context": {
-                "description": "Authenticated normalized-item continuation.",
-                "type": "string"
-              },
-              "kind": {
-                "description": "LSP numeric symbol kind (e.g. 12 for Function, 5 for Class).",
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "name": {
-                "description": "Name of the symbol.",
-                "type": "string"
-              },
-              "out_of_workspace": {
-                "type": "boolean"
-              },
-              "range": {
-                "$ref": "#/$defs/Range",
-                "description": "Range of the symbol."
-              },
-              "selectionRange": {
-                "$ref": "#/$defs/Range",
-                "description": "Selection range (identifier location)."
-              },
-              "uri": {
-                "description": "URI of the document.",
-                "type": "string"
-              }
-            },
-            "required": [
-              "name",
-              "kind",
-              "uri",
-              "range",
-              "selectionRange"
-            ],
-            "title": "HierarchyItem",
-            "type": "object"
+            "$ref": "#/$defs/HierarchyItem"
           },
           "type": "array"
         },
         "limits": {
-          "description": "Effective traversal limits.",
           "properties": {
             "depth": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "max_data_bytes": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "max_edges": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "max_nodes": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "max_output_bytes": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "max_ranges": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "max_records": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "max_requests": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             }
@@ -2085,12 +2010,11 @@
           "items": {
             "properties": {
               "depth": {
-                "description": "Minimum observed hops from root.",
                 "minimum": 0,
                 "type": "integer"
               },
               "expansion_status": {
-                "description": "Observed expansion outcome; expanded does not imply completeness.",
+                "description": "Expansion outcome; completeness remains unknown.",
                 "enum": [
                   "expanded",
                   "depth_boundary",
@@ -2101,71 +2025,19 @@
                 ]
               },
               "id": {
-                "description": "Request-local n0, n1, ... identifier.",
                 "type": "string"
               },
               "item": {
-                "description": "A call or type hierarchy item.",
-                "properties": {
-                  "data": {
-                    "description": "Opaque data to pass back unchanged."
-                  },
-                  "detail": {
-                    "description": "More detail for this item.",
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "dispatcher_context": {
-                    "description": "Authenticated normalized-item continuation.",
-                    "type": "string"
-                  },
-                  "kind": {
-                    "description": "LSP numeric symbol kind (e.g. 12 for Function, 5 for Class).",
-                    "format": "uint32",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "name": {
-                    "description": "Name of the symbol.",
-                    "type": "string"
-                  },
-                  "out_of_workspace": {
-                    "type": "boolean"
-                  },
-                  "range": {
-                    "$ref": "#/$defs/Range",
-                    "description": "Range of the symbol."
-                  },
-                  "selectionRange": {
-                    "$ref": "#/$defs/Range",
-                    "description": "Selection range (identifier location)."
-                  },
-                  "uri": {
-                    "description": "URI of the document.",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "name",
-                  "kind",
-                  "uri",
-                  "range",
-                  "selectionRange"
-                ],
-                "title": "HierarchyItem",
-                "type": "object"
+                "$ref": "#/$defs/HierarchyItem"
               },
               "positions_base": {
-                "description": "Raw LSP coordinates use zero; normalized UTF-16 uses one.",
+                "description": "Raw base 0 or normalized UTF-16 base 1.",
                 "enum": [
                   0,
                   1
                 ]
               },
               "positions_encoding": {
-                "description": "Encoding of item coordinates.",
                 "enum": [
                   "utf-8",
                   "utf-16",
@@ -2173,7 +2045,7 @@
                 ]
               },
               "source_identity": {
-                "description": "Hash of already observed complete source bytes, or unavailable.",
+                "description": "Hash of already observed complete source, or unavailable.",
                 "oneOf": [
                   {
                     "properties": {
@@ -2224,6 +2096,10 @@
           },
           "type": "array"
         },
+        "positions_base": {
+          "const": 0,
+          "description": "Raw preparation candidates use base 0."
+        },
         "positions_degraded": {
           "description": "Worst coordinate conversion degradation; request takes precedence.",
           "enum": [
@@ -2231,19 +2107,24 @@
             "response"
           ]
         },
+        "positions_encoding": {
+          "description": "Encoding of raw preparation candidates.",
+          "enum": [
+            "utf-8",
+            "utf-16",
+            "utf-32"
+          ]
+        },
         "resolved_symbol": {
-          "description": "Existing name-resolution metadata when applicable.",
           "type": "object"
         },
         "root": {
-          "description": "Root node ID; null for preparation stops.",
           "type": [
             "string",
             "null"
           ]
         },
         "status": {
-          "description": "Root preparation outcome.",
           "enum": [
             "ok",
             "no_item",
@@ -2252,7 +2133,6 @@
           ]
         },
         "stop_reasons": {
-          "description": "Stable observed boundaries and budget reasons.",
           "items": {
             "type": "string"
           },
@@ -2263,45 +2143,42 @@
           "type": "boolean"
         },
         "usage": {
-          "description": "Actual work and retained-result counters.",
           "properties": {
             "analysis_requests": {
-              "description": "Actual analysis send attempts, including resolution, preparation and retries.",
+              "description": "Analysis send attempts, including retries.",
               "minimum": 0,
               "type": "integer"
             },
             "edges": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "nodes": {
-              "description": "Effective bound or retained count named by this field.",
               "minimum": 0,
               "type": "integer"
             },
             "omitted_relationships": {
-              "description": "Examined provider relationships actually omitted; excludes unseen work.",
+              "description": "Examined relationships omitted; excludes unseen work.",
               "minimum": 0,
               "type": "integer"
             },
             "output_bytes": {
-              "description": "Exact compact final structured UTF-8 JSON bytes, including this counter.",
+              "description": "Final compact UTF-8 bytes, including this count.",
               "minimum": 0,
               "type": "integer"
             },
             "ranges_examined": {
-              "description": "Call-site fromRanges examined, including duplicates.",
+              "description": "Call-site range visits, including duplicates.",
               "minimum": 0,
               "type": "integer"
             },
             "records_examined": {
-              "description": "Preparation items and relationship records examined, including duplicates.",
+              "description": "Item and relationship visits, including duplicates.",
               "minimum": 0,
               "type": "integer"
             },
             "retained_data_bytes": {
-              "description": "Compact opaque data bytes, counted once per retained identity or candidate.",
+              "description": "Opaque JSON bytes per retained identity or candidate.",
               "minimum": 0,
               "type": "integer"
             }
@@ -2319,23 +2196,10 @@
           "type": "object"
         },
         "warnings": {
-          "description": "Deduplicated route and traversal warnings.",
           "items": {
             "type": "string"
           },
           "type": "array"
-        },
-        "positions_encoding": {
-          "enum": [
-            "utf-8",
-            "utf-16",
-            "utf-32"
-          ],
-          "description": "Coordinate encoding for every item in a raw stopped preparation list."
-        },
-        "positions_base": {
-          "const": 0,
-          "description": "Stopped preparation candidates retain raw zero-based coordinates when this field is present."
         }
       },
       "required": [
