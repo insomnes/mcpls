@@ -16,9 +16,6 @@ mod workspace_roots;
 
 pub use client_path::{ClientPath, InvalidClientPath};
 pub use encoding::{InvalidPositionEncoding, PositionEncoding};
-pub use translator::CallGraphDirection;
-pub(crate) use translator::call_graph;
-pub(crate) use translator::{CallGraphOptions, CallGraphStart};
 // Not part of the crate's public API surface (unlike `IndexingPolicy`/`IndexingState`
 // above, both referenced from public signatures) -- these three exist only
 // for `config`'s default-value/validation wiring, so `pub(crate)` avoids
@@ -50,9 +47,9 @@ pub(crate) use state::{InFlightGuard, LinePresence, Opening, try_path_to_uri};
 #[cfg(test)]
 pub(crate) use translator::MAX_FAILED_PULLS_PER_STATE;
 pub use translator::{
-    AddressableTool, Addressed, AnalysisFreshness, BoundedRange, Capability, CheckedHierarchyItem,
-    CodeActionKindFilter, Completion, CompletionTrigger, CompletionsResult, Contextual,
-    ContextualDiagnostic, ContextualLocation, Diagnostic, DiagnosticsAnswer,
+    AddressableTool, Addressed, AnalysisFreshness, BoundedRange, CallGraphDirection, Capability,
+    CheckedHierarchyItem, CodeActionKindFilter, Completion, CompletionTrigger, CompletionsResult,
+    Contextual, ContextualDiagnostic, ContextualLocation, Diagnostic, DiagnosticsAnswer,
     DiagnosticsAvailability, DiagnosticsOrigin, DiagnosticsResult, DocumentChanges,
     DocumentDiagnosticsResult, DocumentHighlightEntry, DocumentHighlightKind,
     DocumentHighlightsResult, DocumentOutlineResult, DocumentSymbolsResult, DroppedEdits,
@@ -76,11 +73,12 @@ pub use translator::{
     TextField, Translator, TypeHierarchyResult, UnavailableReason,
 };
 pub(crate) use translator::{
-    CallHierarchyPrepareResult, CodeActionsResult, DiagnosticsRole, HierarchyOrigin,
-    IncomingCallsResult, InlayHintsResult, Interest, MAX_COMPANION_FILES, MAX_SWEPT_FILES_PER_TICK,
-    NotificationReceivers, NotificationWiring, OutgoingCallsResult, SWEEP_INTERVAL,
-    ServerLogsResult, ServerMessagesResult, SignatureHelpResult, SweepContext, SweepMemo,
-    ToolSupportSnapshot, WorkspaceSymbolResult,
+    CallGraphOptions, CallGraphStart, CallHierarchyPrepareResult, CodeActionsResult,
+    DiagnosticsRole, HierarchyOrigin, IncomingCallsResult, InlayHintsResult, Interest,
+    MAX_COMPANION_FILES, MAX_SWEPT_FILES_PER_TICK, NotificationReceivers, NotificationWiring,
+    OutgoingCallsResult, SWEEP_INTERVAL, ServerLogsResult, ServerMessagesResult,
+    SignatureHelpResult, SweepContext, SweepMemo, ToolSupportSnapshot, WorkspaceSymbolResult,
+    call_graph,
 };
 #[cfg(test)]
 pub(crate) use workspace_roots::{CanonicalizeFn, ProcessCwd};

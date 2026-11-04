@@ -3,9 +3,11 @@
     clippy::indexing_slicing,
     reason = "all schema objects are constructed locally"
 )]
-use super::{McplsServer, ToolRouter};
-use serde_json::{Value, json};
 use std::sync::Arc;
+
+use serde_json::{Value, json};
+
+use super::{McplsServer, ToolRouter};
 
 /// Install the complete object schema instead of Value's unconstrained schema.
 pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {

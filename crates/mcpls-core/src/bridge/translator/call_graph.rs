@@ -24,10 +24,8 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

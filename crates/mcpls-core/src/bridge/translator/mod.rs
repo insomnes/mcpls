@@ -74,8 +74,7 @@ pub use addressing::{
     ResolvedTarget, SymbolName, SymbolQuery, SymbolTarget,
 };
 pub use availability::{DiagnosticsAnswer, DiagnosticsAvailability, DiagnosticsOrigin};
-pub use call_graph::CallGraphDirection;
-pub use call_graph::{CallGraphOptions, CallGraphStart};
+pub use call_graph::{CallGraphDirection, CallGraphOptions, CallGraphStart};
 #[cfg(test)]
 pub use diagnostics::MAX_FAILED_PULLS_PER_STATE;
 pub use diagnostics::{

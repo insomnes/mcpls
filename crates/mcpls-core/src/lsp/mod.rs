@@ -17,8 +17,9 @@ pub(crate) mod types;
 pub(crate) mod vetting;
 pub(crate) mod watching;
 
-pub(crate) use client::CALL_GRAPH_REQUESTS;
-pub(crate) use client::{CONTENT_MODIFIED_RETRY_METHODS, ConnectionId, UnclassifiedError};
+pub(crate) use client::{
+    CALL_GRAPH_REQUESTS, CONTENT_MODIFIED_RETRY_METHODS, ConnectionId, UnclassifiedError,
+};
 pub use client::{LspClient, MAX_CONSECUTIVE_UNDECODABLE_FRAMES, SHUTDOWN_TIMEOUT};
 pub(crate) use env::{ManagedEnvVar, ParentEnv, process_env};
 #[cfg(test)]
