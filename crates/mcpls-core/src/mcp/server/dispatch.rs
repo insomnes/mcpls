@@ -223,6 +223,24 @@ impl McplsServer {
                 | "get_tool_support"
         );
         let arguments = request.arguments.get_or_insert_default();
+        if name == "get_call_graph" {
+            // Graph selectors inherit null-as-absent addressing. Required
+            // direction and the new numeric options still reject null.
+            arguments.retain(|key, value| {
+                !value.is_null()
+                    || !matches!(
+                        key.as_str(),
+                        "file_path"
+                            | "line"
+                            | "character"
+                            | "symbol_name"
+                            | "symbol_kind"
+                            | "container"
+                            | "item"
+                            | "symbol_target"
+                    )
+            });
+        }
         let envelope = arguments
             .get("symbol_target")
             .filter(|value| !value.is_null());
@@ -235,6 +253,7 @@ impl McplsServer {
                     | "get_references"
                     | "get_incoming_calls"
                     | "get_outgoing_calls"
+                    | "get_call_graph"
             )
         {
             return Err(McpError::invalid_params(
@@ -477,7 +496,7 @@ impl McplsServer {
                 .as_ref()
                 .and_then(|origin| resident.incarnation(origin))
         });
-        if continuation {
+        if continuation || name == "get_call_graph" && origin.is_some() && incarnation.is_some() {
             let authenticated = origin
                 .as_ref()
                 .zip(incarnation.as_ref())
@@ -541,10 +560,34 @@ impl McplsServer {
                 }
             }
             if let (Some(origin), Some(incarnation)) = (&origin, &incarnation) {
-                if resident.incarnation(origin).as_ref() != Some(incarnation) {
+                if resident.incarnation(origin).as_ref() != Some(incarnation)
+                    && name != "get_call_graph"
+                {
                     return Err(DispatchError::stale().wire());
                 }
-                if bundle_calls {
+                if name == "get_call_graph" {
+                    if resident.incarnation(origin).as_ref() == Some(incarnation)
+                        && !value["stop_reasons"]
+                            .as_array()
+                            .is_some_and(|r| r.iter().any(|v| v == "server_changed"))
+                    {
+                        if let Some(nodes) = value["nodes"].as_array_mut() {
+                            for node in nodes {
+                                if node["positions_base"] == 1
+                                    && node["expansion_status"] != "excluded_scope"
+                                {
+                                    self.bind_items(&mut node["item"], &lease, origin, incarnation)
+                                        .await;
+                                }
+                            }
+                        }
+                        if value.get("positions_degraded").is_none()
+                            && let Some(items) = value.get_mut("items")
+                        {
+                            self.bind_items(items, &lease, origin, incarnation).await;
+                        }
+                    }
+                } else if bundle_calls {
                     if let Some(data) = value
                         .get_mut("sections")
                         .and_then(|sections| sections.get_mut("outgoing_calls"))
@@ -558,6 +601,9 @@ impl McplsServer {
             }
             if name == "get_symbol_context" {
                 super::symbol_context::enforce_response_budget(value);
+            }
+            if name == "get_call_graph" {
+                crate::bridge::call_graph::enforce_final_bytes(value);
             }
             output.content = vec![rmcp::model::ContentBlock::text(value.to_string())];
         }

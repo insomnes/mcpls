@@ -80,7 +80,7 @@ impl From<LspHierarchyItem> for lsp_types::TypeHierarchyItem {
 /// Clamps a normalized range to [`MAX_POSITION_VALUE`], so an item mcpls emits
 /// (an end-of-line sentinel or a minified line) can be passed back to the
 /// walking tools, which reject larger values.
-fn clamp_to_input_limit(mut range: Range) -> Range {
+pub(super) fn clamp_to_input_limit(mut range: Range) -> Range {
     for position in [&mut range.start, &mut range.end] {
         position.line = position.line.min(MAX_POSITION_VALUE);
         position.character = position.character.min(MAX_POSITION_VALUE);

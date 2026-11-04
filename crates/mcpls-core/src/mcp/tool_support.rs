@@ -52,6 +52,7 @@ pub(super) enum McpTool {
     GetCodeActions,
     GetIncomingCalls,
     GetOutgoingCalls,
+    GetCallGraph,
     PrepareTypeHierarchy,
     GetSupertypes,
     GetSubtypes,
@@ -74,7 +75,7 @@ pub(super) enum McpTool {
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 33] = [
+    pub(super) const ALL: [Self; 34] = [
         Self::GetSymbolContext,
         Self::GetHover,
         Self::GetDefinition,
@@ -90,6 +91,7 @@ impl McpTool {
         Self::GetCodeActions,
         Self::GetIncomingCalls,
         Self::GetOutgoingCalls,
+        Self::GetCallGraph,
         Self::PrepareTypeHierarchy,
         Self::GetSupertypes,
         Self::GetSubtypes,
@@ -163,6 +165,7 @@ impl McpTool {
             Self::GetCodeActions => ("get_code_actions", Document(ToolKind::CodeActions)),
             Self::GetIncomingCalls => ("get_incoming_calls", Document(ToolKind::CallHierarchy)),
             Self::GetOutgoingCalls => ("get_outgoing_calls", Document(ToolKind::CallHierarchy)),
+            Self::GetCallGraph => ("get_call_graph", Document(ToolKind::CallHierarchy)),
             Self::PrepareTypeHierarchy => {
                 ("prepare_type_hierarchy", Document(ToolKind::TypeHierarchy))
             }

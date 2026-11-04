@@ -943,6 +943,58 @@ fn sc_direct_outgoing_calls(client: &mut McpClient, workspace: &Path) -> Result<
     Ok(())
 }
 
+/// Both directions expose a known two-hop path and preserve continuation reuse.
+fn call_graph_direction(
+    client: &mut McpClient,
+    workspace: &Path,
+    direction: &str,
+    root: &str,
+    leaf: &str,
+) -> Result<(), String> {
+    let response=client.call_tool("get_call_graph",&json!({"file_path":workspace.join("src/lib.rs"),"symbol_name":root,"direction":direction,"depth":2})).map_err(|e|e.to_string())?;
+    let graph: Value =
+        serde_json::from_str(&assertions::assert_tool_ok(&response)).map_err(|e| e.to_string())?;
+    let nodes = graph["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("missing graph nodes: {graph}"))?;
+    if graph["status"] != "ok"
+        || graph["analysis_freshness"] != "unknown"
+        || graph["atomic_snapshot"] != false
+        || !nodes
+            .iter()
+            .any(|n| n["item"]["name"] == leaf && n["depth"] == 2)
+    {
+        return Err(format!(
+            "missing two-hop {root} -> {leaf} observation: {graph}"
+        ));
+    }
+    let root_item = nodes[0]["item"].clone();
+    let reused = client
+        .call_tool(
+            "get_call_graph",
+            &json!({"item":root_item,"direction":direction,"depth":1}),
+        )
+        .map_err(|e| e.to_string())?;
+    let reused: Value =
+        serde_json::from_str(&assertions::assert_tool_ok(&reused)).map_err(|e| e.to_string())?;
+    if reused["status"] != "ok"
+        || reused["nodes"][0]["item"]["name"] != root
+        || reused["edges"].as_array().is_none_or(Vec::is_empty)
+    {
+        return Err(format!(
+            "graph item continuation lost call observations: {reused}"
+        ));
+    }
+    Ok(())
+}
+
+fn sc_incoming_call_graph(client: &mut McpClient, workspace: &Path) -> Result<(), String> {
+    call_graph_direction(client, workspace, "incoming", "add", "graph_entry")
+}
+fn sc_outgoing_call_graph(client: &mut McpClient, workspace: &Path) -> Result<(), String> {
+    call_graph_direction(client, workspace, "outgoing", "graph_entry", "add")
+}
+
 /// Tool 14: `get_cached_diagnostics` — push cache populated during workspace indexing.
 ///
 /// Uses `lib.rs` rather than `broken.rs`: lib.rs is opened via hover during
@@ -1605,6 +1657,8 @@ fn sub_cases() -> Vec<SubCase> {
         sub_case!(sc_get_outgoing_calls),
         sub_case!(sc_direct_incoming_calls),
         sub_case!(sc_direct_outgoing_calls),
+        sub_case!(sc_incoming_call_graph),
+        sub_case!(sc_outgoing_call_graph),
         sub_case!(sc_get_cached_diagnostics),
         sub_case!(sc_get_server_logs),
         sub_case!(sc_get_server_messages),

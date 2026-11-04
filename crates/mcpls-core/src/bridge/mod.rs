@@ -16,6 +16,9 @@ mod workspace_roots;
 
 pub use client_path::{ClientPath, InvalidClientPath};
 pub use encoding::{InvalidPositionEncoding, PositionEncoding};
+pub use translator::CallGraphDirection;
+pub(crate) use translator::call_graph;
+pub(crate) use translator::{CallGraphOptions, CallGraphStart};
 // Not part of the crate's public API surface (unlike `IndexingPolicy`/`IndexingState`
 // above, both referenced from public signatures) -- these three exist only
 // for `config`'s default-value/validation wiring, so `pub(crate)` avoids

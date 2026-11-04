@@ -31,6 +31,34 @@ mod notification;
 use cancel::{InFlightRequest, PendingRequests, Resolution};
 use notification::OutboundNotification;
 
+tokio::task_local! {
+    /// Counts actual analysis send attempts for one call graph, including retries.
+    pub(crate) static CALL_GRAPH_REQUESTS: Arc<std::sync::atomic::AtomicUsize>;
+}
+
+/// Whether this request belongs to the graph's analysis budget.
+fn graph_analysis_method(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/documentSymbol"
+            | "textDocument/prepareCallHierarchy"
+            | "callHierarchy/incomingCalls"
+            | "callHierarchy/outgoingCalls"
+    )
+}
+
+/// Reject another attempt before allocating or sending it.
+fn graph_request_available(method: &str) -> Result<()> {
+    if graph_analysis_method(method)
+        && CALL_GRAPH_REQUESTS
+            .try_with(|count| count.load(Ordering::Relaxed) >= 64)
+            .unwrap_or(false)
+    {
+        return Err(Error::CallGraphRequestLimit);
+    }
+    Ok(())
+}
+
 /// Maximum number of retry attempts for server-cancelled requests.
 const SERVER_CANCELLED_MAX_RETRIES: u32 = 3;
 
@@ -740,6 +768,7 @@ impl LspClient {
         let mut delay_ms = SERVER_CANCELLED_INITIAL_DELAY_MS;
 
         for attempt in 0..=SERVER_CANCELLED_MAX_RETRIES {
+            graph_request_available(method).map_err(UnclassifiedError::logged)?;
             if attempt > 0 {
                 debug!(
                     "Retrying {} (attempt {}/{}), backoff={}ms",
@@ -747,6 +776,10 @@ impl LspClient {
                 );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = delay_ms.saturating_mul(2);
+            }
+
+            if graph_analysis_method(method) {
+                let _ = CALL_GRAPH_REQUESTS.try_with(|count| count.fetch_add(1, Ordering::Relaxed));
             }
 
             let id = RequestId::Number(self.request_counter.fetch_add(1, Ordering::SeqCst));

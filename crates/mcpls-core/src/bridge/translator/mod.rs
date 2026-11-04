@@ -31,6 +31,7 @@ use crate::util::lock_std;
 mod addressing;
 mod assist;
 mod availability;
+pub mod call_graph;
 mod call_hierarchy;
 #[cfg(test)]
 mod characterization;
@@ -73,6 +74,8 @@ pub use addressing::{
     ResolvedTarget, SymbolName, SymbolQuery, SymbolTarget,
 };
 pub use availability::{DiagnosticsAnswer, DiagnosticsAvailability, DiagnosticsOrigin};
+pub use call_graph::CallGraphDirection;
+pub use call_graph::{CallGraphOptions, CallGraphStart};
 #[cfg(test)]
 pub use diagnostics::MAX_FAILED_PULLS_PER_STATE;
 pub use diagnostics::{

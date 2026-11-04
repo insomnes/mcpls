@@ -2225,6 +2225,10 @@ pub enum Error {
     #[error("invalid tool parameters: {0}")]
     InvalidToolParams(String),
 
+    /// The current call graph has attempted its maximum analysis requests.
+    #[error("call graph analysis request budget exhausted")]
+    CallGraphRequestLimit,
+
     /// A client-supplied file path is empty or contains a NUL byte.
     #[error(transparent)]
     InvalidClientPath(#[from] InvalidClientPath),
@@ -2663,7 +2667,8 @@ impl Error {
                 ))
             }
 
-            Self::LspInitFailed { .. }
+            Self::CallGraphRequestLimit
+            | Self::LspInitFailed { .. }
             | Self::LspServerError(..)
             | Self::McpServerStart(_)
             | Self::TaskFailed { .. }
@@ -2755,6 +2760,7 @@ impl Error {
             | Self::ServerExitedDuringInit { .. }
             | Self::ServerUnavailable { .. }
             | Self::InvalidToolParams(..)
+            | Self::CallGraphRequestLimit
             | Self::InvalidClientPath(..)
             | Self::DocumentLimitExceeded { .. }
             | Self::SubscriptionLimitReached { .. }

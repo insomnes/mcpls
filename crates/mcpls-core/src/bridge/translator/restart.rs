@@ -254,7 +254,8 @@ impl RestartFailure {
             | Error::NotARegularFile(_)
             | Error::AllServersFailedToInit { .. }
             | Error::CapabilityNotSupported { .. }
-            | Error::WorkspaceIndexing { .. } => Self::InitializeFailed { message },
+            | Error::WorkspaceIndexing { .. }
+            | Error::CallGraphRequestLimit => Self::InitializeFailed { message },
         }
     }
 }

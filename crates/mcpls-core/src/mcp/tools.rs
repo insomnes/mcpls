@@ -1032,6 +1032,86 @@ struct CallHierarchyCallsWire {
     container: Option<String>,
 }
 
+/// One bounded breadth-first caller or callee traversal.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(try_from = "CallGraphWire")]
+#[schemars(with = "CallGraphWire")]
+pub struct CallGraphParams {
+    /// Existing hierarchy addressing, validated before traversal.
+    pub target: CallHierarchyCallsParams,
+    /// Follow callers or callees.
+    pub direction: crate::bridge::CallGraphDirection,
+    /// Maximum hop count.
+    pub depth: usize,
+    /// Maximum retained nodes, including the root.
+    pub max_nodes: usize,
+}
+
+/// Closed graph input with the existing hierarchy selectors.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CallGraphWire {
+    /// Follow callers or callees.
+    direction: crate::bridge::CallGraphDirection,
+    /// Maximum hops (default 2, 1 through 8).
+    #[serde(default = "graph_default_depth")]
+    #[schemars(range(min = 1, max = 8))]
+    depth: usize,
+    /// Retained nodes including root (default 30, 1 through 256).
+    #[serde(default = "graph_default_nodes")]
+    #[schemars(range(min = 1, max = 256))]
+    max_nodes: usize,
+    /// Portable target instead of other selectors.
+    symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
+    /// Unchanged returned hierarchy item.
+    item: Option<HierarchyItemInput>,
+    /// Absolute file path.
+    file_path: Option<PathBuf>,
+    /// One-based line.
+    line: Option<u32>,
+    /// One-based UTF-16 column.
+    character: Option<u32>,
+    /// Symbol name instead of a position.
+    symbol_name: Option<String>,
+    /// Optional kind name or numeric string.
+    symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
+    /// Optional immediate container.
+    container: Option<String>,
+}
+
+const fn graph_default_depth() -> usize {
+    2
+}
+const fn graph_default_nodes() -> usize {
+    30
+}
+
+impl TryFrom<CallGraphWire> for CallGraphParams {
+    type Error = String;
+    fn try_from(w: CallGraphWire) -> Result<Self, Self::Error> {
+        if !(1..=8).contains(&w.depth) || !(1..=256).contains(&w.max_nodes) {
+            return Err("depth must be 1..8 and max_nodes must be 1..256".into());
+        }
+        let target = CallHierarchyCallsWire {
+            symbol_target: w.symbol_target,
+            item: w.item,
+            file_path: w.file_path,
+            line: w.line,
+            character: w.character,
+            symbol_name: w.symbol_name,
+            symbol_kind: w.symbol_kind,
+            container: w.container,
+        }
+        .try_into()?;
+        Ok(Self {
+            target,
+            direction: w.direction,
+            depth: w.depth,
+            max_nodes: w.max_nodes,
+        })
+    }
+}
+
 /// Parameters for the `get_incoming_calls` and `get_outgoing_calls` tools.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(try_from = "CallHierarchyCallsWire")]

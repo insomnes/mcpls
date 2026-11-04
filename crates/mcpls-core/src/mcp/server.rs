@@ -3,6 +3,7 @@
 //! This module provides the MCP server that exposes LSP capabilities
 //! as MCP tools using the rmcp SDK.
 
+mod call_graph;
 mod diagnostics_batch;
 mod diagnostics_delta;
 mod dispatch;
@@ -985,6 +986,7 @@ impl McplsServer {
         diagnostics_batch::shape_schema(&mut router);
         diagnostics_delta::shape_schema(&mut router);
         symbol_context::shape_schema(&mut router);
+        call_graph::shape_schema(&mut router);
         // Navigation wires are shared; only the supported consumers advertise references.
         for route in router.map.values_mut() {
             let tool = &mut route.attr;
@@ -1005,6 +1007,7 @@ impl McplsServer {
                     | "get_symbol_context"
                     | "get_incoming_calls"
                     | "get_outgoing_calls"
+                    | "get_call_graph"
             ) {
                 let schema = Arc::make_mut(&mut tool.input_schema);
                 if let Some(properties) = schema
@@ -1597,6 +1600,75 @@ impl McplsServer {
                 )
                 .await,
         )
+    }
+
+    /// Traverse a bounded caller or callee graph.
+    #[tool(
+        description = "Bounded caller or callee graph. Required direction: incoming or outgoing. Give file_path with line/character or symbol_name, symbol_target, or unchanged item. depth defaults to 2 (1..8); max_nodes defaults to 30 (1..256). Nodes have minimum hop depth and explicit expansion_status; edges always point caller to callee and from_ranges belong to the caller URI. Budgets and uncertainty are explicit; analysis_freshness is unknown and atomic_snapshot is false. Inbound frame parsing and analyzer internal work use existing limits.",
+        title = "Call Graph"
+    )]
+    async fn get_call_graph(
+        &self,
+        Parameters(params): Parameters<super::tools::CallGraphParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        self.get_call_graph_with_origin(
+            params,
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .is_some(),
+        )
+        .await
+    }
+
+    async fn get_call_graph_with_origin(
+        &self,
+        params: super::tools::CallGraphParams,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+        authenticated: bool,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let start = match params.target {
+            CallHierarchyCallsParams::Item { item } => crate::bridge::CallGraphStart::Item(
+                Box::new(parse_hierarchy_item(item)?.with_origin(origin.clone())),
+            ),
+            CallHierarchyCallsParams::Target(target) => {
+                if !target.file_path.is_absolute() {
+                    return Err(McpError::invalid_params("file_path must be absolute", None));
+                }
+                let (path, target) = parse_target(target.file_path, target.target)?;
+                crate::bridge::CallGraphStart::Target(path, target)
+            }
+        };
+        let mut result = self
+            .context
+            .translator
+            .handle_call_graph(
+                start,
+                crate::bridge::CallGraphOptions {
+                    direction: params.direction,
+                    depth: params.depth,
+                    max_nodes: params.max_nodes,
+                    authenticated,
+                },
+                origin.clone(),
+            )
+            .await
+            .map_err(|error| self.render_error(error))?;
+        // Hierarchy identifiers and opaque data follow the existing payload
+        // policy. Redaction detection never rewrites reusable provider fields.
+        self.context
+            .translator
+            .server_text_redactions()
+            .note_payload_json(&result);
+        if !authenticated {
+            crate::bridge::call_graph::enforce_final_bytes(&mut result);
+        }
+        Ok(Json(result))
     }
 
     /// Get incoming calls (callers).
@@ -6265,6 +6337,7 @@ sleep 0.3
             ("get_code_actions", true, false, true),
             ("get_incoming_calls", true, false, true),
             ("get_outgoing_calls", true, false, true),
+            ("get_call_graph", true, false, true),
             ("prepare_type_hierarchy", true, false, true),
             ("get_supertypes", true, false, true),
             ("get_subtypes", true, false, true),
@@ -6960,6 +7033,81 @@ sleep 0.3
         }
     }
 
+    /// Graph traversal retains directed call sites, deduplicates recursion,
+    /// and rejects expansion when the root itself fills the node budget.
+    #[tokio::test]
+    async fn test_call_graph_over_mcp() {
+        for direction in ["incoming", "outgoing"] {
+            for maximum in [1, 30] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let field = if direction == "incoming" {
+                    "from"
+                } else {
+                    "to"
+                };
+                let calls = serde_json::json!([{field:item,"fromRanges":[{"start":{"line":0,"character":3},"end":{"line":0,"character":4}}]}]);
+                let (result,requests)=hierarchy_wire_call(fixture,"get_call_graph",|file|serde_json::json!({"file_path":file,"line":1,"character":4,"direction":direction,"max_nodes":maximum}),serde_json::json!([item]),calls,false).await;
+                assert_eq!(result["status"], "ok", "{result}");
+                assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+                assert_eq!(result["usage"]["output_bytes"], result.to_string().len());
+                let walks = requests
+                    .iter()
+                    .filter(|r| {
+                        r["method"]
+                            .as_str()
+                            .is_some_and(|m| m.starts_with("callHierarchy/"))
+                    })
+                    .count();
+                if maximum == 1 {
+                    assert_eq!(walks, 0);
+                    assert_eq!(result["edges"], serde_json::json!([]));
+                    assert_eq!(result["nodes"][0]["expansion_status"], "unexpanded_budget");
+                } else {
+                    assert_eq!(walks, 1);
+                    assert_eq!(result["edges"][0]["caller"], "n0");
+                    assert_eq!(result["edges"][0]["callee"], "n0");
+                    assert_eq!(result["nodes"][0]["expansion_status"], "expanded");
+                    assert_eq!(result["usage"]["ranges_examined"], 1);
+                }
+            }
+        }
+    }
+
+    /// A mixed preparation list uses one raw coordinate convention and does
+    /// not turn an excluded candidate into an authenticated continuation.
+    #[tokio::test]
+    async fn test_call_graph_raw_preparation_over_mcp() {
+        let fixture = hierarchy_wire_fixture();
+        let item = hierarchy_lsp_item(&fixture.file);
+        let mut excluded = item.clone();
+        excluded["uri"] = serde_json::json!("untitled:excluded");
+        let (result,requests)=hierarchy_wire_call(fixture,"get_call_graph",|file|serde_json::json!({"file_path":file,"line":1,"character":4,"direction":"outgoing"}),serde_json::json!([item,excluded]),serde_json::json!([]),false).await;
+        assert_eq!(result["status"], "preparation_incomplete");
+        assert_eq!(result["positions_encoding"], "utf-16");
+        assert_eq!(result["positions_base"], 0);
+        assert_eq!(result["nodes"], serde_json::json!([]));
+        assert_eq!(result["edges"], serde_json::json!([]));
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        for candidate in items {
+            assert_eq!(candidate["range"], item["range"]);
+            assert_eq!(candidate["selectionRange"], item["selectionRange"]);
+            assert_eq!(candidate["data"], item["data"]);
+            assert!(candidate.get("dispatcher_context").is_none());
+        }
+        assert!(requests.iter().all(|r| {
+            !r["method"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("callHierarchy/"))
+        }));
+        assert!(
+            requests
+                .iter()
+                .all(|r| r["params"]["textDocument"]["uri"] != "untitled:excluded")
+        );
+    }
+
     /// Both direct addressing forms return real relationships and forward opaque
     /// JSON unchanged. Legacy reuse retains the old result shape.
     #[tokio::test]
@@ -7110,9 +7258,9 @@ sleep 0.3
                 assert_eq!(
                     tools.len(),
                     if profile == ToolProfile::Agent {
-                        30
+                        31
                     } else {
-                        33
+                        34
                     }
                 );
                 let supported = tools_call_over_the_wire(
@@ -7184,7 +7332,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 30);
+            assert_eq!(tools.len(), 31);
             assert!(
                 !tools
                     .iter()
@@ -7198,7 +7346,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 30);
+            assert_eq!(tools.len(), 31);
             assert!(
                 !tools
                     .iter()
@@ -8681,8 +8829,15 @@ sleep 0.3
         let mut fake_servers = Vec::new();
         for (id, _, caps) in servers {
             let (client, fake) = fake_lsp_client();
-            translator.register_client(ServerId::new(id).unwrap(), client);
-            translator.register_server(ServerId::new(id).unwrap(), LspServer::new_for_test(caps));
+            translator.register_client(ServerId::new(id).unwrap(), client.clone());
+            translator.register_server(
+                ServerId::new(id).unwrap(),
+                LspServer::new_for_test_with_client(
+                    caps,
+                    lsp_types::PositionEncodingKind::UTF16,
+                    client,
+                ),
+            );
             fake_servers.push(fake);
         }
         let server = McplsServer::new(
@@ -8862,6 +9017,19 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::GetIncomingCalls => server
                 .get_incoming_calls_with_origin(Parameters(item()), None)
+                .await
+                .map(|_| ()),
+            McpTool::GetCallGraph => server
+                .get_call_graph_with_origin(
+                    super::super::tools::CallGraphParams {
+                        target: item(),
+                        direction: crate::bridge::CallGraphDirection::Outgoing,
+                        depth: 2,
+                        max_nodes: 30,
+                    },
+                    None,
+                    false,
+                )
                 .await
                 .map(|_| ()),
             McpTool::GetOutgoingCalls => server
@@ -9077,7 +9245,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 30);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 31);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");
