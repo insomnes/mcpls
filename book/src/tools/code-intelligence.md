@@ -333,7 +333,7 @@ Continue with [Diagnostics and Formatting](diagnostics.md) to see what the compi
 
 Returns a compact, flat page of navigation entries. Use `get_document_symbols` when you need complete ranges and children.
 
-Arguments: required absolute `file_path`; optional `query`, `kind_filter`, `offset` and `limit`.
+Arguments: required absolute `file_path`; optional `query`, `kind_filter`, `offset`, `limit`, and `runtime_generation`.
 `query` matches a case-sensitive substring of each symbol's own name, up to 1,000 bytes.
 `kind_filter` accepts the existing symbol kind names or numeric LSP kinds.
 `offset` defaults to 0 after filtering. `limit` defaults to 100 and accepts 1 through 200.
@@ -380,7 +380,11 @@ Their `fidelity` is `flat`, and their range-start navigation positions are appro
 Duplicate names remain separate entries. Positions use 1-based lines and UTF-16 characters.
 When `positions_degraded` is present, follow the [position warning](overview.md#reading-results).
 
-Use `next_offset` for the next page when `truncated` is true. Restart pagination after document changes.
+Use `next_offset` for the next page when `truncated` is true and further matches
+are needed. Preserve the first page's returned `runtime_generation` and include
+it when `offset` is greater than zero. A missing or mismatching generation can
+return `stale_continuation`. Restart from offset zero after document/runtime
+changes or `stale_continuation`; retain the new first page's generation.
 The limit bounds returned entries; it does not bound the language server's original response.
 This tool returns navigation information and does not apply edits.
 

@@ -113,7 +113,9 @@ These are `get_document_outline` arguments. Match the provider's kinds:
 `function` is 12 and `method` is 6. One filter cannot select both kinds; omit it
 or issue separate requests when both matter. `query` is a case-sensitive
 substring of the symbol's own name, never its ancestors. Follow `next_offset`
-while `truncated` only if further matches are needed; restart after edits.
+while `truncated` only if further matches are needed. Preserve the first page's
+returned `runtime_generation` and include it when `offset` is greater than zero.
+Restart from offset zero after document/runtime changes or `stale_continuation`.
 Use `get_document_symbols` for full ranges/hierarchy. Empty filtered output does
 not prove absence. Confirm flat or degraded coordinates against current source.
 
