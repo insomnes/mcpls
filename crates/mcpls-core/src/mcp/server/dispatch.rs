@@ -208,7 +208,10 @@ impl McplsServer {
         }
         let name = self.unprefixed(&request.name).to_string();
         // Feedback is process-local: do not select or acquire a workspace runtime.
-        if name == "feedback_add" {
+        if matches!(
+            name.as_str(),
+            "feedback_add" | "feedback_list" | "feedback_resolve" | "feedback_reopen"
+        ) {
             return self
                 .tool_router
                 .call(ToolCallContext::new(self, request, context))

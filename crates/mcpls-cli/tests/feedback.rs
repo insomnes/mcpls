@@ -235,3 +235,114 @@ fn feedback_storage_is_private_and_refuses_unsafe_destinations() {
     );
     assert_eq!(std::fs::read_to_string(target).unwrap(), "untouched");
 }
+
+fn content(response: &Value) -> &Value {
+    assert!(response.get("error").is_none(), "{response}");
+    &response["result"]["structuredContent"]
+}
+
+#[test]
+fn feedback_lifecycle_preserves_legacy_identity_and_original_bytes() {
+    let root = TempDir::new().unwrap();
+    let config = "[workspace]\nroots = []\n";
+    let mut client = Client::new(root.path(), config);
+    let empty = client.feedback("feedback_list", &json!({}));
+    assert_eq!(content(&empty)["total_count"], 0);
+    assert!(!root.path().join("state/mcpls").exists());
+    success(&client.feedback(
+        "feedback_add",
+        &json!({"operation":"legacy", "observation":"same"}),
+    ));
+    let path = root.path().join("state/mcpls/feedback.jsonl");
+    let original = std::fs::read(&path).unwrap();
+    std::fs::write(&path, original.repeat(2)).unwrap();
+    let before = client.feedback("feedback_list", &json!({"state":"all"}));
+    let ids: Vec<_> = content(&before)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["feedback_id"].clone())
+        .collect();
+    assert_ne!(ids[0], ids[1]);
+    let bytes = std::fs::read(&path).unwrap();
+    let resolved = client.feedback("feedback_resolve", &json!({"feedback_id":ids[0], "resolution":" λ fixed ", "task_id":" nonexistent task ", "note_id":"note:missing"}));
+    assert_eq!(content(&resolved)["resolution"]["text"], " λ fixed ");
+    assert_eq!(
+        content(&resolved)["resolution"]["task_id"],
+        " nonexistent task "
+    );
+    let conflict = client.feedback(
+        "feedback_resolve",
+        &json!({"feedback_id":ids[0], "resolution":"again"}),
+    );
+    assert_eq!(conflict["error"]["data"]["code"], "feedback_conflict");
+    assert_eq!(
+        content(&client.feedback("feedback_list", &json!({})))["total_count"],
+        1
+    );
+    drop(client);
+    let mut client = Client::new(root.path(), config);
+    let after = client.feedback("feedback_list", &json!({"state":"resolved"}));
+    assert_eq!(content(&after)["items"][0]["feedback_id"], ids[0]);
+    let reopened = client.feedback("feedback_reopen", &json!({"feedback_id":ids[0]}));
+    assert_eq!(content(&reopened)["resolution"], Value::Null);
+    assert_eq!(
+        content(&client.feedback("feedback_list", &json!({})))["total_count"],
+        2
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let appended = client.feedback(
+        "feedback_add",
+        &json!({"operation":"new", "observation":"new"}),
+    );
+    success(&appended);
+    let all = client.feedback("feedback_list", &json!({"state":"all", "offset":1}));
+    assert_eq!(content(&all)["items"][0]["feedback_id"], ids[0]);
+    assert_eq!(content(&all)["items"][1]["feedback_id"], ids[1]);
+}
+
+#[test]
+fn feedback_rejected_targets_and_malformed_stores_have_no_effects() {
+    let root = TempDir::new().unwrap();
+    let mut client = Client::new(root.path(), "[workspace]\nroots = []\n");
+    let missing = client.feedback("feedback_reopen", &json!({"feedback_id":"missing"}));
+    assert_eq!(missing["error"]["data"]["code"], "feedback_not_found");
+    assert!(!root.path().join("state/mcpls").exists());
+    success(&client.feedback(
+        "feedback_add",
+        &json!({"operation":"one", "observation":"test"}),
+    ));
+    let listed = client.feedback("feedback_list", &json!({}));
+    let id = &content(&listed)["items"][0]["feedback_id"];
+    for args in [
+        json!({"feedback_id":id,"resolution":" "}),
+        json!({"feedback_id":id,"resolution":"fixed","task_id":null}),
+        json!({"feedback_id":id,"resolution":"fixed","project":"/tmp"}),
+    ] {
+        let response = client.feedback("feedback_resolve", &args);
+        assert!(
+            response.get("error").is_some() || response["result"]["isError"] == true,
+            "{response}"
+        );
+    }
+    assert!(
+        !root
+            .path()
+            .join("state/mcpls/feedback-state.jsonl")
+            .exists()
+    );
+    let path = root.path().join("state/mcpls/feedback.jsonl");
+    std::fs::write(&path, b"{\"operation\":").unwrap();
+    for (name, args) in [
+        ("feedback_list", json!({})),
+        (
+            "feedback_resolve",
+            json!({"feedback_id":id,"resolution":"fixed"}),
+        ),
+        ("feedback_reopen", json!({"feedback_id":id})),
+    ] {
+        let result = client.feedback(name, &args);
+        assert_eq!(result["error"]["data"]["code"], "feedback_storage_failed");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"{\"operation\":");
+}

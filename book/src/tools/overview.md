@@ -14,16 +14,16 @@ In this chapter you learn the conventions every mcpls tool shares: how code is a
 | [Diagnostics and formatting](diagnostics.md) | `get_diagnostics`, `diagnostics_delta`, `get_cached_diagnostics`, `format_document`, `format_range`, `get_folding_ranges`, `get_selection_ranges` |
 | [Refactor](refactoring.md) | `rename_symbol`, `get_code_actions` |
 | [Hierarchies and navigation](hierarchies.md) | `go_to_implementation`, `go_to_type_definition`, `go_to_declaration`, `get_incoming_calls`, `get_outgoing_calls`, `get_call_graph`, `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
-| [Report feedback](#local-feedback) | `feedback_add` |
+| [Manage feedback](#local-feedback) | `feedback_add`, `feedback_list`, `feedback_resolve`, `feedback_reopen` |
 | [Monitor and control servers](server-control.md) | `get_server_logs`, `get_server_messages`, `get_tool_support`, `restart_server` |
 
-`feedback_add` appends explicit feedback to local storage. `restart_server` stops and starts language server processes. Other tools are read-only. Tools that produce edits (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) return them without applying them.
+`feedback_add` appends explicit feedback to local storage. `feedback_resolve` and `feedback_reopen` update its local resolution state. `restart_server` stops and starts language server processes. Other tools are read-only. Tools that produce edits (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) return them without applying them.
 
 If you set `mcp.tool_prefix`, every name above gains the prefix, as in `{tool_prefix}_get_hover`.
 
 The table includes full-profile-only tools: `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`.
 
-The default `[mcp].tool_profile = "agent"` exposes 31 tools. Set `tool_profile = "full"` to restore all 34 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 34 tools. Set `tool_profile = "full"` to restore all 37 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 ## Addressing code
 
@@ -162,4 +162,14 @@ Inspect records with:
 jq . "${XDG_STATE_HOME:-$HOME/.local/state}/mcpls/feedback.jsonl"
 ```
 
-Concurrent processes use an exclusive file lock for each append. Appends are not synced to disk. An interrupted write can leave a partial final record; an ambiguous failure can produce duplicates on retry. Storage errors are explicit MCP errors. There is no rotation, deduplication, or automatic task creation.
+Use `feedback_list` to find reports that need investigation. Its default `state` is `open`; choose `resolved` or `all` explicitly to include addressed reports. Results follow newest original append order, regardless of timestamps or resolution changes. `limit` defaults to 20 (1 through 100), and `offset` defaults to zero. Filtering occurs before pagination. Counts describe the filtered reports; separate pages are not a shared snapshot. Reading an absent store creates nothing.
+
+Copy the opaque, case-sensitive `feedback_id` from a list item. Existing JSONL reports need no migration and initially appear open. Identical legacy lines are separate reports with distinct stable IDs. IDs survive supported additions, transitions, and process restarts; manual file rewriting, replacement, reordering, truncation, or rotation is unsupported.
+
+Call `feedback_resolve` with `feedback_id` and a nonblank `resolution` (at most 2,048 UTF-8 bytes). Optional `task_id` and `note_id` are nonblank literal references (at most 128 bytes each). Either, both, or neither can be supplied. Text is preserved exactly. References cause no lookup or journal change and confer no completion, acceptance, or verification authority. The returned resolution includes its UTC millisecond timestamp and null references when omitted. Resolved reports disappear from the default open list.
+
+Call `feedback_reopen` with the exact `feedback_id` to return a resolved report to open and clear its active resolution and references. IDs must be nonblank and at most 256 bytes. Optional arguments must be omitted rather than null; unknown fields, including workspace/project selectors, are rejected. Resolving a resolved report or reopening an open report returns `feedback_conflict`, including an exact repeated request. Unknown IDs return `feedback_not_found`. After an ambiguous failure, list current state before retrying.
+
+Lifecycle changes append to `feedback-state.jsonl` in the same private directory and never alter original `feedback.jsonl` bytes. The sidecar uses the same file privacy checks and mode `0600`. Malformed or truncated reports/state, unsafe storage, and unreadable files cause explicit `feedback_storage_failed` errors; no records are silently dropped or automatically repaired.
+
+Concurrent processes use the original report file's exclusive lock for additions, reads, and transitions. Successful concurrent operations persist without overwriting one another. Writes are not synced to disk. An interrupted write can leave a partial final record; an ambiguous add failure can produce duplicates on retry. There is no crash recovery, exactly-once guarantee, rotation, deduplication, or automatic task creation.

@@ -9,14 +9,14 @@
 
 **Give your AI coding agent a compiler's understanding of your code.**
 
-mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 31 default MCP tools (34 with the full profile), so an AI client reasons about code the way an IDE does.
+mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 34 default MCP tools (37 with the full profile), so an AI client reasons about code the way an IDE does.
 
 ```mermaid
 flowchart LR
     C["AI client"] <-->|MCP| M["mcpls"] <-->|LSP| S["rust-analyzer / pyright / gopls / ..."]
 ```
 
-The default `[mcp].tool_profile = "agent"` exposes 31 tools. Set `tool_profile = "full"` to restore all 34 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 34 tools. Set `tool_profile = "full"` to restore all 37 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 Tool schemas retain validation constraints and expose complete finite union branches to clients. Numeric symbol-kind strings (for example, `"12"`) remain string inputs. Client declarations can limit recursive expansion: Codex 0.166.0 displays document-symbol fields through the first child, then uses an unknown deeper tail. The MCP schema and runtime still support recursive symbols. Arbitrary JSON fields remain unconstrained.
 

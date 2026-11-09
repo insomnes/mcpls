@@ -787,6 +787,289 @@
     }
   },
   {
+    "name": "feedback_list",
+    "title": "List Feedback",
+    "description": "List private local feedback, newest original append first. Defaults to open reports; state may be open/resolved/all. Copy opaque feedback_id values exactly for resolve/reopen. limit defaults to20 (1..100); offset defaults to0. No workspace or language server is needed.",
+    "inputSchema": {
+      "$defs": {
+        "StateFilter": {
+          "enum": [
+            "open",
+            "resolved",
+            "all"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": null,
+          "description": "Maximum returned reports, 1 through 100 (default 20).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "default": null,
+          "description": "Number of matching reports to skip (default 0).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/StateFilter",
+          "description": "Filter open (default), resolved, or all reports."
+        }
+      },
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "items": {
+          "items": true,
+          "type": "array"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "returned_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "items",
+        "total_count",
+        "returned_count",
+        "limit",
+        "offset",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "feedback_reopen",
+    "title": "Reopen Feedback",
+    "description": "Reopen one resolved feedback report using an exact feedback_id from feedback_list. Clear its active resolution and task/note references. Already open reports conflict. After an ambiguous failure, list current state before retrying.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "feedback_id": {
+          "description": "Exact opaque ID copied from feedback_list; maximum 256 UTF-8 bytes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "feedback_id"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "FeedbackState": {
+          "enum": [
+            "open",
+            "resolved"
+          ],
+          "type": "string"
+        },
+        "Resolution": {
+          "additionalProperties": false,
+          "properties": {
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "resolved_at",
+            "task_id",
+            "note_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "feedback_id": {
+          "type": "string"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/FeedbackState"
+        }
+      },
+      "required": [
+        "feedback_id",
+        "state",
+        "resolution"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    }
+  },
+  {
+    "name": "feedback_resolve",
+    "title": "Resolve Feedback",
+    "description": "Resolve one open feedback report using an exact feedback_id from feedback_list. Preserve explicit resolution and optional literal task_id/note_id; references cause no lookup or task/note changes and confer no authority. Already resolved reports conflict. After an ambiguous failure, list current state before retrying.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "feedback_id": {
+          "description": "Exact opaque ID copied from feedback_list; maximum 256 UTF-8 bytes.",
+          "type": "string"
+        },
+        "note_id": {
+          "default": null,
+          "description": "Literal note reference; no lookup or authority. Maximum 128 UTF-8 bytes.",
+          "type": "string"
+        },
+        "resolution": {
+          "description": "Resolution text, preserved exactly; maximum 2048 UTF-8 bytes.",
+          "type": "string"
+        },
+        "task_id": {
+          "default": null,
+          "description": "Literal task reference; no lookup or authority. Maximum 128 UTF-8 bytes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "feedback_id",
+        "resolution"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "FeedbackState": {
+          "enum": [
+            "open",
+            "resolved"
+          ],
+          "type": "string"
+        },
+        "Resolution": {
+          "additionalProperties": false,
+          "properties": {
+            "note_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "task_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "resolved_at",
+            "task_id",
+            "note_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "feedback_id": {
+          "type": "string"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/FeedbackState"
+        }
+      },
+      "required": [
+        "feedback_id",
+        "state",
+        "resolution"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    }
+  },
+  {
     "name": "format_document",
     "title": "Format Document",
     "description": "Propose whole-file formatting as one changes document, including empty successful edits. positions_degraded:response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
