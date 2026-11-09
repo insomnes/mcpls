@@ -761,7 +761,7 @@ impl McplsServer {
             // fields while avoiding repeated routing prose in each tool.
             if name == "get_tool_support" {
                 route.attr.description = Some(Cow::Borrowed(
-                    "No selector returns configured support without startup. file_path or workspace_path selects runtime support; both must select the same workspace. Advertised support does not guarantee request success.",
+                    "Tool support by language. No selector: configured support without startup. file_path or workspace_path: runtime support; both must select the same workspace. Coverage: all, some, none, unknown (initializing), always (local). Advertised support does not guarantee request success.",
                 ));
             }
             if name == "get_workspace_status" {

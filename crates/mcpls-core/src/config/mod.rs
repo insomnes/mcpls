@@ -193,10 +193,10 @@ pub struct McpConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolProfile {
-    /// Common agent operations (28 tools).
+    /// Common agent operations (31 static tools).
     #[default]
     Agent,
-    /// All supported operations (31 tools).
+    /// All supported operations (34 static tools).
     Full,
 }
 

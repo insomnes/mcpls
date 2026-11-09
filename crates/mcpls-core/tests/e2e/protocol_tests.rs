@@ -169,7 +169,11 @@ fn test_e2e_get_tool_support_reports_every_tool() -> Result<()> {
     let tools = report["tools"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("tools should be an array: {report}"))?;
-    assert_eq!(tools.len(), 30, "{report}");
+    assert_eq!(tools.len(), 31, "{report}");
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "get_call_graph"),
+        "{report}"
+    );
     let logs = tools
         .iter()
         .find(|tool| tool["name"] == "get_server_logs")
@@ -183,7 +187,7 @@ fn test_e2e_get_tool_support_reports_every_tool() -> Result<()> {
 #[test]
 #[ignore = "Requires mcpls binary built"]
 fn test_e2e_tool_profiles() -> Result<()> {
-    for (profile, count) in [("", 30), ("agent", 30), ("full", 33)] {
+    for (profile, count) in [("", 31), ("agent", 31), ("full", 34)] {
         let temp = TempDir::new()?;
         let config = temp.path().join("profile.toml");
         let mcp = if profile.is_empty() {
@@ -207,7 +211,18 @@ fn test_e2e_tool_profiles() -> Result<()> {
         let support = client.call_tool(&name("get_tool_support"), &json!({}))?;
         let report: serde_json::Value =
             serde_json::from_str(support["result"]["content"][0]["text"].as_str().unwrap())?;
-        assert_eq!(report["tools"].as_array().unwrap().len(), count);
+        let support_tools = report["tools"].as_array().unwrap();
+        assert_eq!(support_tools.len(), count);
+        let listed_names: std::collections::BTreeSet<_> = tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        let support_names: std::collections::BTreeSet<_> = support_tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed_names, support_names);
+        assert!(listed_names.contains(name("get_call_graph").as_str()));
         for excluded in [
             "get_folding_ranges",
             "get_selection_ranges",
@@ -246,15 +261,17 @@ fn test_e2e_list_tools() -> Result<()> {
         .as_array()
         .unwrap_or_else(|| panic!("tools should be an array"));
 
-    assert_eq!(tools.len(), 30, "Should have exactly 30 default tools");
+    assert_eq!(tools.len(), 31, "Should have exactly 31 default tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
     for expected in &[
+        "get_symbol_context",
         "get_hover",
         "get_definition",
         "get_references",
         "get_diagnostics",
+        "diagnostics_delta",
         "rename_symbol",
         "get_completions",
         "get_document_symbols",
@@ -264,6 +281,7 @@ fn test_e2e_list_tools() -> Result<()> {
         "get_code_actions",
         "get_incoming_calls",
         "get_outgoing_calls",
+        "get_call_graph",
         "get_supertypes",
         "get_subtypes",
         "get_document_highlights",
