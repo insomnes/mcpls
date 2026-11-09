@@ -2846,3 +2846,66 @@ async fn watchman_startup_diagnostics_are_retained_and_sanitized() {
         task.await.unwrap();
     }
 }
+
+/// Lost setup writes must retain logfile ENOSPC, including after valid replies.
+#[tokio::test]
+async fn watchman_setup_write_failures_classify_bounded_logfile() {
+    for fail_after in ["watch", "clock", "subscribe"] {
+        for (message, code) in [
+            (
+                "inotify_add_watch: No space left on device (ENOSPC)",
+                "watchman_resource_exhausted",
+            ),
+            ("generic setup failure", "watchman_unavailable"),
+        ] {
+            let fixture = Fixture::new(4);
+            let backend = fixture.profile.parent().unwrap().join("backend.py");
+            std::fs::copy(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/watchman_setup_failure.py"),
+                &backend,
+            )
+            .unwrap();
+            std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(
+                backend.with_extension("json"),
+                json!({"fail_after":fail_after,"message":message}).to_string(),
+            )
+            .unwrap();
+            let profile = std::fs::read_to_string(&fixture.profile).unwrap();
+            std::fs::write(&fixture.profile, format!("{profile}\n[workspace.file_watching]\nbackend='watchman'\ncommand={backend:?}\n")).unwrap();
+            let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+            let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+            let failure = call(&client, "get_hover", hover(&fixture.main))
+                .await
+                .unwrap_err();
+            let rmcp::ServiceError::McpError(failure) = failure else {
+                panic!("expected MCP failure")
+            };
+            let data = failure.data.unwrap();
+            assert_eq!(data["code"], "workspace_unavailable");
+            assert_eq!(data["retryable"], true);
+            assert_eq!(
+                data["diagnostic"]["code"], code,
+                "lost write after {fail_after}"
+            );
+            let status = call(
+                &client,
+                "get_workspace_status",
+                json!({"workspace_path":fixture.main}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status["workspaces"][0]["health"], "failed");
+            assert_eq!(status["workspaces"][0]["diagnostic"], data["diagnostic"]);
+            assert_eq!(
+                status["workspaces"][0]["servers"][0]["state"],
+                "not_started"
+            );
+            assert_eq!(fixture.events(), [] as [Value; 0]);
+            dispatcher.shutdown().await;
+            client.cancel().await.unwrap();
+            task.await.unwrap();
+        }
+    }
+}

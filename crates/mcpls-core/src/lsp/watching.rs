@@ -279,7 +279,7 @@ impl Backend {
                 write
                     .write_all(format!("{command}\n").as_bytes())
                     .await
-                    .map_err(unavailable)?;
+                    .map_err(|_| startup_exit(&logfile))?;
                 let response = setup_response(&mut lines, &logfile).await?;
                 if command.get(0) == Some(&json!("clock")) {
                     let clock = response
@@ -289,7 +289,7 @@ impl Backend {
                     write
                         .write_all(format!("{subscribe}\n").as_bytes())
                         .await
-                        .map_err(unavailable)?;
+                        .map_err(|_| startup_exit(&logfile))?;
                     let response = setup_response(&mut lines, &logfile).await?;
                     if response.get("subscribe").is_none() || response.get("error").is_some() {
                         return Err(unavailable(response));
@@ -307,7 +307,7 @@ impl Backend {
         write
             .write_all(format!("{barrier}\n").as_bytes())
             .await
-            .map_err(unavailable)?;
+            .map_err(|_| startup_exit(&logfile))?;
         if setup_response(&mut lines, &logfile)
             .await?
             .get("clock")
