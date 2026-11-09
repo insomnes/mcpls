@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1+insomnes.1] - 2026-11-09
+
+- Integrate the complete upstream v0.9.1 release while preserving fork APIs, profiles, shared HTTP workspaces, Watchman, bounded output, call graphs, and portable targets. See [FORKCHANGES.md](FORKCHANGES.md) for provenance and deliberate differences.
+- Keep `LspServerConfig.initialization_options: Option<serde_json::Value>` compatible through configuration adapters. Nested TOML datetimes are rejected; Debug output redacts settings and options without changing transmission.
+- Rank every completion response before count and byte limits. Report lost diagnostic evidence conservatively, including retained older pull results.
+
+
+### Changed
+
+- Breaking change: `get_symbol_context` emits reusable references only inside `symbol_target`; top-level `symbol_ref` and `symbol_ref_unavailable` are removed. Discovery references now use compact version 2 tuples. Consumers retain version 1 compatibility and legacy request forms, with unchanged source, runtime, and file validation.
+
+- Preserve finite input and result fields in client-generated tool declarations, including diagnostic selectors and batch outcomes, hierarchy preparation fields, route languages, rename metadata, restart server IDs, and numeric symbol-kind strings. Runtime validation and recursive document-symbol schemas are unchanged.
+
+- Breaking change: `get_completions` now defaults to 20 ranked candidates with documentation disabled. `limit` accepts 1 through 100; `include_documentation: true` opts in. Labels, details, and documentation are clipped to 512, 2048, and 4096 UTF-8 bytes after existing display redaction. The final compact structured JSON is at most 65536 bytes. `omitted_count`, `truncated`, and item `truncated_fields` report local omissions and clipping; clipped labels are partial. `provider_is_incomplete` preserves the provider boolean or null when none was supplied, independently of local truncation. Output bounds do not bound the original LSP response or provider work.
+
+- The default MCP catalog now exposes 31 tools. Set `[mcp].tool_profile = "full"` for all 34, including folding ranges, selection ranges, and standalone type preparation. Discovery, dispatch and support reports share the selected static catalog.
+- `get_supertypes` and `get_subtypes` accept direct position or qualified symbol-name targets. Direct responses classify preparation outcomes before one-level traversal; unchanged item requests retain their legacy response shape.
+- Tool support checks are optional diagnostics. Completions provide API-discovery metadata, and command-only code actions require execution outside this MCP interface.
+
+- Edit proposals now show bounded unified diffs by default for rename, formatting, and code actions. Use `full: true` for exact normalized raw edits.
+- Edit documents report observed source hashes and origins, supplied version fields, and explicitly unknown analysis freshness. Preview limits and redaction affect presentation without dropping retained edits.
+
+- `get_references` adds opt-in `mode:"files"` for first-seen exact-URI groups with duplicate counts, a first example, and reusable lexical `file_path`. The default locations mode is unchanged. File summaries report processed-prefix completeness and omitted groups under fixed scan limits (100000 locations, 8 MiB URI bytes, 10000 matching URIs) and a 64 KiB compact JSON budget including enrichment. Counts do not guarantee workspace coverage. Use a selected file path as `path_filter` for location details.
+- Breaking change: `get_references` now defaults to 10 ordered matches with source excerpts disabled. Set `include_source:true` to request bounded excerpts; `limit:100,include_source:true` requests the previous behavior. Use `limit` (1 through 10000), absolute lexical `path_filter`, and `include_source` to control selection and context. `matched_count` and `truncated` describe the server response; the prefix is not a representative usage audit or proof of workspace coverage. Continuation is deferred; increase the limit or narrow the filter. Smaller output does not guarantee less LSP backend work. Source outcomes identify tracked or contained disk text, shortened context, and unavailable reasons under fixed byte, file, and time limits.
+
+- Breaking change: remove the standalone MCP `prepare_rename` tool. Call `rename_symbol` once to resolve, prepare when advertised, and propose edits. Results now distinguish `proposed` (with queried `position`, `preparation`, and `changes`) from `not_renameable` (without edits). Inspect complete proposals before applying them through the client; mcpls does not modify source files.
+
+### Added
+
+- Discovery results can include a copyable `symbol_target` for symbol context, hover, definition, references, and direct incoming/outgoing calls. Set `include_targets: true` on workspace search, outline, or definition; context emits targets with its existing source-bound references. Fixed acquisition limits and explicit unavailable reasons preserve ordinary discovery results. Legacy selectors and hierarchy continuation remain supported.
+
+- `diagnostics_delta` captures bounded caller-held baselines and compares exact diagnostic occurrences. Complete comparable reports qualify removed baseline indices; incomplete evidence reports uncertain removals. Cached mode does not start analysis. Baselines invalidate across runtime or diagnostics-server replacement, and source freshness remains unknown. The agent and full catalogs expose 31 and 34 tools.
+
+- Opt-in Linux Watchman file watching supports standard LSP dynamic registrations, shared workspace coverage, operator-managed native exclusions, and explicit backend failure reporting. Watching remains disabled by default.
+
+- Optional `dispatcher.auto_workspaces` parent policies create shared temporary language-server contexts from absolute file requests. Ancestor markers select roots, markerless files can start their configured server, and automatic status snapshots report `temporary` without retaining unused contexts. Explicit approvals retain priority and existing profile semantics.
+
+- Opt-in shared worktree service: approve Git repositories or non-Git roots, select workspaces by absolute paths, and run isolated lazy language-server runtimes behind one endpoint. Service profiles reload per workspace; lifecycle limits, generation-bound continuations, workspace status, and a repeatable systemd installation/rollback recipe are available. Static HTTP and stdio remain supported.
+
+- **Breaking:** remove standalone MCP `prepare_call_hierarchy`. Replace prepare-then-traverse requests with `get_incoming_calls(target)` or `get_outgoing_calls(target)`. Preparation remains internal to the LSP bridge; use returned items for selection and further traversal.
+- `get_incoming_calls` and `get_outgoing_calls` accept direct position or symbol-name targets. Direct results distinguish successful traversal, no callable item, required selection and degraded preparation; item traversal follows selected candidates and returned call items.
+- `get_document_outline` returns filtered, paginated navigation entries with ancestor names, numeric kinds, positions and ancestry fidelity. Existing full document symbols remain available.
+
+### Fixed
+
+- Untrusted automatic contexts apply executable, helper, and service-profile restrictions across every configured automatic parent while keeping analysis scoped to the selected project.
+
+- Accept diagnostic full reports with an empty `kind` discriminator, including stock gopls v0.24.0 responses. Required diagnostic items remain validated.
+
 ## [0.9.1] - 2026-11-01
 
 ### Added

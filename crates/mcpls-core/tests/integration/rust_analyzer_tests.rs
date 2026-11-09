@@ -807,6 +807,8 @@ async fn test_completions_basic() {
             client_path(functions_file.to_string_lossy().into_owned()),
             Position::from_client(23, 11).unwrap(),
             None,
+            20,
+            false,
         ),
     )
     .await;

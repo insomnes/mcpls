@@ -806,11 +806,23 @@ impl Translator {
     {
         let item_uri = lsp_types::Uri::from(item.uri());
         let path = self.parse_file_uri(&item_uri).await?;
-        let doc = self
-            .prepare_gated_document_for_path(&path, IndexingGate::Required(R::CAPABILITY))
-            .await?;
-        let ctx = self.encoding_ctx(doc.server_id());
+        let origin = item.origin.clone();
+        let (doc, ctx) = if let Some(origin) = &origin {
+            let doc = self
+                .prepare_origin_document(&path, origin, IndexingGate::Required(R::CAPABILITY))
+                .await?;
+            (doc, origin.encoding.clone())
+        } else {
+            let doc = self
+                .prepare_gated_document_for_path(&path, IndexingGate::Required(R::CAPABILITY))
+                .await?;
+            let ctx = self.encoding_ctx(doc.server_id());
+            (doc, ctx)
+        };
         let lsp_item = hierarchy_item_to_lsp(item, doc.uri().clone(), &ctx).await;
+        if let Some(origin) = &origin {
+            self.require_hierarchy_origin(origin)?;
+        }
         let result = budgeted::<R>(doc.client(), R::Params::from_item(lsp_item)).await?;
         Ok(Positioned { result, ctx, doc })
     }

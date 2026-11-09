@@ -463,6 +463,7 @@ struct CachedEntry {
     /// Position in `owner`'s write order.
     seq: u64,
     origin: Origin,
+    evidence: DiagnosticEvidence,
 }
 
 impl CachedEntry {
@@ -472,6 +473,7 @@ impl CachedEntry {
             uri: self.uri.clone(),
             version: self.origin.version(),
             diagnostics: self.diagnostics.clone(),
+            evidence: self.evidence.clone(),
         }
     }
 
@@ -618,6 +620,7 @@ enum EvictedContent {
 struct EvictionMark {
     owner: ServerId,
     content: EvictedContent,
+    delta_source_loss: bool,
     seq: u64,
 }
 
@@ -639,12 +642,17 @@ struct EvictionMarks {
     order: HashMap<ServerId, BTreeMap<u64, DiagnosticsKey>>,
     next_seq: u64,
     overflowed: HashSet<ServerId>,
+    delta_history_unknown: bool,
 }
 
 impl EvictionMarks {
     /// Marks `file`; returns whether that changed what a read of it says (it
     /// had no mark, or one with other content).
     fn record(&mut self, file: DiagnosticsKey, owner: ServerId, content: EvictedContent) -> bool {
+        let previous_loss = self
+            .by_file
+            .get(&file)
+            .is_some_and(|mark| mark.delta_source_loss);
         let previous = self.by_file.get(&file).map(|previous| previous.content);
         let content = match previous {
             Some(EvictedContent::Lost) => EvictedContent::Lost,
@@ -661,7 +669,9 @@ impl EvictionMarks {
             let Some((_, oldest)) = ordered.pop_first() else {
                 break;
             };
-            self.by_file.remove(&oldest);
+            if let Some(mark) = self.by_file.remove(&oldest) {
+                self.delta_history_unknown |= mark.delta_source_loss;
+            }
             overflow = true;
         }
         if overflow {
@@ -672,6 +682,7 @@ impl EvictionMarks {
             EvictionMark {
                 owner,
                 content,
+                delta_source_loss: previous_loss || content == EvictedContent::Lost,
                 seq,
             },
         );
@@ -743,12 +754,36 @@ pub fn message_as_str(message: &lsp_types::Message) -> &str {
 /// Information about diagnostics for a document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticInfo {
+    /// Retained report continuity and known cache loss; not a source freshness claim.
+    #[serde(skip)]
+    pub(crate) evidence: DiagnosticEvidence,
     /// URI of the document.
     pub uri: Uri,
     /// Document version when diagnostics were received.
     pub version: Option<DocumentVersion>,
     /// List of diagnostics.
     pub diagnostics: Vec<LspDiagnostic>,
+}
+
+/// Internal evidence retained with each bounded report.
+#[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "internal evidence is shared across bridge and MCP modules only"
+)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent observed loss and metadata facts can coexist; they are not exclusive states"
+)]
+pub(crate) struct DiagnosticEvidence {
+    pub(crate) result_id: Option<String>,
+    pub(crate) metadata_omitted: bool,
+    pub(crate) truncated: bool,
+    pub(crate) source_loss: bool,
+    pub(crate) cache_unknown: bool,
+    pub(crate) omitted: Option<usize>,
+    pub(crate) origins: Vec<&'static str>,
+    pub(crate) report_version: Option<DocumentVersion>,
 }
 
 /// How an entry of a [`DiagnosticSources`] snapshot arrived.
@@ -794,6 +829,8 @@ struct SourceEntry {
 pub struct DiagnosticSources {
     requested: Uri,
     entries: Vec<SourceEntry>,
+    source_loss: bool,
+    cache_unknown: bool,
 }
 
 impl DiagnosticSources {
@@ -806,8 +843,10 @@ impl DiagnosticSources {
         diagnostics: BoundedDiagnostics,
     ) -> Self {
         self.entries.retain(|entry| !entry.origin.is_pulled());
+        let evidence = diagnostics.evidence.clone();
         self.entries.push(SourceEntry {
             info: DiagnosticInfo {
+                evidence,
                 uri: file.clone(),
                 version,
                 diagnostics: diagnostics.into_vec(),
@@ -845,10 +884,79 @@ impl DiagnosticSources {
     /// ```
     #[must_use]
     pub fn merge(self) -> Option<DiagnosticInfo> {
-        let Self { requested, entries } = self;
+        self.merge_for_context(false)
+    }
+
+    fn evidence(&self) -> DiagnosticEvidence {
+        let mut evidence = DiagnosticEvidence {
+            source_loss: self.source_loss,
+            cache_unknown: self.cache_unknown,
+            omitted: Some(0),
+            ..Default::default()
+        };
+        let versions: Vec<_> = self
+            .entries
+            .iter()
+            .map(|e| {
+                if e.origin.is_pulled() {
+                    None
+                } else {
+                    e.info.version
+                }
+            })
+            .collect();
+        evidence.report_version = versions
+            .first()
+            .copied()
+            .flatten()
+            .filter(|v| versions.iter().all(|x| *x == Some(*v)));
+        for origin in ["pull", "push"] {
+            if self
+                .entries
+                .iter()
+                .any(|e| e.origin.is_pulled() == (origin == "pull"))
+            {
+                evidence.origins.push(origin);
+            }
+        }
+        for entry in &self.entries {
+            evidence.truncated |= entry.info.evidence.truncated;
+            evidence.source_loss |= entry.info.evidence.source_loss;
+            evidence.cache_unknown |= entry.info.evidence.cache_unknown;
+            evidence.metadata_omitted |= entry.info.evidence.metadata_omitted;
+            evidence.omitted = evidence
+                .omitted
+                .zip(entry.info.evidence.omitted)
+                .map(|(a, b)| a.saturating_add(b));
+            if entry.origin.is_pulled() {
+                evidence
+                    .result_id
+                    .clone_from(&entry.info.evidence.result_id);
+            }
+        }
+        if evidence.source_loss {
+            evidence.truncated = true;
+            evidence.omitted = None;
+        }
+        if evidence.cache_unknown {
+            evidence.omitted = None;
+        }
+        evidence
+    }
+
+    /// Preserve source order for a context bundle; standalone diagnostics keep range order.
+    pub(crate) fn merge_for_context(self, bundle: bool) -> Option<DiagnosticInfo> {
+        let mut evidence = self.evidence();
+        let Self {
+            requested, entries, ..
+        } = self;
         let has_pulled = entries.iter().any(|entry| entry.origin.is_pulled());
         if entries.len() <= 1 && !has_pulled {
-            return entries.into_iter().next().map(|entry| entry.info);
+            return entries.into_iter().next().map(|entry| {
+                let mut info = entry.info;
+                info.evidence = evidence;
+                info
+            });
         }
         let version = entries
             .iter()
@@ -897,10 +1005,18 @@ impl DiagnosticSources {
         drop(index);
         let mut merged = pulled;
         merged.extend(kept_pushed);
-        merged.sort_by_key(|d| (point(d.range.start), point(d.range.end)));
+        if !bundle {
+            merged.sort_by_key(|d| (point(d.range.start), point(d.range.end)));
+        }
+        let before_cap = merged.clone();
         cap_diagnostics_entry_size(&requested, &mut merged);
+        if before_cap != merged {
+            evidence.truncated = true;
+            evidence.omitted = None;
+        }
 
         Some(DiagnosticInfo {
+            evidence,
             uri: requested,
             version,
             diagnostics: merged,
@@ -1427,6 +1543,9 @@ impl NotificationCache {
                 .then(|| self.oldest_alias_source(&canonical_key))
                 .flatten();
             let Some(oldest_alias) = alias_to_evict else {
+                if !diagnostics.as_slice().is_empty() {
+                    self.mark_delta_source_loss(&canonical_key);
+                }
                 debug!(
                     "dropping diagnostics for {}: {MAX_SOURCES_PER_FILE} published URIs already cached for {}",
                     published.source().as_ref(),
@@ -1436,9 +1555,18 @@ impl NotificationCache {
                     evicted: Vec::new(),
                 };
             };
+            let lost = self
+                .entries
+                .get(&oldest_alias)
+                .is_some_and(|entry| !entry.diagnostics.is_empty() || entry.evidence.source_loss);
             self.evict_entry(&oldest_alias);
+            if lost {
+                self.mark_delta_source_loss(&canonical_key);
+            }
         }
 
+        let mut evidence = diagnostics.evidence.clone();
+        evidence.source_loss |= self.delta_source_loss(&canonical_key);
         let diagnostics = diagnostics.into_vec();
 
         self.drop_superseded_pull(&canonical_key, published.canonical(), version);
@@ -1458,6 +1586,7 @@ impl NotificationCache {
             }
         };
 
+        evidence.source_loss |= self.delta_source_loss(&canonical_key);
         let seq = self.next_seq();
         let opening = self.document_opening(published.canonical());
         let spelling = if published.is_canonical() {
@@ -1469,6 +1598,7 @@ impl NotificationCache {
             source_key,
             CachedEntry {
                 uri: published.source().clone(),
+                evidence,
                 diagnostics,
                 owner: server_id.clone(),
                 seq,
@@ -1664,6 +1794,8 @@ impl NotificationCache {
         }
         let file_key = DiagnosticsKey::of(file);
         let slot_key = SlotKey::pulled(file_key.clone());
+        let mut evidence = items.evidence.clone();
+        evidence.source_loss |= self.delta_source_loss(&file_key);
         if self.entries.get(&slot_key).is_some_and(|stored| {
             matches!(stored.origin, Origin::Pulled { ticket, .. } if ticket >= stamp.ticket)
         }) {
@@ -1704,6 +1836,7 @@ impl NotificationCache {
             slot_key,
             CachedEntry {
                 uri: file.clone(),
+                evidence,
                 diagnostics: items.into_vec(),
                 owner: server_id.clone(),
                 seq,
@@ -1982,18 +2115,52 @@ impl NotificationCache {
     ///
     /// A clean entry is remembered only when it was the file's last one: while
     /// other slots of the file remain, they answer reads.
+    pub(crate) fn delta_completeness(&self, uri: &Uri) -> (bool, bool) {
+        (
+            self.delta_source_loss(&DiagnosticsKey::of(uri)),
+            self.eviction_marks.delta_history_unknown,
+        )
+    }
+
+    fn delta_source_loss(&self, file: &DiagnosticsKey) -> bool {
+        self.eviction_marks
+            .by_file
+            .get(file)
+            .is_some_and(|mark| mark.delta_source_loss)
+            || self.source_keys(file).iter().any(|key| {
+                self.entries
+                    .get(key)
+                    .is_some_and(|entry| entry.evidence.source_loss)
+            })
+    }
+
+    fn mark_delta_source_loss(&mut self, file: &DiagnosticsKey) {
+        for key in self.source_keys(file) {
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.evidence.source_loss = true;
+            }
+        }
+    }
+
     fn evict_for_capacity(&mut self, key: &SlotKey) -> Option<DiagnosticsKey> {
         let entry = self.entries.get(key)?;
         let file = entry.file(key).clone();
         let owner = entry.owner.clone();
+        let source_loss = entry.evidence.source_loss;
         let content = if entry.diagnostics.is_empty() {
             EvictedContent::Clean
         } else {
             EvictedContent::Lost
         };
         self.evict_entry(key);
+        if content == EvictedContent::Lost {
+            self.mark_delta_source_loss(&file);
+        }
         if content == EvictedContent::Lost || !self.files.contains_key(&file) {
             self.eviction_marks.record(file.clone(), owner, content);
+            if source_loss && let Some(mark) = self.eviction_marks.by_file.get_mut(&file) {
+                mark.delta_source_loss = true;
+            }
         }
         Some(file)
     }
@@ -2271,6 +2438,8 @@ impl NotificationCache {
         DiagnosticSources {
             requested: uri.clone(),
             entries,
+            source_loss: self.delta_source_loss(&key),
+            cache_unknown: self.eviction_marks.delta_history_unknown,
         }
     }
 
@@ -2315,6 +2484,9 @@ impl NotificationCache {
     /// ```
     #[must_use]
     pub fn availability(&self, uri: &Uri, route: Option<&ServerId>) -> DiagnosticsAvailability {
+        if self.eviction_marks.content(&DiagnosticsKey::of(uri)) == Some(EvictedContent::Lost) {
+            return DiagnosticsAvailability::Evicted;
+        }
         if self.has_diagnostics(uri) {
             return DiagnosticsAvailability::Published;
         }
@@ -2443,10 +2615,10 @@ impl NotificationCache {
         for key in stale {
             self.evict_entry(&key);
         }
-        let marked = !self.has_diagnostics_for(file)
-            && self
-                .eviction_marks
-                .record(file.clone(), owner.clone(), EvictedContent::Lost);
+        self.mark_delta_source_loss(file);
+        let marked = self
+            .eviction_marks
+            .record(file.clone(), owner.clone(), EvictedContent::Lost);
         evicted || marked
     }
 
@@ -2490,12 +2662,8 @@ impl NotificationCache {
     /// Records that `owner` lost more publishes than the mailbox could name,
     /// as capacity eviction does.
     pub(crate) fn record_unnamed_loss(&mut self, owner: &ServerId) {
+        self.eviction_marks.delta_history_unknown = true;
         self.eviction_marks.restore_overflow(owner);
-    }
-
-    /// Whether any entry is cached for the file `key` names.
-    fn has_diagnostics_for(&self, key: &DiagnosticsKey) -> bool {
-        self.files.contains_key(key) || self.entries.contains_key(&SlotKey::pushed(key.clone()))
     }
 
     /// Marks `server_id`'s push-based diagnostics as no longer live -- see
@@ -4549,6 +4717,54 @@ mod tests {
 
         assert_eq!(changed, [DiagnosticsKey::of(&real)]);
         assert!(!cache.has_diagnostics(&real));
+        cache.assert_consistent();
+    }
+
+    /// Named delivery loss remains observable when a full pulled report survives.
+    #[test]
+    fn test_named_delivery_loss_keeps_delta_incomplete_with_retained_pull() {
+        let mut cache = NotificationCache::new();
+        let server = test_server();
+        let uri = file_uri("a.rs");
+        cache.store_diagnostics(&server, &uri, None, vec![diagnostic_at(8, "old push")]);
+        cache.store_pulled_for_test(&server, &uri, vec![diagnostic_at(1, "pull")]);
+        let lost = [PublishedDiagnosticsUri::for_test(uri.clone(), uri.clone())];
+
+        cache.record_lost_files(&server, &lost);
+
+        assert_eq!(
+            cache.availability(&uri, Some(&server)),
+            DiagnosticsAvailability::Evicted
+        );
+        let current = cache.diagnostic_sources(&uri).merge().unwrap();
+        assert_eq!(messages(&current), vec!["pull"]);
+        assert_eq!(cache.delta_completeness(&uri), (true, false));
+        cache.store_diagnostics(&server, &uri, None, vec![diagnostic_at(8, "new push")]);
+        cache.store_pulled_for_test(&server, &uri, vec![diagnostic_at(1, "new pull")]);
+        assert_eq!(cache.delta_completeness(&uri), (true, false));
+        cache.assert_consistent();
+    }
+
+    /// An accepted write may clear legacy overflow, but cannot restore unknown delivery history.
+    #[test]
+    fn test_unnamed_delivery_loss_survives_legacy_overflow_clear() {
+        let mut cache = NotificationCache::new();
+        let server = test_server();
+        let uri = file_uri("a.rs");
+        cache.record_unnamed_loss(&server);
+        cache.store_diagnostics(&server, &uri, None, vec![diagnostic_at(1, "current")]);
+
+        assert_eq!(
+            cache.availability(&uri, Some(&server)),
+            DiagnosticsAvailability::Published
+        );
+        assert_eq!(
+            cache.availability(&file_uri("unknown.rs"), Some(&server)),
+            DiagnosticsAvailability::Pending
+        );
+        assert_eq!(cache.delta_completeness(&uri), (false, true));
+        cache.store_pulled_for_test(&server, &uri, Vec::new());
+        assert_eq!(cache.delta_completeness(&uri), (false, true));
         cache.assert_consistent();
     }
 

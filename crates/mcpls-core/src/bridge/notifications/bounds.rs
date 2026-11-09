@@ -54,6 +54,7 @@ pub(super) const MAX_DIAGNOSTICS_ENTRY_BYTES: usize = 1024 * 1024;
 pub struct BoundedDiagnostics {
     list: Vec<LspDiagnostic>,
     bytes: usize,
+    pub(crate) evidence: super::DiagnosticEvidence,
 }
 
 impl BoundedDiagnostics {
@@ -77,13 +78,18 @@ impl BoundedDiagnostics {
     #[cfg(test)]
     pub(super) fn unbounded(list: Vec<LspDiagnostic>) -> Self {
         let bytes = serialized_len(&list).unwrap_or(MAX_DIAGNOSTICS_ENTRY_BYTES);
-        Self { list, bytes }
+        Self {
+            list,
+            bytes,
+            evidence: super::DiagnosticEvidence::default(),
+        }
     }
 
     /// Truncates each message to `MAX_ENTRY_TEXT_BYTES` and bounds the list to
     /// `MAX_DIAGNOSTICS_ENTRY_BYTES`, keeping the most severe diagnostics when
     /// the list has to be cut.
     pub(crate) fn new(uri: &Uri, mut diagnostics: Vec<LspDiagnostic>) -> Self {
+        let original = diagnostics.clone();
         for diagnostic in &mut diagnostics {
             let placeholder = lsp_types::Message::String(String::new());
             diagnostic.message = truncate_message(
@@ -93,6 +99,11 @@ impl BoundedDiagnostics {
         }
         let bytes = cap_diagnostics_entry_size(uri, &mut diagnostics);
         Self {
+            evidence: super::DiagnosticEvidence {
+                truncated: original != diagnostics,
+                omitted: Some(original.len().saturating_sub(diagnostics.len())),
+                ..Default::default()
+            },
             list: diagnostics,
             bytes,
         }

@@ -429,6 +429,9 @@ impl Pump {
             // Re-read after the (possibly slow) resolve: a demotion in the
             // meantime must stop caching and fan-out (#174 s8).
             let role = *self.role_rx.borrow();
+            if !self.subs.is_valid().await {
+                return Flow::Stop;
+            }
             apply_publish(
                 &self.server_id,
                 publish,

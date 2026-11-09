@@ -10,7 +10,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Serialize, Serializer};
 
 use crate::bridge::{Capability, MemberStatus, MemberSupport, RouteSupport, ToolSupportSnapshot};
-use crate::config::{LanguageId, ServerId, ToolKind, ToolPrefix};
+use crate::config::{LanguageId, ServerId, ToolKind, ToolPrefix, ToolProfile};
 use crate::redaction::{Redactions, ServerText};
 
 /// Where a tool's request is served.
@@ -37,23 +37,25 @@ pub(super) struct ToolSpec {
 /// Every MCP tool mcpls exposes, one variant per `#[tool]` handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum McpTool {
+    GetSymbolContext,
     GetHover,
     GetDefinition,
     GetReferences,
     GetDiagnostics,
+    DiagnosticsDelta,
     RenameSymbol,
     GetCompletions,
     GetDocumentSymbols,
+    GetDocumentOutline,
     FormatDocument,
     WorkspaceSymbolSearch,
     GetCodeActions,
-    PrepareCallHierarchy,
     GetIncomingCalls,
     GetOutgoingCalls,
+    GetCallGraph,
     PrepareTypeHierarchy,
     GetSupertypes,
     GetSubtypes,
-    PrepareRename,
     GetDocumentHighlights,
     FormatRange,
     GetSelectionRanges,
@@ -68,28 +70,31 @@ pub(super) enum McpTool {
     GetToolSupport,
     GoToDeclaration,
     RestartServer,
+    FeedbackAdd,
 }
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 31] = [
+    pub(super) const ALL: [Self; 34] = [
+        Self::GetSymbolContext,
         Self::GetHover,
         Self::GetDefinition,
         Self::GetReferences,
         Self::GetDiagnostics,
+        Self::DiagnosticsDelta,
         Self::RenameSymbol,
         Self::GetCompletions,
         Self::GetDocumentSymbols,
+        Self::GetDocumentOutline,
         Self::FormatDocument,
         Self::WorkspaceSymbolSearch,
         Self::GetCodeActions,
-        Self::PrepareCallHierarchy,
         Self::GetIncomingCalls,
         Self::GetOutgoingCalls,
+        Self::GetCallGraph,
         Self::PrepareTypeHierarchy,
         Self::GetSupertypes,
         Self::GetSubtypes,
-        Self::PrepareRename,
         Self::GetDocumentHighlights,
         Self::FormatRange,
         Self::GetSelectionRanges,
@@ -104,7 +109,17 @@ impl McpTool {
         Self::GetToolSupport,
         Self::GoToDeclaration,
         Self::RestartServer,
+        Self::FeedbackAdd,
     ];
+
+    /// Whether this tool belongs to the configured static catalog.
+    pub(super) const fn enabled(self, profile: ToolProfile) -> bool {
+        matches!(profile, ToolProfile::Full)
+            || !matches!(
+                self,
+                Self::GetFoldingRanges | Self::GetSelectionRanges | Self::PrepareTypeHierarchy
+            )
+    }
 
     /// Byte length of the longest unprefixed tool name.
     #[expect(
@@ -128,14 +143,19 @@ impl McpTool {
     pub(super) const fn spec(self) -> ToolSpec {
         use ToolBackend::{Document, Local, Workspace};
         let (name, backend) = match self {
+            Self::GetSymbolContext => ("get_symbol_context", Local),
             Self::GetHover => ("get_hover", Document(ToolKind::Hover)),
             Self::GetDefinition => ("get_definition", Document(ToolKind::Definition)),
             Self::GetReferences => ("get_references", Document(ToolKind::References)),
             Self::GetDiagnostics => ("get_diagnostics", Document(ToolKind::Diagnostics)),
+            Self::DiagnosticsDelta => ("diagnostics_delta", Document(ToolKind::Diagnostics)),
             Self::RenameSymbol => ("rename_symbol", Document(ToolKind::Rename)),
             Self::GetCompletions => ("get_completions", Document(ToolKind::Completions)),
             Self::GetDocumentSymbols => {
                 ("get_document_symbols", Document(ToolKind::DocumentSymbols))
+            }
+            Self::GetDocumentOutline => {
+                ("get_document_outline", Document(ToolKind::DocumentSymbols))
             }
             Self::FormatDocument => ("format_document", Document(ToolKind::FormatDocument)),
             Self::WorkspaceSymbolSearch => (
@@ -143,17 +163,14 @@ impl McpTool {
                 Workspace(ToolKind::WorkspaceSymbols),
             ),
             Self::GetCodeActions => ("get_code_actions", Document(ToolKind::CodeActions)),
-            Self::PrepareCallHierarchy => {
-                ("prepare_call_hierarchy", Document(ToolKind::CallHierarchy))
-            }
             Self::GetIncomingCalls => ("get_incoming_calls", Document(ToolKind::CallHierarchy)),
             Self::GetOutgoingCalls => ("get_outgoing_calls", Document(ToolKind::CallHierarchy)),
+            Self::GetCallGraph => ("get_call_graph", Document(ToolKind::CallHierarchy)),
             Self::PrepareTypeHierarchy => {
                 ("prepare_type_hierarchy", Document(ToolKind::TypeHierarchy))
             }
             Self::GetSupertypes => ("get_supertypes", Document(ToolKind::TypeHierarchy)),
             Self::GetSubtypes => ("get_subtypes", Document(ToolKind::TypeHierarchy)),
-            Self::PrepareRename => ("prepare_rename", Document(ToolKind::Rename)),
             Self::GetDocumentHighlights => (
                 "get_document_highlights",
                 Document(ToolKind::DocumentHighlights),
@@ -177,6 +194,7 @@ impl McpTool {
             Self::GetToolSupport => ("get_tool_support", Local),
             Self::GoToDeclaration => ("go_to_declaration", Document(ToolKind::Declaration)),
             Self::RestartServer => ("restart_server", Local),
+            Self::FeedbackAdd => ("feedback_add", Local),
         };
         ToolSpec { name, backend }
     }
@@ -187,18 +205,13 @@ impl McpTool {
     }
 
     /// The capability this tool's call is gated on, or `None` when it is
-    /// ungated or answered locally. A tool sharing another tool's route can
-    /// need a different capability (`prepare_rename` on the `Rename` route),
-    /// so this is per tool, not per [`ToolKind`].
+    /// ungated or answered locally.
     pub(super) const fn capability(self) -> Option<Capability> {
-        match self {
-            Self::PrepareRename => Some(Capability::PrepareRename),
-            _ => match self.spec().backend {
-                ToolBackend::Document(kind) | ToolBackend::Workspace(kind) => {
-                    Capability::for_tool(kind)
-                }
-                ToolBackend::Local => None,
-            },
+        match self.spec().backend {
+            ToolBackend::Document(kind) | ToolBackend::Workspace(kind) => {
+                Capability::for_tool(kind)
+            }
+            ToolBackend::Local => None,
         }
     }
 }
@@ -433,9 +446,11 @@ impl ToolSupportReport {
         snapshot: &ToolSupportSnapshot,
         languages: &[LanguageId],
         prefix: Option<&ToolPrefix>,
+        profile: ToolProfile,
     ) -> Self {
         let tools = McpTool::ALL
             .iter()
+            .filter(|tool| tool.enabled(profile))
             .map(|tool| {
                 let spec = tool.spec();
                 let (coverage, routes) = match spec.backend {

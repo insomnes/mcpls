@@ -157,7 +157,7 @@ impl DocumentText {
 
     /// As [`Self::new`], but indexes content above [`INLINE_INDEX_MAX_BYTES`]
     /// on the blocking pool so a large file does not stall the runtime.
-    async fn build(content: String) -> Result<Self> {
+    pub(super) async fn build(content: String) -> Result<Self> {
         if content.len() <= INLINE_INDEX_MAX_BYTES {
             return Ok(Self::new(content));
         }
@@ -185,7 +185,7 @@ impl DocumentText {
         Some(&self.content[start..end])
     }
 
-    fn line_start(&self, n: u32) -> Option<usize> {
+    pub(super) fn line_start(&self, n: u32) -> Option<usize> {
         let n = n as usize;
         let mut start = *self.checkpoints.get(n.checked_div(self.stride)?)?;
         for _ in 0..n.checked_rem(self.stride)? {
@@ -715,6 +715,8 @@ pub enum DocumentOpenState {
 /// See [`Self::ensure_open`] for the concurrency contract this maintains.
 #[derive(Debug)]
 pub struct DocumentTracker {
+    #[cfg(test)]
+    pub(crate) snapshot_copied_bytes: std::sync::atomic::AtomicUsize,
     /// Open documents by file path. Locked only for the short, synchronous
     /// section that touches it — never held across an `await`.
     documents: StdMutex<HashMap<PathBuf, DocumentState>>,
@@ -759,6 +761,8 @@ impl DocumentTracker {
     #[must_use]
     pub fn new(limits: ResourceLimits, language_map: impl Into<LanguageMap>) -> Self {
         Self {
+            #[cfg(test)]
+            snapshot_copied_bytes: std::sync::atomic::AtomicUsize::new(0),
             documents: StdMutex::new(HashMap::new()),
             path_locks: StdMutex::new(HashMap::new()),
             in_flight: Arc::default(),
@@ -890,6 +894,34 @@ impl DocumentTracker {
         documents.get(path)?.text.line(line).map(str::to_string)
     }
 
+    /// Validate context-range endpoints against borrowed tracked lines, without source copies.
+    pub(crate) fn valid_utf16_positions(
+        &self,
+        path: &Path,
+        positions: &[super::Position2D],
+    ) -> bool {
+        let documents = lock_std(&self.documents);
+        let Some(document) = documents.get(path) else {
+            return false;
+        };
+        let converter =
+            super::encoding::EncodingConverter::new(super::encoding::PositionEncoding::Utf16);
+        let valid = positions.iter().all(|position| {
+            position.line > 0
+                && position.character > 0
+                && document
+                    .text
+                    .line(position.line.saturating_sub(1))
+                    .is_some_and(|text| {
+                        converter
+                            .character_to_byte_offset(text, position.character.saturating_sub(1))
+                            .is_ok()
+                    })
+        });
+        drop(documents);
+        valid
+    }
+
     /// The content of `path` as last sent to a server, or `None` if the
     /// document is not open.
     #[must_use]
@@ -897,6 +929,38 @@ impl DocumentTracker {
         lock_std(&self.documents)
             .get(path)
             .map(|state| state.text.as_str().to_owned())
+    }
+
+    /// Check server synchronization and copy bounded chunks under the same lock.
+    /// The callback can stop work before each chunk or the initial length check.
+    pub(crate) fn bounded_observed_text(
+        &self,
+        path: &Path,
+        max: usize,
+        server: Option<&ServerId>,
+        mut permit: impl FnMut(usize) -> bool,
+    ) -> Option<std::result::Result<String, ()>> {
+        let documents = lock_std(&self.documents);
+        let state = documents.get(path)?;
+        if server.is_some_and(|server| state.synced_version(server) != Some(state.version)) {
+            return None;
+        }
+        let text = state.text.as_str();
+        if !permit(0) || text.len() > max {
+            return Some(Err(()));
+        }
+        let mut copied = Vec::with_capacity(text.len());
+        for chunk in text.as_bytes().chunks(8192) {
+            if !permit(chunk.len()) {
+                return Some(Err(()));
+            }
+            copied.extend_from_slice(chunk);
+            #[cfg(test)]
+            self.snapshot_copied_bytes
+                .fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        drop(documents);
+        Some(String::from_utf8(copied).map_err(|_| ()))
     }
 
     /// Whether `path`'s tracked content has a 0-based `line`'th line.

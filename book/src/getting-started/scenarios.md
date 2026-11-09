@@ -16,8 +16,8 @@ The assistant calls `get_document_symbols` for the structure of the file, then `
 
 > Where is `calculate_total` called, and which functions call it?
 
-1. `get_references` lists every usage across the workspace.
-2. `prepare_call_hierarchy` and `get_incoming_calls` show the calling functions, grouped by caller.
+1. `get_references` returns up to 10 usages without source context by default. Use `path_filter` to narrow a directory, `limit` to increase the cap, and `include_source:true` to request excerpts.
+2. `get_incoming_calls` with a position or symbol name shows the calling functions, grouped by caller.
 
 Add "and tell me which function each usage is inside" and the assistant passes `context: "enclosing_symbol"`, so every location comes with the function or type that contains it.
 
@@ -25,8 +25,8 @@ Add "and tell me which function each usage is inside" and the assistant passes `
 
 > Rename `process_data` to `handle_data` everywhere and show me the plan.
 
-1. `prepare_rename` checks that the symbol can be renamed.
-2. `rename_symbol` returns the edits for every file.
+1. Call `rename_symbol` once with the target and new name. It checks preparation when the rename server supports it.
+2. Inspect the `proposed` result before applying its edits through the client. A `not_renameable` result contains no edits.
 
 mcpls returns the edits; it does not write them. The assistant applies them with its own file tools, after you approve. If the result contains a `dropped` field, some edits were withheld (for example files outside the workspace) and the rename is incomplete, so the assistant should say so before applying anything.
 
@@ -40,7 +40,7 @@ mcpls returns the edits; it does not write them. The assistant applies them with
 
 > Which types implement the `Storage` trait?
 
-`go_to_implementation` jumps from a trait method to its implementations; `prepare_type_hierarchy` with `get_subtypes` lists implementors for languages whose server supports type hierarchy. `go_to_type_definition` answers "what type is this value?" by jumping to the type itself.
+`go_to_implementation` jumps from a trait method to its implementations; `get_subtypes` with a direct file target lists implementors for languages whose server supports type hierarchy. `go_to_type_definition` answers "what type is this value?" by jumping to the type itself.
 
 ## Look up a symbol you cannot place
 

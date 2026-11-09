@@ -30,6 +30,34 @@ mod notification;
 use cancel::{InFlightRequest, PendingRegistration, PendingRequests, Resolution};
 use notification::OutboundNotification;
 
+tokio::task_local! {
+    /// Counts actual analysis send attempts for one call graph, including retries.
+    pub(crate) static CALL_GRAPH_REQUESTS: Arc<std::sync::atomic::AtomicUsize>;
+}
+
+/// Whether this request belongs to the graph's analysis budget.
+fn graph_analysis_method(method: &str) -> bool {
+    matches!(
+        method,
+        "textDocument/documentSymbol"
+            | "textDocument/prepareCallHierarchy"
+            | "callHierarchy/incomingCalls"
+            | "callHierarchy/outgoingCalls"
+    )
+}
+
+/// Reject another attempt before allocating or sending it.
+fn graph_request_available(method: &str) -> Result<()> {
+    if graph_analysis_method(method)
+        && CALL_GRAPH_REQUESTS
+            .try_with(|count| count.load(Ordering::Relaxed) >= 64)
+            .unwrap_or(false)
+    {
+        return Err(Error::CallGraphRequestLimit);
+    }
+    Ok(())
+}
+
 /// Maximum number of retry attempts for server-cancelled requests.
 const SERVER_CANCELLED_MAX_RETRIES: u32 = 3;
 
@@ -260,6 +288,7 @@ impl PendingFailure {
 /// - Graceful shutdown
 #[derive(Debug)]
 pub struct LspClient {
+    watching: Option<Arc<super::watching::Backend>>,
     /// Configuration for this LSP server.
     config: LspServerConfig,
 
@@ -322,6 +351,7 @@ impl Clone for LspClient {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
+            watching: self.watching.clone(),
             state: Arc::clone(&self.state),
             request_counter: Arc::clone(&self.request_counter),
             command_tx: self.command_tx.clone(),
@@ -413,6 +443,7 @@ impl LspClient {
 
         Self {
             config,
+            watching: None,
             state: Arc::new(Mutex::new(super::ServerState::Uninitialized)),
             request_counter: Arc::new(AtomicI64::new(1)),
             command_tx,
@@ -487,6 +518,11 @@ impl LspClient {
 
         let (command_tx, command_rx) = mpsc::channel(100);
 
+        let watching = transport
+            .0
+            .watching
+            .as_ref()
+            .map(|watching| watching.backend.clone());
         let receiver_task = tokio::spawn(Self::message_loop(
             transport,
             command_rx,
@@ -499,6 +535,7 @@ impl LspClient {
 
         Self {
             config,
+            watching,
             state: Arc::new(Mutex::new(super::ServerState::Initializing)),
             request_counter: Arc::new(AtomicI64::new(1)),
             command_tx,
@@ -534,6 +571,13 @@ impl LspClient {
 
     /// Get the current server state.
     pub async fn state(&self) -> super::ServerState {
+        if self
+            .watching
+            .as_ref()
+            .is_some_and(|backend| backend.check().is_err())
+        {
+            return super::ServerState::Shutdown;
+        }
         *self.state.lock().await
     }
 
@@ -714,12 +758,18 @@ impl LspClient {
         P: Serialize,
         R: DeserializeOwned,
     {
+        if method != "shutdown"
+            && let Some(backend) = &self.watching
+        {
+            backend.check().map_err(UnclassifiedError::logged)?;
+        }
         let params_value = Self::omit_null_params(
             serde_json::to_value(params).map_err(|e| UnclassifiedError::logged(e.into()))?,
         );
         let mut delay_ms = SERVER_CANCELLED_INITIAL_DELAY_MS;
 
         for attempt in 0..=SERVER_CANCELLED_MAX_RETRIES {
+            graph_request_available(method).map_err(UnclassifiedError::logged)?;
             if attempt > 0 {
                 debug!(
                     "Retrying {} (attempt {}/{}), backoff={}ms",
@@ -727,6 +777,10 @@ impl LspClient {
                 );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = delay_ms.saturating_mul(2);
+            }
+
+            if graph_analysis_method(method) {
+                let _ = CALL_GRAPH_REQUESTS.try_with(|count| count.fetch_add(1, Ordering::Relaxed));
             }
 
             let id = RequestId::Number(self.request_counter.fetch_add(1, Ordering::SeqCst));
@@ -1047,6 +1101,9 @@ impl LspClient {
             )
             .await
         };
+        // Close the writer before waiting for reader cleanup. A canceled frame
+        // must never remain available for another write on this transport.
+        drop(transport);
         let _ = timeout(READER_TASK_ABORT_GRACE, reader_handle).await;
         // Dropped before the drain, not just at fn-exit: otherwise a
         // `register_and_send_request` racing the drain could still insert
@@ -1188,6 +1245,28 @@ impl LspClient {
     ) -> Result<()> {
         loop {
             tokio::select! {
+                changes = async {
+                    match transport.watching.as_mut() {
+                        Some(watching) => watching.next().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let changes = changes?;
+                    if let Some(watching) = &transport.watching {
+                        watching.backend.check()?;
+                        let notification = watching.notification(changes);
+                        if notification.get("params").and_then(|p| p.get("changes")).and_then(Value::as_array).is_some_and(|changes| !changes.is_empty()) {
+                            let invalid = watching.backend.invalidated();
+                            // Canceling a partial frame must leave through the loop wrapper,
+                            // which closes this transport instead of resuming stale bytes.
+                            tokio::select! {
+                                biased;
+                                () = invalid.cancelled() => return Err(super::watching::unavailable("watching coverage invalidated")),
+                                result = transport.send(&notification) => result?,
+                            }
+                        }
+                    }
+                }
                 Some(command) = command_rx.recv() => {
                     match command {
                         ClientCommand::SendRequest { request } => {
@@ -1377,8 +1456,27 @@ impl LspClient {
             InboundMessage::UndecodableNotification(DroppedNotification::Other)
             | InboundMessage::UndecodableFrame => {}
             InboundMessage::Request(request) => {
-                debug!(method = %request.method, id = ?request.id, "Received server request");
-                let reply = Self::server_request_reply(request, settings);
+                debug!(
+                    "Received server request: {} (id={:?})",
+                    request.method, request.id
+                );
+                let reply = if matches!(
+                    request.method.as_str(),
+                    "client/registerCapability" | "client/unregisterCapability"
+                ) {
+                    let result = match &mut transport.watching {
+                        Some(watching) => {
+                            watching.request(&request.method, request.params.as_ref())
+                        }
+                        None => Err(JsonRpcError::new(
+                            ErrorCodes::MethodNotFound,
+                            "Client file watching is disabled",
+                        )),
+                    };
+                    JsonRpcReply::new(request.id, result.into())
+                } else {
+                    Self::server_request_reply(request, settings)
+                };
                 let value = serde_json::to_value(&reply)?;
                 transport.send(&value).await?;
             }
@@ -2496,6 +2594,7 @@ mod tests {
         let (command_tx, _command_rx) = mpsc::channel(1);
 
         let client = LspClient {
+            watching: None,
             config: LspServerConfig::rust_analyzer(),
             state: Arc::new(Mutex::new(super::super::ServerState::Ready)),
             request_counter: Arc::new(AtomicI64::new(1)),

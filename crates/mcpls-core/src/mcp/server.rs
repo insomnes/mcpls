@@ -3,6 +3,12 @@
 //! This module provides the MCP server that exposes LSP capabilities
 //! as MCP tools using the rmcp SDK.
 
+mod call_graph;
+mod diagnostics_batch;
+mod diagnostics_delta;
+mod dispatch;
+mod symbol_context;
+
 use std::borrow::Cow;
 use std::future::Future;
 use std::path::PathBuf;
@@ -37,11 +43,11 @@ use super::session::{
 use super::tool_support::{McpTool, ToolSupportReport, prefixed_tool_name};
 use super::tools::{
     CachedDiagnosticsParams, CallHierarchyCallsParams, CodeActionsParams, CompletionsParams,
-    DeclarationParams, DiagnosticsParams, DocumentSymbolsParams, FoldingRangesParams,
-    FormatDocumentParams, FormatRangeParams, InlayHintsParams, NavigationParams, PositionParams,
-    RangeParams, ReferencesParams, RenameParams, RestartServerParams, ServerLogsParams,
-    ServerMessagesParams, SymbolTargetInput, SymbolTargetParams, ToolSupportParams,
-    TypeHierarchyWalkParams, WorkspaceSymbolParams,
+    DeclarationParams, DefinitionParams, DiagnosticsParams, DocumentOutlineParams,
+    DocumentSymbolsParams, FoldingRangesParams, FormatDocumentParams, FormatRangeParams,
+    InlayHintsParams, NavigationParams, PositionParams, RangeParams, ReferencesParams,
+    RenameParams, RestartServerParams, ServerLogsParams, ServerMessagesParams, SymbolTargetInput,
+    SymbolTargetParams, ToolSupportParams, TypeHierarchyWalkParams, WorkspaceSymbolParams,
 };
 use crate::bridge::resources::{
     DiagnosticsResourceUri, MAX_SUBSCRIPTIONS, ResolvedResource, make_uri, parse_uri,
@@ -50,15 +56,15 @@ use crate::bridge::{
     AddressableTool, Addressed, BoundedRange, CallHierarchyPrepareResult, CheckedHierarchyItem,
     ClientPath, CodeActionsResult, CompletionsResult, DiagnosticInfo, DiagnosticsAvailability,
     DiagnosticsOrigin, DiagnosticsResult, DocumentDiagnosticsResult, DocumentHighlightsResult,
-    DocumentOpenState, DocumentSymbolsResult, DocumentVersion, FoldingRangesResult,
-    FormatDocumentResult, HierarchyItem, HoverResult, IncomingCallsResult, Indexed,
-    InlayHintsResult, KindFilter, KindFilterField, KindFilterInput, LocationsResult,
-    NotificationCache, OutgoingCallsResult, Position, PositionEncoding, PositionRange,
-    PrepareRenameResult, ReferencesResult, RenameResult, RestartServerResult, RouteSignals,
-    SelectionRangesResult, ServerLogsResult, ServerMessagesResult, SignatureHelpResult,
-    SymbolTarget, Translator, TypeHierarchyResult, WorkspaceRoots, WorkspaceSymbolResult,
+    DocumentOpenState, DocumentOutlineResult, DocumentSymbolsResult, DocumentVersion,
+    FoldingRangesResult, FormatDocumentResult, HierarchyItem, HoverResult, IncomingCallsResult,
+    Indexed, InlayHintsResult, KindFilter, KindFilterField, KindFilterInput, NotificationCache,
+    OutgoingCallsResult, Position, PositionEncoding, PositionRange, ReferencesResult, RenameResult,
+    RestartServerResult, RouteSignals, SelectionRangesResult, ServerLogsResult,
+    ServerMessagesResult, SignatureHelpResult, SymbolTarget, Translator, TypeHierarchyResult,
+    WorkspaceRoots, WorkspaceSymbolResult,
 };
-use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix};
+use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix, ToolProfile};
 use crate::redaction::{Redactions, ServerText};
 use crate::util::{MAX_ECHOED_NAME_BYTES, escape_bounded};
 
@@ -123,14 +129,14 @@ const _: () = assert!(
 /// Tool-description sentences shared by every tool carrying `positions_degraded`.
 macro_rules! positions_note_request {
     () => {
-        "`positions_degraded` (non-UTF-16 servers only): `\"request\"` means the queried position was sent unconverted, so the result may describe a different symbol and should not be trusted; `\"response\"` means only returned `character` offsets may be inexact."
+        "`positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact."
     };
 }
 
 /// Tool-description sentence for the tools that accept a symbol name.
 macro_rules! name_addressing_note {
     () => {
-        "Aim it with `line` + `character`, or with `symbol_name` (optionally narrowed by `symbol_kind` and `container`) for a symbol defined in the file: the result then carries `resolved_symbol` with the position that was queried. A name matching several symbols, none, or an unverifiable position fails with the candidates or the reason instead of guessing."
+        "Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason."
     };
 }
 
@@ -158,7 +164,7 @@ macro_rules! availability_note {
 /// Tool-description sentence for the tools whose results flag `out_of_workspace`.
 macro_rules! out_of_workspace_note {
     () => {
-        "`out_of_workspace: true` means not provably inside a configured workspace root (lexical, advisory)."
+        "`out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory)."
     };
 }
 
@@ -187,6 +193,125 @@ struct CachedDiagnosticsResponse {
     signals: RouteSignals,
 }
 
+/// Legacy traversal or a direct target's classified, indexed result.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(extend("type" = "object"))]
+enum CallHierarchyCallsResult<T> {
+    Legacy(T),
+    Direct(Indexed<Addressed<DirectCallsResult<T>>>),
+}
+
+/// Direct queries traverse only complete singleton preparation.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+enum DirectCallsResult<T> {
+    /// Traversal succeeded; calls may be empty.
+    Ok {
+        status: CallsStatus,
+        #[serde(flatten)]
+        result: T,
+    },
+    /// Preparation stopped before traversal; candidates remain reusable.
+    Stopped {
+        status: PreparationStatus,
+        #[serde(flatten)]
+        result: CallHierarchyPrepareResult,
+    },
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum CallsStatus {
+    Ok,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum PreparationStatus {
+    /// Complete preparation found no callable item.
+    NoItem,
+    /// Multiple or truncated items require explicit selection.
+    SelectionRequired,
+    /// Inexact preparation positions prevented traversal.
+    PreparationIncomplete,
+}
+
+impl<T: ServerText> ServerText for CallHierarchyCallsResult<T> {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        match self {
+            Self::Legacy(result) => result.redact_server_text(redactions),
+            Self::Direct(result) => result.redact_server_text(redactions),
+        }
+    }
+}
+
+impl<T: ServerText> ServerText for DirectCallsResult<T> {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        match self {
+            Self::Ok { result, .. } => result.redact_server_text(redactions),
+            Self::Stopped { result, .. } => result.redact_server_text(redactions),
+        }
+    }
+}
+
+/// Item traversal retains its legacy shape; direct targets add status metadata.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(extend("type" = "object"))]
+enum TypeHierarchyWalkResult {
+    Legacy(TypeHierarchyResult),
+    Direct(Indexed<Addressed<DirectTypesResult>>),
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct DirectTypesResult {
+    status: TypeWalkStatus,
+    items: Vec<HierarchyItem>,
+    truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    positions_degraded: Option<crate::bridge::PositionDegradation>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum TypeWalkStatus {
+    Ok,
+    NoItem,
+    SelectionRequired,
+    PreparationIncomplete,
+}
+
+impl ServerText for TypeHierarchyWalkResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        match self {
+            Self::Legacy(result) => result.redact_server_text(redactions),
+            Self::Direct(result) => result.redact_server_text(redactions),
+        }
+    }
+}
+
+impl ServerText for DirectTypesResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        self.items.redact_server_text(redactions);
+    }
+}
+
+type HierarchyContexts = Arc<
+    Mutex<
+        std::collections::HashMap<
+            String,
+            (String, serde_json::Value, crate::config::ServerId, String),
+        >,
+    >,
+>;
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceStatusParams {
+    workspace_path: Option<PathBuf>,
+}
+
 /// MCP server that exposes LSP capabilities as tools.
 ///
 /// Deliberately not `Clone` (#478): each HTTP session must get its own
@@ -195,7 +320,13 @@ struct CachedDiagnosticsResponse {
 /// builds a new value field by field instead (each field an `Arc` bump except
 /// `session`), so this costs nothing at the one production call site
 /// (`transport::run_http`'s per-session factory closure).
+///
+/// MCP server with isolated session subscriptions and optional worktree dispatch.
 pub struct McplsServer {
+    diagnostics_generation: String,
+    dispatcher: Option<Arc<crate::dispatcher::Dispatcher>>,
+    workspace_sessions: Mutex<std::collections::HashMap<String, Arc<Self>>>,
+    hierarchy_contexts: HierarchyContexts,
     context: Arc<BridgeContext>,
 
     /// `Arc`-wrapped so building a new session in `for_new_session` is a
@@ -574,7 +705,10 @@ impl McplsServer {
         project_config_status: ProjectConfigStatus,
         mcp: McpConfig,
     ) -> Self {
-        let tool_router = Arc::new(Self::build_tool_router(mcp.tool_prefix.as_ref()));
+        let tool_router = Arc::new(Self::build_profile_tool_router(
+            mcp.tool_prefix.as_ref(),
+            mcp.tool_profile,
+        ));
         let context = Arc::new(BridgeContext::new(
             translator,
             notification_cache,
@@ -584,10 +718,145 @@ impl McplsServer {
             mcp,
         ));
         Self {
+            diagnostics_generation: crate::dispatcher::opaque(),
+            dispatcher: None,
+            workspace_sessions: Mutex::new(std::collections::HashMap::new()),
+            hierarchy_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             context,
             tool_router,
             stop: CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn with_dispatcher(
+        mut self,
+        dispatcher: Arc<crate::dispatcher::Dispatcher>,
+    ) -> Self {
+        self.dispatcher = Some(dispatcher);
+        let mut router = Self::build_profile_tool_router(
+            self.context.mcp.tool_prefix.as_ref(),
+            self.context.mcp.tool_profile,
+        );
+        if let Some(mut route) = Self::declared_tool_router()
+            .map
+            .remove("get_workspace_status")
+        {
+            route.attr.name = Cow::Owned(prefixed_tool_name(
+                self.context.mcp.tool_prefix.as_ref(),
+                "get_workspace_status",
+            ));
+            let title = route.attr.title.clone();
+            route.attr.annotations = Some(ToolAnnotations::from_raw(
+                title,
+                Some(true),
+                Some(false),
+                Some(true),
+                None,
+            ));
+            router.add_route(route);
+        }
+        for route in router.map.values_mut() {
+            let name = self.unprefixed(&route.attr.name);
+            // Dispatcher selection is documented once here; retain all schema
+            // fields while avoiding repeated routing prose in each tool.
+            if name == "get_tool_support" {
+                route.attr.description = Some(Cow::Borrowed(
+                    "Tool support by language. No selector: configured support without startup. file_path or workspace_path: runtime support; both must select the same workspace. Coverage: all, some, none, unknown (initializing), always (local). Advertised support does not guarantee request success.",
+                ));
+            }
+            if name == "get_workspace_status" {
+                route.attr.description = Some(Cow::Borrowed(
+                    "Workspace identity, generation, lifecycle, limits, and server status. Starts no backend.",
+                ));
+            }
+            if let Some(output) = &mut route.attr.output_schema {
+                let mut output_schema = (**output).clone();
+                if name == "get_tool_support"
+                    && let Some(route_shape) = output_schema
+                        .get_mut("$defs")
+                        .and_then(|defs| defs.get_mut("RouteShape"))
+                {
+                    // Each variant already describes its route. The repeated
+                    // server field means the same thing in every variant.
+                    if let Some(shape) = route_shape.as_object_mut() {
+                        shape.remove("description");
+                    }
+                    if let Some(variants) = route_shape
+                        .get_mut("oneOf")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        for variant in variants {
+                            if let Some(server) = variant
+                                .get_mut("properties")
+                                .and_then(|p| p.get_mut("server"))
+                                .and_then(serde_json::Value::as_object_mut)
+                            {
+                                server.remove("description");
+                            }
+                        }
+                    }
+                }
+                if let Some(properties) = output_schema
+                    .get_mut("properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    if name == "get_document_outline" {
+                        properties.insert(
+                            "runtime_generation".into(),
+                            serde_json::json!({"type":"string"}),
+                        );
+                    }
+                    if name == "get_tool_support" {
+                        properties.insert(
+                            "basis".into(),
+                            serde_json::json!({"enum":["configured","runtime"]}),
+                        );
+                        properties.insert(
+                            "workspace_path".into(),
+                            serde_json::json!({"type":"string"}),
+                        );
+                        properties.insert(
+                            "runtime_generation".into(),
+                            serde_json::json!({"type":"string"}),
+                        );
+                    }
+                }
+                *output = Arc::new(output_schema);
+            }
+        }
+        self.tool_router = Arc::new(router);
+        self
+    }
+
+    #[tool(
+        description = "Read discovered workspace identities, generations, lifecycle state, resource limits, and server status. Starts no language server.",
+        title = "Workspace Status"
+    )]
+    async fn get_workspace_status(
+        &self,
+        Parameters(params): Parameters<WorkspaceStatusParams>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let dispatcher = self
+            .dispatcher
+            .as_ref()
+            .ok_or_else(|| McpError::invalid_params("dispatcher mode is disabled", None))?;
+        dispatcher
+            .status(params.workspace_path)
+            .await
+            .map(Json)
+            .map_err(crate::dispatcher::DispatchError::wire)
+    }
+
+    fn unprefixed<'a>(&self, name: &'a str) -> &'a str {
+        self.context
+            .mcp
+            .tool_prefix
+            .as_ref()
+            .and_then(|prefix| {
+                name.strip_prefix(prefix.as_str())
+                    .and_then(|tail| tail.strip_prefix('_'))
+            })
+            .unwrap_or(name)
     }
 
     /// This server reporting `stop` as its shutdown signal: a tool call that
@@ -675,6 +944,10 @@ impl McplsServer {
             mcp: self.context.mcp.clone(),
         });
         Self {
+            diagnostics_generation: self.diagnostics_generation.clone(),
+            dispatcher: self.dispatcher.clone(),
+            workspace_sessions: Mutex::new(std::collections::HashMap::new()),
+            hierarchy_contexts: self.hierarchy_contexts.clone(),
             context,
             tool_router: Arc::clone(&self.tool_router),
             stop: self.stop.clone(),
@@ -702,11 +975,86 @@ impl McplsServer {
     /// the schema-shaping tests can compare the two.
     pub(super) fn unshaped_tool_router() -> ToolRouter<Self> {
         let mut router = Self::declared_tool_router();
+        router.map.remove("get_workspace_status");
         for route in router.map.values_mut() {
             let title = route.attr.title.clone();
             route.attr.annotations.get_or_insert_with(|| {
                 ToolAnnotations::from_raw(title, Some(true), Some(false), Some(true), None)
             });
+        }
+        dispatch::shape_workspace_schemas(&mut router);
+        diagnostics_batch::shape_schema(&mut router);
+        diagnostics_delta::shape_schema(&mut router);
+        symbol_context::shape_schema(&mut router);
+        call_graph::shape_schema(&mut router);
+        // Navigation wires are shared; only the supported consumers advertise references.
+        for route in router.map.values_mut() {
+            let tool = &mut route.attr;
+            if !matches!(
+                tool.name.as_ref(),
+                "get_hover" | "get_definition" | "get_references" | "get_symbol_context"
+            ) && let Some(properties) = Arc::make_mut(&mut tool.input_schema)
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                properties.remove("symbol_ref");
+            }
+            if !matches!(
+                tool.name.as_ref(),
+                "get_hover"
+                    | "get_definition"
+                    | "get_references"
+                    | "get_symbol_context"
+                    | "get_incoming_calls"
+                    | "get_outgoing_calls"
+                    | "get_call_graph"
+            ) {
+                let schema = Arc::make_mut(&mut tool.input_schema);
+                if let Some(properties) = schema
+                    .get_mut("properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("symbol_target");
+                }
+                if let Some(definitions) = schema
+                    .get_mut("$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    definitions.remove("SymbolTargetEnvelope");
+                }
+                if tool.name.as_ref() == "prepare_call_hierarchy"
+                    && let Some(required) = schema
+                        .entry("required")
+                        .or_insert_with(|| serde_json::json!([]))
+                        .as_array_mut()
+                {
+                    required.push(serde_json::json!("file_path"));
+                }
+            }
+        }
+        // Other navigation tools retain their existing response schema.
+        for name in [
+            "go_to_declaration",
+            "go_to_implementation",
+            "go_to_type_definition",
+        ] {
+            if let Some(route) = router.map.get_mut(name)
+                && let Some(output) = &mut route.attr.output_schema
+                && let Some(definitions) = Arc::make_mut(output)
+                    .get_mut("$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+            {
+                if let Some(properties) = definitions
+                    .get_mut("NavigationLocation")
+                    .and_then(|schema| schema.get_mut("properties"))
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("symbol_target");
+                    properties.remove("symbol_target_unavailable");
+                }
+                definitions.remove("SymbolTargetEnvelope");
+                definitions.remove("SymbolTargetUnavailable");
+            }
         }
         router
     }
@@ -715,18 +1063,18 @@ impl McplsServer {
     /// and, when `prefix` is configured, every tool name rewritten to
     /// `{prefix}_{name}`.
     ///
-    /// Every mcpls tool is a read-only LSP query: `rename_symbol`,
+    /// Most mcpls tools are read-only LSP queries: `rename_symbol`,
     /// `format_document` and `get_code_actions` return a *proposed*
     /// `WorkspaceEdit` and never write to disk. Applying that once here
     /// replaces an identical `annotations(...)` block on every `#[tool]`
     /// attributes. A tool declaring its own annotations keeps them;
     /// `test_tool_annotation_classifications_match_intent` forces a future
     /// mutating tool to write down an explicit classification rather than
-    /// inherit this default silently.
+    /// inherit this default silently. Feedback appends and server restarts declare
+    /// their own mutating classifications.
     ///
-    /// With `prefix: None` this returns byte-for-byte what it always has --
-    /// `test_tool_surface_matches_golden_snapshot` pins that as the
-    /// backward-compatibility guarantee for the default, unprefixed surface.
+    /// With `prefix: None`, the golden snapshot pins the default unprefixed
+    /// surface, including optional workspace selectors and continuation fields.
     ///
     /// The rename re-keys `router.map` via [`ToolRouter::add_route`] rather
     /// than inserting directly, so it goes through rmcp's own
@@ -752,6 +1100,34 @@ impl McplsServer {
         router
     }
 
+    /// Select the fixed catalog with matching prefixed discovery and dispatch.
+    fn build_profile_tool_router(
+        prefix: Option<&ToolPrefix>,
+        profile: ToolProfile,
+    ) -> ToolRouter<Self> {
+        let mut router = Self::build_tool_router(prefix);
+        for tool in McpTool::ALL {
+            if !tool.enabled(profile) {
+                router
+                    .map
+                    .remove(prefixed_tool_name(prefix, tool.name()).as_str());
+            }
+        }
+        router
+    }
+
+    /// Collect bounded context for one primary-file symbol.
+    #[tool(
+        description = "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Requested sections have independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
+        title = "Symbol Context"
+    )]
+    async fn get_symbol_context(
+        &self,
+        Parameters(params): Parameters<super::tools::SymbolContextParams>,
+    ) -> Result<rmcp::model::CallToolResult, McpError> {
+        self.symbol_context(params).await
+    }
+
     /// Get hover information at a position in a file.
     #[tool(
         description = concat!("Type and documentation info for a symbol. Returns signatures, docs, and inferred types. ", name_addressing_note!(), " ", positions_note_request!()),
@@ -770,25 +1146,62 @@ impl McplsServer {
 
     /// Get the definition location of a symbol.
     #[tool(
-        description = concat!("Definition location of a symbol. Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Definition location of a symbol. include_targets:true adds portable symbol_target objects; default false. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Definition"
     )]
     async fn get_definition(
         &self,
-        Parameters(NavigationParams { target, context }): Parameters<NavigationParams>,
-    ) -> Result<Json<Addressed<LocationsResult>>, McpError> {
+        Parameters(DefinitionParams {
+            navigation:
+                NavigationParams {
+                    target,
+                    context,
+                    include_source,
+                },
+            include_targets,
+        }): Parameters<DefinitionParams>,
+    ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
         self.addressed(
             target,
             AddressableTool::Definition,
-            |file_path, position| translator.handle_definition(file_path, position, context),
+            |file_path, position| async move {
+                let mut result = translator
+                    .handle_definition_with_source(file_path, position, context, include_source)
+                    .await?;
+                if include_targets {
+                    let entries = result
+                        .locations
+                        .iter()
+                        .map(|entry| {
+                            (
+                                entry.location.uri.clone(),
+                                entry.location.range.start.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let targets = translator
+                        .portable_targets(
+                            entries,
+                            result.positions_degraded.map(|_| "positions_degraded"),
+                        )
+                        .await;
+                    for (entry, target) in result.locations.iter_mut().zip(targets) {
+                        match target {
+                            Ok(target) => entry.symbol_target = Some(target),
+                            Err(reason) => entry.symbol_target_unavailable = Some(reason),
+                        }
+                    }
+                }
+                Ok(result)
+            },
         )
         .await
     }
 
     /// Find all references to a symbol.
     #[tool(
-        description = concat!("References to a symbol, across workspace. Capped at a fixed maximum for an extremely common symbol; `truncated: true` on the result means more references exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!(), " ", index_coverage_note!()),
+        description = "References including duplicates. Address by absolute file_path with 1-based line/character, symbol_name, or portable target. mode:locations(default) returns locations; mode:files returns empty locations and file_summary: first-seen exact-URI groups with count,first example,file_path. Reuse file_path as lexical path_filter; unsupported paths:null+unsupported_uri. limit:10(1..10000) bounds locations/groups. Files scan caps:100000 locations,8388608 URI bytes,10000 matching URIs; whole-summary cap:65536 JSON bytes. counts_complete:false means lower bounds; output_truncated means known groups omitted. truncated never proves workspace coverage. include_source:false; true adds bounded text/unavailable. context:enclosing_symbol opts in. Snapshots are not atomic.",
         title = "Find References"
     )]
     async fn get_references(
@@ -797,6 +1210,7 @@ impl McplsServer {
             target,
             include_declaration,
             context,
+            options,
         }): Parameters<ReferencesParams>,
     ) -> Result<Json<Addressed<ReferencesResult>>, McpError> {
         let translator = &self.context.translator;
@@ -804,7 +1218,13 @@ impl McplsServer {
             target,
             AddressableTool::References,
             |file_path, position| {
-                translator.handle_references(file_path, position, include_declaration, context)
+                translator.handle_references_with_options(
+                    file_path,
+                    position,
+                    include_declaration,
+                    context,
+                    options,
+                )
             },
         )
         .await
@@ -812,12 +1232,22 @@ impl McplsServer {
 
     /// Get diagnostics for a file.
     #[tool(
-        description = concat!("Diagnostics for a file. Returns errors, warnings, and hints with severity and location. `origin`: `pull`, `push_cache` when the server has no pull provider, or `cache_after_failed_pull` when the pull failed and the cache answered. ", availability_note!(), " `indexing_in_progress: true` means the routed server was indexing at some point during this read, so results may be incomplete. `push_notifications_degraded: true` means the routed server crashed and was restarted, so push-only diagnostics (e.g. flycheck) are missing. ", positions_note_response!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Diagnostics for file_path or file_paths (1..32, same workspace). Batch: ordered results with report/error, truncated and omitted_diagnostics; max4 concurrent,100 diagnostics/file,256 total,8 KiB/diagnostic,128 KiB/result. No clean guarantee for pending/evicted/truncated outcomes. Returns errors, warnings, and hints with severity and location. `origin`: `pull`, `push_cache` when the server has no pull provider, or `cache_after_failed_pull` when the pull failed and the cache answered. ", availability_note!(), " `indexing_in_progress: true` means the routed server was indexing at some point during this read, so results may be incomplete. `push_notifications_degraded: true` means the routed server crashed and was restarted, so push-only diagnostics (e.g. flycheck) are missing. ", positions_note_response!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Diagnostics"
     )]
     async fn get_diagnostics(
         &self,
         Parameters(DiagnosticsParams { file_path, context }): Parameters<DiagnosticsParams>,
+    ) -> Result<Json<DiagnosticsResponse>, McpError> {
+        self.diagnostics_for_context(file_path, context, false)
+            .await
+    }
+
+    async fn diagnostics_for_context(
+        &self,
+        file_path: PathBuf,
+        context: crate::bridge::ResultContext,
+        bundle: bool,
     ) -> Result<Json<DiagnosticsResponse>, McpError> {
         let file_path = parse_client_path(file_path)?;
         // Resolved from the validated/canonicalized path (mirrors
@@ -851,7 +1281,12 @@ impl McplsServer {
             let path = validated?;
             self.context
                 .translator
-                .handle_validated_diagnostics(&path, context, &self.context.notification_cache)
+                .handle_validated_diagnostics_for_context(
+                    &path,
+                    context,
+                    &self.context.notification_cache,
+                    bundle,
+                )
                 .await
         }
         .await;
@@ -870,27 +1305,69 @@ impl McplsServer {
         }))
     }
 
+    /// Capture or compare a bounded caller-held diagnostic observation.
+    #[tool(
+        description = "Capture or compare exact diagnostic occurrences for one file. Reuse the returned baseline verbatim. mode:refresh synchronizes and pulls; cached observes resident cache only. Resolved indices mean absent from a complete comparable report, never proof of a source fix. Incomplete evidence retains matches and uncertain_removed. Baselines expire on runtime/server identity changes. Source freshness is always unknown.",
+        title = "Diagnostics Delta"
+    )]
+    async fn diagnostics_delta(
+        &self,
+        Parameters(input): Parameters<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
+        self.diagnostic_delta(serde_json::Value::Object(input))
+            .await
+            .and_then(|value| {
+                value
+                    .as_object()
+                    .cloned()
+                    .map(Json)
+                    .ok_or_else(|| McpError::internal_error("invalid delta output", None))
+            })
+    }
+
     /// Rename a symbol across the workspace.
     // read-only: returns a proposed WorkspaceEdit, does not apply it -- mcpls
     // has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Rename symbol across workspace. Returns text edits for all files where symbol is used. A non-empty `dropped` field means some edits were withheld (e.g. out-of-workspace files, or `exceeds_item_cap` when a file's edits exceed the fixed maximum) -- the rename is then incomplete even though `changes` is non-empty. ", name_addressing_note!(), " An ambiguous name never produces an edit. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = "Propose a workspace rename by position or symbol_name. Resolve once; ambiguous names return candidates. Prepare on the rename server when supported. status:proposed has position,preparation,changes; not_renameable has no edits or preview. Preparation rejection stops rename; operational errors remain errors. Empty edits remain proposed. Nonempty dropped means incomplete: do not apply. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
         title = "Rename Symbol"
     )]
     async fn rename_symbol(
         &self,
-        Parameters(RenameParams { target, new_name }): Parameters<RenameParams>,
+        Parameters(RenameParams {
+            target,
+            new_name,
+            full,
+        }): Parameters<RenameParams>,
     ) -> Result<Json<Addressed<RenameResult>>, McpError> {
         let translator = &self.context.translator;
-        self.addressed(target, AddressableTool::Rename, |file_path, position| {
-            translator.handle_rename(file_path, position, new_name)
-        })
-        .await
+        let (file_path, target) = parse_target(target.file_path, target.target)?;
+        let answer = async {
+            let resolved = translator
+                .resolve_symbol_target(&file_path, target, AddressableTool::Rename)
+                .await?;
+            let mut result = translator
+                .handle_rename_with_options(
+                    file_path,
+                    resolved.position,
+                    new_name,
+                    full,
+                    resolved.positions_degraded,
+                )
+                .await?;
+            result.positions_degraded = result.positions_degraded.max(resolved.positions_degraded);
+            Ok(Addressed {
+                result,
+                resolved_symbol: resolved.resolved,
+            })
+        }
+        .await;
+        self.structured_result(answer)
     }
 
     /// Get code completion suggestions.
     #[tool(
-        description = "Completion suggestions at position. Returns methods, functions, variables, types, and snippets. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted. At most 100 items are returned, best matches for the typed prefix first; `truncated: true` means more existed, so type more of the identifier.",
+        description = "Discover API candidates ranked by typed-prefix match and sortText at 1-based UTF-16 positions. limit is 1..100 (default 20); include_documentation defaults to false. trigger is 1..8 bytes or null. After redaction, label/detail/documentation caps are 512/2048/4096 UTF-8 bytes; labels retain payload handling. Return the longest prefix within 65536 compact JSON bytes. omitted_count/truncated/truncated_fields report local omissions/clipping. provider_is_incomplete preserves bool|null. Clipped labels are partial. Bounds exclude the LSP response. positions_degraded:request means an unreliable target. No edits.",
         title = "Completions"
     )]
     async fn get_completions(
@@ -903,15 +1380,53 @@ impl McplsServer {
                     character,
                 },
             trigger,
+            limit,
+            include_documentation,
         }): Parameters<CompletionsParams>,
     ) -> Result<Json<CompletionsResult>, McpError> {
         let file_path = parse_client_path(file_path)?;
-        self.structured_result(
-            self.context
-                .translator
-                .handle_completions(file_path, parse_position(line, character)?, trigger)
-                .await,
-        )
+        let mut result = self
+            .context
+            .translator
+            .handle_completions(
+                file_path,
+                parse_position(line, character)?,
+                trigger,
+                limit,
+                include_documentation,
+            )
+            .await
+            .map_err(|error| self.render_error(error))?;
+        result.redact_server_text(&self.context.translator.server_text_redactions());
+        for item in &mut result.items {
+            for (field, value, maximum) in [
+                ("label", Some(&mut item.label), 512),
+                ("detail", item.detail.as_mut(), 2048),
+                ("documentation", item.documentation.as_mut(), 4096),
+            ] {
+                if let Some(value) = value.filter(|value| value.len() > maximum) {
+                    let end = value.floor_char_boundary(maximum);
+                    value.truncate(end);
+                    item.truncated_fields.push(field.to_owned());
+                }
+            }
+        }
+        loop {
+            result.truncated = result.omitted_count > 0
+                || result
+                    .items
+                    .iter()
+                    .any(|item| !item.truncated_fields.is_empty());
+            let bytes = serde_json::to_vec(&result)
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+            if bytes.len() <= 65536 {
+                return Ok(Json(result));
+            }
+            // Each bounded item is larger than any omission-count digit increase.
+            // Removing the tail therefore finds the longest fitting provider prefix.
+            let _ = result.items.pop();
+            result.omitted_count = result.omitted_count.saturating_add(1);
+        }
     }
 
     /// Get all symbols in a document.
@@ -932,16 +1447,69 @@ impl McplsServer {
         )
     }
 
+    /// Return compact document navigation.
+    #[tool(
+        description = concat!("Compact symbol page in server order. include_targets:true adds portable targets or unavailable reasons; default false. Restart pagination after edits. Flat positions are approximate. `truncated` means more matches remain; limits do not bound the LSP response. ", positions_note_response!()),
+        title = "Document Outline"
+    )]
+    async fn get_document_outline(
+        &self,
+        Parameters(DocumentOutlineParams {
+            include_targets,
+            file_path,
+            query,
+            kind_filter,
+            offset,
+            limit,
+        }): Parameters<DocumentOutlineParams>,
+    ) -> Result<Json<DocumentOutlineResult>, McpError> {
+        if !file_path.is_absolute() {
+            return Err(McpError::invalid_params("file_path must be absolute", None));
+        }
+        let file_path = parse_client_path(file_path)?;
+        let kind_filter = parse_kind_filter(kind_filter, KindFilterField::KindFilter)?;
+        let translator = &self.context.translator;
+        let mut result = translator
+            .handle_document_outline(file_path.clone(), query, kind_filter, offset, limit)
+            .await
+            .map_err(|error| self.render_error(error))?;
+        if include_targets {
+            let uri = crate::bridge::path_to_uri(file_path.as_path())
+                .map_err(|error| self.render_error(error))?;
+            let reason = if result.positions_degraded.is_some() {
+                Some("positions_degraded")
+            } else if result.fidelity == crate::bridge::SymbolFidelity::Flat {
+                Some("approximate_position")
+            } else {
+                None
+            };
+            let entries = result
+                .symbols
+                .iter()
+                .map(|entry| (uri.to_string(), entry.position.clone()))
+                .collect::<Vec<_>>();
+            let targets = translator.portable_targets(entries, reason).await;
+            for (entry, target) in result.symbols.iter_mut().zip(targets) {
+                match target {
+                    Ok(target) => entry.symbol_target = Some(target),
+                    Err(reason) => entry.symbol_target_unavailable = Some(reason),
+                }
+            }
+        }
+        self.structured_result(Ok(result))
+    }
+
     /// Format a document according to language server rules.
     // read-only: returns proposed text edits, does not apply them -- mcpls
     // has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Format document with language-specific rules. Returns text edits for indentation, spacing, and style. ", positions_note_response!()),
+        description = "Propose whole-file formatting as one changes document, including empty successful edits. positions_degraded:response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
         title = "Format Document"
     )]
     async fn format_document(
         &self,
         Parameters(FormatDocumentParams {
+            full,
             file_path,
             tab_size,
             insert_spaces,
@@ -951,43 +1519,69 @@ impl McplsServer {
         self.structured_result(
             self.context
                 .translator
-                .handle_format_document(file_path, tab_size, insert_spaces)
+                .handle_format_document_with_options(file_path, tab_size, insert_spaces, full)
                 .await,
         )
     }
 
     /// Search for symbols across the workspace.
     #[tool(
-        description = concat!("Search workspace symbols by name. Supports partial matching and fuzzy search. `limit` is capped at a fixed server-side maximum regardless of the value requested; `truncated: true` on the result means more matches exist than are returned. With several servers eligible every capable one is asked: each symbol names its `server`, and `servers` holds one outcome per asked server, each with its own `index_coverage`. A server whose `handles` omit this tool, or that untrusted mode refused, is neither asked nor listed; `restart_server` revives an `unavailable` one. ", positions_note_response!(), " ", out_of_workspace_note!(), " ", index_coverage_note!()),
+        description = concat!("Search workspace symbols by name. Multiple eligible servers run concurrently; symbols identify their server and servers lists typed outcomes in configuration order. Unavailable servers are not restarted. include_targets:true adds portable targets or unavailable reasons; default false. Supports partial matching and fuzzy search. `limit` is capped at a fixed server-side maximum regardless of the value requested; `truncated: true` on the result means more matches exist than are returned. ", positions_note_response!(), " ", out_of_workspace_note!(), " ", index_coverage_note!()),
         title = "Workspace Symbol Search"
     )]
     async fn workspace_symbol_search(
         &self,
         Parameters(WorkspaceSymbolParams {
+            include_targets,
             query,
             kind_filter,
             limit,
         }): Parameters<WorkspaceSymbolParams>,
     ) -> Result<Json<WorkspaceSymbolResult>, McpError> {
         let kind_filter = parse_kind_filter(kind_filter, KindFilterField::KindFilter)?;
-        self.structured_result(
-            self.context
-                .translator
-                .handle_workspace_symbol(query, kind_filter, limit)
-                .await,
-        )
+        let translator = &self.context.translator;
+        let mut result = translator
+            .handle_workspace_symbol(query, kind_filter, limit)
+            .await
+            .map_err(|error| self.render_error(error))?;
+        if include_targets {
+            let entries = result
+                .symbols
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.location.uri.clone(),
+                        entry.location.range.start.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let targets = translator
+                .portable_targets(
+                    entries,
+                    result.positions_degraded.map(|_| "positions_degraded"),
+                )
+                .await;
+            for (entry, target) in result.symbols.iter_mut().zip(targets) {
+                match target {
+                    Ok(target) => entry.symbol_target = Some(target),
+                    Err(reason) => entry.symbol_target_unavailable = Some(reason),
+                }
+            }
+        }
+        self.structured_result(Ok(result))
     }
 
     /// Get code actions for a range.
     // read-only: returns proposed CodeAction edits, does not apply them --
     // mcpls has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Code actions for range. Returns quick fixes, refactorings, and source actions with edits. Capped at a fixed maximum; `truncated: true` on the result means some actions, diagnostics, or edits were left out. An action's `edit.dropped` field, when non-empty, means some of that edit's changes were withheld (e.g. out-of-workspace files). The end line must exist in the file; a line past the end is rejected as invalid params. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = "Propose range quick fixes/refactorings/source actions; resolved edits and commands are retained. A line past EOF is invalid. truncated means actions/diagnostics/edits omitted; nonempty edit.dropped means incomplete edits. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes; execute command-only actions outside this MCP interface.",
         title = "Code Actions"
     )]
     async fn get_code_actions(
         &self,
         Parameters(CodeActionsParams {
+            full,
             file_path,
             range,
             kind_filter,
@@ -998,62 +1592,145 @@ impl McplsServer {
         self.structured_result(
             self.context
                 .translator
-                .handle_code_actions(file_path, parse_bounded_range(&range)?, kind_filter)
+                .handle_code_actions_with_options(
+                    file_path,
+                    parse_bounded_range(&range)?,
+                    kind_filter,
+                    full,
+                )
                 .await,
         )
     }
 
-    /// Prepare call hierarchy at a position.
+    /// Traverse a bounded caller or callee graph.
     #[tool(
-        description = concat!("Prepare call hierarchy for a symbol. Returns callable items for incoming/outgoing call analysis, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", name_addressing_note!(), " ", indexing_note!(), " ", positions_note_request!(), " ", out_of_workspace_note!()),
-        title = "Prepare Call Hierarchy"
+        description = "Bounded caller/callee graph. Required direction: incoming or outgoing. Use a file position/name, symbol_target, or unchanged item. depth:2 (1..8); max_nodes:30 (1..256). Edges point caller to callee; ranges belong to caller URI. Shared budgets and partial statuses are explicit. Freshness is unknown; no atomic snapshot. Analyzer work and inbound parsing use existing limits.",
+        title = "Call Graph"
     )]
-    async fn prepare_call_hierarchy(
+    async fn get_call_graph(
         &self,
-        Parameters(target): Parameters<SymbolTargetParams>,
-    ) -> Result<Json<Indexed<Addressed<CallHierarchyPrepareResult>>>, McpError> {
-        let translator = &self.context.translator;
-        self.addressed_as(
-            target,
-            AddressableTool::PrepareCallHierarchy,
-            |file_path, position| translator.handle_call_hierarchy_prepare(file_path, position),
-            hoist_indexing,
+        Parameters(params): Parameters<super::tools::CallGraphParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        self.get_call_graph_with_origin(
+            params,
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .is_some(),
         )
         .await
     }
 
+    async fn get_call_graph_with_origin(
+        &self,
+        params: super::tools::CallGraphParams,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+        authenticated: bool,
+    ) -> Result<Json<serde_json::Value>, McpError> {
+        let start = match params.target {
+            CallHierarchyCallsParams::Item { item } => crate::bridge::CallGraphStart::Item(
+                Box::new(parse_hierarchy_item(item)?.with_origin(origin.clone())),
+            ),
+            CallHierarchyCallsParams::Target(target) => {
+                if !target.file_path.is_absolute() {
+                    return Err(McpError::invalid_params("file_path must be absolute", None));
+                }
+                let (path, target) = parse_target(target.file_path, target.target)?;
+                crate::bridge::CallGraphStart::Target(path, target)
+            }
+        };
+        let mut result = self
+            .context
+            .translator
+            .handle_call_graph(
+                start,
+                crate::bridge::CallGraphOptions {
+                    direction: params.direction,
+                    depth: params.depth,
+                    max_nodes: params.max_nodes,
+                    authenticated,
+                },
+                origin.clone(),
+            )
+            .await
+            .map_err(|error| self.render_error(error))?;
+        // Hierarchy identifiers and opaque data follow the existing payload
+        // policy. Redaction detection never rewrites reusable provider fields.
+        self.context
+            .translator
+            .server_text_redactions()
+            .note_payload_json(&result);
+        if !authenticated {
+            crate::bridge::call_graph::enforce_final_bytes(&mut result);
+        }
+        Ok(Json(result))
+    }
+
     /// Get incoming calls (callers).
     #[tool(
-        description = concat!("Functions calling the specified item. Takes call hierarchy item, returns callers, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Functions calling a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. ", out_of_workspace_note!()),
         title = "Incoming Calls"
     )]
     async fn get_incoming_calls(
         &self,
-        Parameters(CallHierarchyCallsParams { item }): Parameters<CallHierarchyCallsParams>,
-    ) -> Result<Json<IncomingCallsResult>, McpError> {
-        self.structured_result(
-            self.context
-                .translator
-                .handle_incoming_calls(parse_hierarchy_item(item)?)
-                .await,
+        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
+    ) -> Result<Json<CallHierarchyCallsResult<IncomingCallsResult>>, McpError> {
+        self.get_incoming_calls_with_origin(
+            Parameters(params),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
         )
+        .await
+    }
+
+    async fn get_incoming_calls_with_origin(
+        &self,
+        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+    ) -> Result<Json<CallHierarchyCallsResult<IncomingCallsResult>>, McpError> {
+        self.call_hierarchy_calls(params, origin, |item| {
+            self.context.translator.handle_incoming_calls(item)
+        })
+        .await
     }
 
     /// Get outgoing calls (callees).
     #[tool(
-        description = concat!("Functions called by the specified item. Takes call hierarchy item, returns callees, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Functions called by a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. ", out_of_workspace_note!()),
         title = "Outgoing Calls"
     )]
     async fn get_outgoing_calls(
         &self,
-        Parameters(CallHierarchyCallsParams { item }): Parameters<CallHierarchyCallsParams>,
-    ) -> Result<Json<OutgoingCallsResult>, McpError> {
-        self.structured_result(
-            self.context
-                .translator
-                .handle_outgoing_calls(parse_hierarchy_item(item)?)
-                .await,
+        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
+    ) -> Result<Json<CallHierarchyCallsResult<OutgoingCallsResult>>, McpError> {
+        self.get_outgoing_calls_with_origin(
+            Parameters(params),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
         )
+        .await
+    }
+
+    async fn get_outgoing_calls_with_origin(
+        &self,
+        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+    ) -> Result<Json<CallHierarchyCallsResult<OutgoingCallsResult>>, McpError> {
+        self.call_hierarchy_calls(params, origin, |item| {
+            self.context.translator.handle_outgoing_calls(item)
+        })
+        .await
     }
 
     /// Prepare type hierarchy at a position.
@@ -1080,58 +1757,64 @@ impl McplsServer {
 
     /// Get the supertypes (bases) of a type hierarchy item.
     #[tool(
-        description = concat!("Supertypes (base classes, implemented interfaces) of a type hierarchy item. Takes an item exactly as returned by prepare_type_hierarchy, get_supertypes or get_subtypes; returns one level, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Supertypes (base classes, implemented interfaces) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. ", positions_note_request!(), " ", out_of_workspace_note!()),
         title = "Supertypes"
     )]
     async fn get_supertypes(
         &self,
-        Parameters(TypeHierarchyWalkParams { item }): Parameters<TypeHierarchyWalkParams>,
-    ) -> Result<Json<TypeHierarchyResult>, McpError> {
-        self.structured_result(
-            self.context
-                .translator
-                .handle_supertypes(parse_hierarchy_item(item)?)
-                .await,
+        Parameters(params): Parameters<TypeHierarchyWalkParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
+        self.get_supertypes_with_origin(
+            Parameters(params),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
         )
+        .await
+    }
+
+    async fn get_supertypes_with_origin(
+        &self,
+        Parameters(params): Parameters<TypeHierarchyWalkParams>,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
+        self.type_hierarchy_walk(params, origin, |item| {
+            self.context.translator.handle_supertypes(item)
+        })
+        .await
     }
 
     /// Get the subtypes (derived types) of a type hierarchy item.
     #[tool(
-        description = concat!("Subtypes (derived classes, implementors) of a type hierarchy item. Takes an item exactly as returned by prepare_type_hierarchy, get_supertypes or get_subtypes; returns one level, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = concat!("Subtypes (derived classes, implementors) at absolute `file_path` with `line`/`character` (1-based UTF-16), or `symbol_name` with optional `symbol_kind`/`container`. Reuse unchanged `item` for one-level traversal. Direct `status`: `ok`, `no_item`, `selection_required` (multiple/truncated preparation), or `preparation_incomplete` (degraded positions, highest precedence). Only a complete, reliable singleton traverses. Direct results include `indexing_in_progress` and name queries include `resolved_symbol`; item results omit these and status. Omitted items set `truncated: true`. ", positions_note_request!(), " ", out_of_workspace_note!()),
         title = "Subtypes"
     )]
     async fn get_subtypes(
         &self,
-        Parameters(TypeHierarchyWalkParams { item }): Parameters<TypeHierarchyWalkParams>,
-    ) -> Result<Json<TypeHierarchyResult>, McpError> {
-        self.structured_result(
-            self.context
-                .translator
-                .handle_subtypes(parse_hierarchy_item(item)?)
-                .await,
+        Parameters(params): Parameters<TypeHierarchyWalkParams>,
+        context: rmcp::service::RequestContext<RoleServer>,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
+        self.get_subtypes_with_origin(
+            Parameters(params),
+            context
+                .extensions
+                .get::<crate::bridge::HierarchyOrigin>()
+                .cloned(),
         )
+        .await
     }
 
-    /// Check whether the symbol at a position can be renamed.
-    #[tool(
-        description = concat!("Whether the symbol at position can be renamed, before proposing a rename. `status` is `renameable` (with the identifier `range` and, when the server gives it, `placeholder`), `default_behavior` (rename is accepted but the server gives no range) or `not_renameable` (optionally with the server's `server_message`). Unsupported servers are refused with a capability error instead. ", positions_note_request!()),
-        title = "Prepare Rename"
-    )]
-    async fn prepare_rename(
+    async fn get_subtypes_with_origin(
         &self,
-        Parameters(PositionParams {
-            file_path,
-            line,
-            character,
-        }): Parameters<PositionParams>,
-    ) -> Result<Json<PrepareRenameResult>, McpError> {
-        let file_path = parse_client_path(file_path)?;
-        self.structured_result(
-            self.context
-                .translator
-                .handle_prepare_rename(file_path, parse_position(line, character)?)
-                .await,
-        )
+        Parameters(params): Parameters<TypeHierarchyWalkParams>,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError> {
+        self.type_hierarchy_walk(params, origin, |item| {
+            self.context.translator.handle_subtypes(item)
+        })
+        .await
     }
 
     /// Get all occurrences of the symbol at a position within one file.
@@ -1201,12 +1884,13 @@ impl McplsServer {
     // read-only: returns proposed text edits, does not apply them -- mcpls
     // has no write-back path today; revisit if that changes.
     #[tool(
-        description = concat!("Format only a range with language-specific rules. Returns text edits the server reports for that range; edits are not filtered or applied. A line past the end of the file is rejected. ", positions_note_request!()),
+        description = "Propose formatting as one changes document for a valid range; reported edits are not filtered. A line past EOF is invalid. positions_degraded:request means unreliable target; response means inexact edit columns. full defaults false; true adds exact normalized raw edits. preview.status:complete/truncated/unavailable; unified diffs have 3 context lines. Secret redaction sets redacted:true; raw edits stay exact. preview_source(origin,sha256) identifies observed bytes, not analyzed input; analysis_freshness:unknown. supplied_version preserves integer/null only when supplied. Budgets:32 files,8 MiB source+constructed text,2 s best-effort reads,100 ms off-executor diff,64 KiB display after final redaction. Limits retain edits. No writes/commands.",
         title = "Format Range"
     )]
     async fn format_range(
         &self,
         Parameters(FormatRangeParams {
+            full,
             file_path,
             range,
             tab_size,
@@ -1217,11 +1901,12 @@ impl McplsServer {
         self.structured_result(
             self.context
                 .translator
-                .handle_format_range(
+                .handle_format_range_with_options(
                     file_path,
                     parse_bounded_range(&range)?,
                     tab_size,
                     insert_spaces,
+                    full,
                 )
                 .await,
         )
@@ -1323,43 +2008,65 @@ impl McplsServer {
 
     /// Go to implementation locations.
     #[tool(
-        description = concat!("Implementation locations of a trait method or interface member. Capped at a fixed maximum for an extremely common trait/interface; `truncated: true` on the result means more implementations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Implementation locations of a trait method or interface member. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Capped at a fixed maximum for an extremely common trait/interface; `truncated: true` on the result means more implementations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Implementation"
     )]
     async fn go_to_implementation(
         &self,
-        Parameters(NavigationParams { target, context }): Parameters<NavigationParams>,
-    ) -> Result<Json<Addressed<LocationsResult>>, McpError> {
+        Parameters(NavigationParams {
+            target,
+            context,
+            include_source,
+        }): Parameters<NavigationParams>,
+    ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
         self.addressed(
             target,
             AddressableTool::Implementation,
-            |file_path, position| translator.handle_implementation(file_path, position, context),
+            |file_path, position| {
+                translator.handle_implementation_with_source(
+                    file_path,
+                    position,
+                    context,
+                    include_source,
+                )
+            },
         )
         .await
     }
 
     /// Go to type definition location.
     #[tool(
-        description = concat!("Type definition location of an expression or symbol. Distinct from go-to-definition for variable bindings. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Type definition location of an expression or symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Distinct from go-to-definition for variable bindings. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Type Definition"
     )]
     async fn go_to_type_definition(
         &self,
-        Parameters(NavigationParams { target, context }): Parameters<NavigationParams>,
-    ) -> Result<Json<Addressed<LocationsResult>>, McpError> {
+        Parameters(NavigationParams {
+            target,
+            context,
+            include_source,
+        }): Parameters<NavigationParams>,
+    ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
         self.addressed(
             target,
             AddressableTool::TypeDefinition,
-            |file_path, position| translator.handle_type_definition(file_path, position, context),
+            |file_path, position| {
+                translator.handle_type_definition_with_source(
+                    file_path,
+                    position,
+                    context,
+                    include_source,
+                )
+            },
         )
         .await
     }
 
     /// Go to declaration location.
     #[tool(
-        description = concat!("Declaration location of the symbol at position. Differs from go-to-definition for languages that separate declaration from definition (C/C++ headers, interface members); servers without a declaration concept may return the definition. An empty result is valid. Capped at a fixed maximum; `truncated: true` on the result means more locations exist than are returned. ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Declaration location of the symbol at position. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Differs from go-to-definition for languages that separate declaration from definition (C/C++ headers, interface members); servers without a declaration concept may return the definition. An empty result is valid. Capped at a fixed maximum; `truncated: true` on the result means more locations exist than are returned. ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
         title = "Go to Declaration"
     )]
     async fn go_to_declaration(
@@ -1372,15 +2079,39 @@ impl McplsServer {
                     character,
                 },
             context,
+            include_source,
         }): Parameters<DeclarationParams>,
-    ) -> Result<Json<LocationsResult>, McpError> {
+    ) -> Result<Json<crate::bridge::NavigationResult>, McpError> {
         let file_path = parse_client_path(file_path)?;
         self.structured_result(
             self.context
                 .translator
-                .handle_declaration(file_path, parse_position(line, character)?, context)
+                .handle_declaration_with_source(
+                    file_path,
+                    parse_position(line, character)?,
+                    context,
+                    include_source,
+                )
                 .await,
         )
+    }
+
+    /// Append explicit feedback without a workspace or language server.
+    #[tool(
+        description = "Store explicit mcpls feedback privately on this host. Report concrete mcpls failures, missing capabilities, or useful workarounds once per distinct observation. Skip routine success and duplicates. Do not report feedback-tool failures recursively; reporting failure must not block the user's task. operation: nonblank, max128 UTF-8 bytes; observation: nonblank, max2048 bytes; optional category: friction/missing/useful; optional workaround: nonblank, max2048 bytes. Preserve only text you explicitly supply; do not include secrets or source code. Repeated calls append separate records.",
+        title = "Add Feedback",
+        annotations(
+            title = "Add Feedback",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn feedback_add(
+        &self,
+        Parameters(input): Parameters<super::feedback::FeedbackInput>,
+    ) -> Result<Json<super::feedback::FeedbackStored>, McpError> {
+        super::feedback::add(input).await.map(Json)
     }
 
     /// Restart LSP servers.
@@ -1412,7 +2143,7 @@ impl McplsServer {
 
     /// Report which tools are usable for which languages.
     #[tool(
-        description = "Which tools are usable for which languages in this session, without making a failing call. Call it before using a tool on a new language. Per tool, `coverage` is `all`, `some`, `none`, `unknown` (a server is still initializing) or `always` (needs no language server); `routes` groups the languages (`languages`) sharing a `status`: `supported`, `push_only` (`get_diagnostics` answers from the push cache), `capability_not_advertised`, `initializing`, `unavailable` (failed to start or died) or `no_server`; a multi-server `workspace_symbol_search` lists one route per server, without `languages`. `file_path` restricts the report to that file's language. `supported` means the call will be dispatched to a capable server, not that it will succeed: indexing, push-only diagnostics and respawn backoff can still fail it.",
+        description = "Report tool support by language. file_path restricts the report to one language; workspace_path selects a workspace. Both must select the same workspace. In dispatcher mode, no selector returns basis:configured without starting a backend; a selector returns basis:runtime with workspace_path and runtime_generation. coverage is all, some, none, unknown, or always. unknown means initialization; always needs no LSP. Routes identify supported, push_only, capability_not_advertised, initializing, unavailable, or no_server. Workspace-symbol fanout lists one route per admitted server. Advertised support does not guarantee successful indexing, diagnostics, or requests.",
         title = "Tool Support"
     )]
     async fn get_tool_support(
@@ -1429,7 +2160,12 @@ impl McplsServer {
         self.structured_result(file_language.map(|file_language| {
             let languages =
                 file_language.map_or_else(|| snapshot.languages(), |language| vec![language]);
-            ToolSupportReport::build(&snapshot, &languages, self.context.mcp.tool_prefix.as_ref())
+            ToolSupportReport::build(
+                &snapshot,
+                &languages,
+                self.context.mcp.tool_prefix.as_ref(),
+                self.context.mcp.tool_profile,
+            )
         }))
     }
 
@@ -1464,6 +2200,94 @@ impl McplsServer {
                 task: crate::error::BackgroundTask::PathValidation,
                 source,
             })?
+    }
+
+    async fn subscribe_resolved(
+        &self,
+        request: SubscribeRequestParams,
+        context: rmcp::service::RequestContext<RoleServer>,
+        resolved: Option<ResolvedResource>,
+        lease: Option<crate::dispatcher::Lease>,
+    ) -> Result<super::session::SubscriptionRollback, McpError> {
+        contain_panic(
+            async {
+                let session = self.context.session.require_stateful(&context)?;
+
+                // Keyed by the canonical URI: the pump publishes canonical paths only.
+                let ResolvedResource {
+                    path: validated_path,
+                    uri: canonical_uri,
+                } = match resolved {
+                    Some(resolved) => resolved,
+                    None => self
+                        .resolve_resource(&request.uri)
+                        .await
+                        .map_err(|e| self.render_error(e))?,
+                };
+
+                // Record the subscription *before* checking the cache. This closes the race where
+                // a PublishDiagnostics notification lands between the cache check and the
+                // subscription being recorded: if diagnostics arrive before this point, the check
+                // below catches them; if they arrive after, `diagnostics_pump`'s own
+                // `subs.contains` check already sees this URI as subscribed and delivers the
+                // update through the normal push path.
+                //
+                // The raw request URI is recorded as an alias of the canonical one so a later
+                // `unsubscribe` for the same raw URI still resolves even if canonicalizing it then
+                // fails, e.g. because the file was deleted since subscribing (#499).
+                let rollback = session
+                    .begin_subscribe(canonical_uri.clone(), request.uri.clone(), lease)
+                    .await
+                    .map_err(|e| self.render_error(e.into()))?;
+                if !rollback.newly_created() {
+                    tracing::debug!(
+                        "client re-subscribed to already-subscribed resource {canonical_uri}"
+                    );
+                }
+
+                // Resolved after recording, mirroring the settle publish in
+                // `lib.rs` (which mutates the translator, then snapshots the
+                // subscriptions): one side always observes the other, so the
+                // client sees either this error or exactly one update. A stray
+                // update for the rolled-back URI is harmless. A re-subscribe to
+                // an already-subscribed failed route errors too but keeps its
+                // earlier subscription; the settle publish already covered it.
+                if let Some(failure) = self
+                    .context
+                    .translator
+                    .diagnostics_route_for_path(&validated_path)
+                    .into_startup_failure()
+                {
+                    return Err(
+                        self.render_error(crate::error::Error::ServerFailedToStart(failure))
+                    );
+                }
+
+                // Build the URI from the canonicalized path, matching `read_resource` and
+                // what `diagnostics_pump` stores from LSP notifications.
+                let lsp_uri = crate::bridge::path_to_uri(&validated_path)
+                    .map_err(|e| self.render_error(e))?;
+                let has_cached_diagnostics = {
+                    let cache = self.context.notification_cache.lock().await;
+                    cache.has_diagnostics(&lsp_uri)
+                };
+
+                if has_cached_diagnostics
+                    && let Err(e) = context
+                        .peer
+                        .notify_resource_updated(ResourceUpdatedNotificationParam::new(
+                            canonical_uri.as_str(),
+                        ))
+                        .await
+                {
+                    tracing::warn!("Failed to replay cached diagnostics for {canonical_uri}: {e}");
+                }
+
+                Ok(rollback)
+            },
+            "subscribe",
+        )
+        .await
     }
 
     /// [`render_error`] with the secrets of every live server.
@@ -1510,6 +2334,154 @@ impl McplsServer {
             .with_resolved_target(file_path, target, tool, call)
             .await;
         self.structured_result(answer.map(finish))
+    }
+
+    /// Compose direct preparation and one traversal before rendering server text.
+    async fn call_hierarchy_calls<T, F, Fut>(
+        &self,
+        params: CallHierarchyCallsParams,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+        walk: F,
+    ) -> Result<Json<CallHierarchyCallsResult<T>>, McpError>
+    where
+        T: Serialize + JsonSchema + ServerText,
+        F: FnOnce(CheckedHierarchyItem) -> Fut,
+        Fut: Future<Output = crate::error::Result<T>>,
+    {
+        let target = match params {
+            CallHierarchyCallsParams::Item { item } => {
+                return self.structured_result(
+                    walk(parse_hierarchy_item(item)?.with_origin(origin))
+                        .await
+                        .map(CallHierarchyCallsResult::Legacy),
+                );
+            }
+            CallHierarchyCallsParams::Target(target) => target,
+        };
+        if !target.file_path.is_absolute() {
+            return Err(McpError::invalid_params("file_path must be absolute", None));
+        }
+        let (file_path, target) = parse_target(target.file_path, target.target)?;
+        let translator = &self.context.translator;
+        let prepared = translator
+            .with_resolved_target(
+                file_path,
+                target,
+                AddressableTool::PrepareCallHierarchy,
+                |file_path, position| translator.handle_call_hierarchy_prepare(file_path, position),
+            )
+            .await
+            .map_err(|error| self.render_error(error))?;
+        let Indexed {
+            result:
+                Addressed {
+                    result: mut prepared,
+                    resolved_symbol,
+                },
+            indexing,
+        } = hoist_indexing(prepared);
+        let result = if prepared.positions_degraded.is_some() {
+            DirectCallsResult::Stopped {
+                status: PreparationStatus::PreparationIncomplete,
+                result: prepared,
+            }
+        } else if prepared.truncated || prepared.items.len() > 1 {
+            DirectCallsResult::Stopped {
+                status: PreparationStatus::SelectionRequired,
+                result: prepared,
+            }
+        } else if let Some(item) = prepared.items.pop() {
+            // Pass the original item, including opaque data, before any rendering.
+            let calls = walk(parse_hierarchy_item(item)?)
+                .await
+                .map_err(|error| self.render_error(error))?;
+            DirectCallsResult::Ok {
+                status: CallsStatus::Ok,
+                result: calls,
+            }
+        } else {
+            DirectCallsResult::Stopped {
+                status: PreparationStatus::NoItem,
+                result: prepared,
+            }
+        };
+        self.structured_result(Ok(CallHierarchyCallsResult::Direct(Indexed::new(
+            Addressed {
+                result,
+                resolved_symbol,
+            },
+            indexing,
+        ))))
+    }
+
+    /// Resolve and prepare a direct type target before one traversal.
+    async fn type_hierarchy_walk<F, Fut>(
+        &self,
+        params: TypeHierarchyWalkParams,
+        origin: Option<crate::bridge::HierarchyOrigin>,
+        walk: F,
+    ) -> Result<Json<TypeHierarchyWalkResult>, McpError>
+    where
+        F: FnOnce(CheckedHierarchyItem) -> Fut,
+        Fut: Future<Output = crate::error::Result<TypeHierarchyResult>>,
+    {
+        let target = match params {
+            TypeHierarchyWalkParams::Item { item } => {
+                return self.structured_result(
+                    walk(parse_hierarchy_item(item)?.with_origin(origin))
+                        .await
+                        .map(TypeHierarchyWalkResult::Legacy),
+                );
+            }
+            TypeHierarchyWalkParams::Target(target) => target,
+        };
+        if !target.file_path.is_absolute() {
+            return Err(McpError::invalid_params("file_path must be absolute", None));
+        }
+        let (file_path, target) = parse_target(target.file_path, target.target)?;
+        let translator = &self.context.translator;
+        let prepared = translator
+            .with_resolved_target(
+                file_path,
+                target,
+                AddressableTool::PrepareTypeHierarchy,
+                |file_path, position| translator.handle_type_hierarchy_prepare(file_path, position),
+            )
+            .await
+            .map_err(|error| self.render_error(error))?;
+        let Indexed {
+            result:
+                Addressed {
+                    result: mut prepared,
+                    resolved_symbol,
+                },
+            indexing,
+        } = hoist_indexing(prepared);
+        let status = if prepared.positions_degraded.is_some() {
+            TypeWalkStatus::PreparationIncomplete
+        } else if prepared.truncated || prepared.items.len() > 1 {
+            TypeWalkStatus::SelectionRequired
+        } else if let Some(item) = prepared.items.pop() {
+            // Preserve original opaque data until traversal has completed.
+            prepared = walk(parse_hierarchy_item(item)?)
+                .await
+                .map_err(|error| self.render_error(error))?;
+            TypeWalkStatus::Ok
+        } else {
+            TypeWalkStatus::NoItem
+        };
+        self.structured_result(Ok(TypeHierarchyWalkResult::Direct(Indexed::new(
+            Addressed {
+                result: DirectTypesResult {
+                    status,
+                    items: prepared.items,
+                    truncated: prepared.truncated,
+                    positions_degraded: prepared.positions_degraded,
+                },
+                resolved_symbol,
+            },
+            indexing,
+        ))))
     }
 
     /// [`to_structured_tool_result`] with the secrets of every live server
@@ -1585,6 +2557,14 @@ impl McplsServer {
         request: ReadResourceRequestParams,
     ) -> Result<ReadResourceResponse, McpError> {
         let path = parse_uri(&request.uri).map_err(client_input_error)?;
+        self.read_resource_path(request, path).await
+    }
+
+    async fn read_resource_path(
+        &self,
+        request: ReadResourceRequestParams,
+        path: ClientPath,
+    ) -> Result<ReadResourceResponse, McpError> {
         let response = self.resource_diagnostics_response(&path).await?;
 
         let json = serde_json::to_string(&response)
@@ -1775,14 +2755,34 @@ impl ServerHandler for McplsServer {
     ) -> Result<ListResourcesResult, McpError> {
         contain_panic(
             async {
-                let mut open_paths = self.context.translator.open_document_paths();
+                let (mut open_paths, generation) = if let Some(dispatcher) = &self.dispatcher {
+                    let (paths, generation) = dispatcher.resource_paths().await;
+                    (paths, Some(generation))
+                } else {
+                    (self.context.translator.open_document_paths(), None)
+                };
                 // `open_document_paths()` is backed by a `HashMap`; sort so pagination
                 // cursors resume at a stable, deterministic position across calls.
                 open_paths.sort();
 
-                let cursor = request.and_then(|r| r.cursor);
+                let mut cursor = request.and_then(|r| r.cursor);
+                if let (Some(generation), Some(raw)) = (&generation, &cursor) {
+                    let (prefix, offset) = raw
+                        .split_once(':')
+                        .ok_or_else(|| crate::dispatcher::DispatchError::stale().wire())?;
+                    if prefix != generation {
+                        return Err(crate::dispatcher::DispatchError::stale().wire());
+                    }
+                    cursor = Some(offset.to_string());
+                }
                 let (page, next_cursor) =
                     paginate_resource_paths(&open_paths, cursor.as_deref(), RESOURCE_PAGE_SIZE)?;
+                let next_cursor = next_cursor.map(|offset| {
+                    generation.as_ref().map_or_else(
+                        || offset.clone(),
+                        |generation| format!("{generation}:{offset}"),
+                    )
+                });
 
                 let resources: Vec<_> = page
                     .iter()
@@ -1823,6 +2823,17 @@ impl ServerHandler for McplsServer {
         request: ReadResourceRequestParams,
         _context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
+        if let Some(dispatcher) = &self.dispatcher {
+            let (lease, server, resolved) = self.resource_session(&request.uri).await?;
+            let path = ClientPath::try_from(resolved.path)
+                .map_err(|error| server.render_error(error.into()))?;
+            let result = server.read_resource_path(request, path).await;
+            dispatcher
+                .validate(&lease.resident)
+                .await
+                .map_err(crate::dispatcher::DispatchError::wire)?;
+            return result;
+        }
         contain_panic(self.read_resource_inner(request), "read_resource").await
     }
 
@@ -1833,8 +2844,7 @@ impl ServerHandler for McplsServer {
     ) -> Result<CallToolResponse, McpError> {
         let tool = request.name.clone();
         let (request_token, peer) = (context.ct.clone(), context.peer.clone());
-        let tcc = ToolCallContext::new(self, request, context);
-        let handler = contain_panic(self.tool_router.call(tcc), "tool call");
+        let handler = contain_panic(Box::pin(self.dispatch_tool(request, context)), "tool call");
         match run_cancellable(&request_token, &self.stop, peer_closed(&peer), handler).await {
             Ok(result) => result,
             Err(stop) => {
@@ -1855,87 +2865,62 @@ impl ServerHandler for McplsServer {
         request: SubscribeRequestParams,
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
-        contain_panic(
-            async {
-                let session = self.context.session.require_stateful(&context)?;
-
-                // Keyed by the canonical URI: the pump publishes canonical paths only.
-                let ResolvedResource {
-                    path: validated_path,
-                    uri: canonical_uri,
-                } = self
-                    .resolve_resource(&request.uri)
-                    .await
-                    .map_err(|e| self.render_error(e))?;
-
-                // Record the subscription *before* checking the cache. This closes the race where
-                // a PublishDiagnostics notification lands between the cache check and the
-                // subscription being recorded: if diagnostics arrive before this point, the check
-                // below catches them; if they arrive after, `diagnostics_pump`'s own
-                // `subs.contains` check already sees this URI as subscribed and delivers the
-                // update through the normal push path.
-                //
-                // The raw request URI is recorded as an alias of the canonical one so a later
-                // `unsubscribe` for the same raw URI still resolves even if canonicalizing it then
-                // fails, e.g. because the file was deleted since subscribing (#499).
-                let newly_subscribed = session
-                    .subscribe(canonical_uri.clone(), request.uri.clone())
-                    .await
-                    .map_err(|e| self.render_error(e.into()))?;
-                if !newly_subscribed {
-                    tracing::debug!(
-                        "client re-subscribed to already-subscribed resource {canonical_uri}"
-                    );
-                }
-
-                // Resolved after recording, mirroring the settle publish in
-                // `lib.rs` (which mutates the translator, then snapshots the
-                // subscriptions): one side always observes the other, so the
-                // client sees either this error or exactly one update. A stray
-                // update for the rolled-back URI is harmless. A re-subscribe to
-                // an already-subscribed failed route errors too but keeps its
-                // earlier subscription; the settle publish already covered it.
-                if let Some(failure) = self
-                    .context
-                    .translator
-                    .diagnostics_route_for_path(&validated_path)
-                    .into_startup_failure()
-                {
-                    if newly_subscribed {
-                        session
-                            .unsubscribe(Some(&canonical_uri), &request.uri)
-                            .await;
-                    }
-                    return Err(
-                        self.render_error(crate::error::Error::ServerFailedToStart(failure))
-                    );
-                }
-
-                // Build the URI from the canonicalized path, matching `read_resource` and
-                // what `diagnostics_pump` stores from LSP notifications.
-                let lsp_uri = crate::bridge::path_to_uri(&validated_path)
-                    .map_err(|e| self.render_error(e))?;
-                let has_cached_diagnostics = {
-                    let cache = self.context.notification_cache.lock().await;
-                    cache.has_diagnostics(&lsp_uri)
-                };
-
-                if has_cached_diagnostics
-                    && let Err(e) = context
-                        .peer
-                        .notify_resource_updated(ResourceUpdatedNotificationParam::new(
-                            canonical_uri.as_str(),
-                        ))
+        let ct = context.ct.clone();
+        let peer = context.peer.clone();
+        let handler = Box::pin(async {
+            if let Some(dispatcher) = &self.dispatcher {
+                let (lease, server, resolved) = self.resource_session(&request.uri).await?;
+                let resident = lease.resident.clone();
+                let invalid = resident.cancel();
+                let registration = async {
+                    let mut rollback = server
+                        .subscribe_resolved(request, context, Some(resolved), Some(lease))
+                        .await?;
+                    dispatcher
+                        .validate(&resident)
                         .await
-                {
-                    tracing::warn!("Failed to replay cached diagnostics for {canonical_uri}: {e}");
+                        .map_err(crate::dispatcher::DispatchError::wire)?;
+                    if ct.is_cancelled() || peer.is_transport_closed() {
+                        return Err(McpError::new(
+                            ErrorCode(-32800),
+                            "subscription request cancelled",
+                            None,
+                        ));
+                    }
+                    rollback.commit();
+                    drop(rollback);
+                    Ok(())
+                };
+                tokio::select! {
+                    biased;
+                    ()=invalid.cancelled()=>Err(McpError::new(ErrorCode(-32056), "workspace invalidated while subscribing", Some(serde_json::json!({"code":"workspace_invalidated","retryable":true})))),
+                    result=registration=>result,
                 }
-
+            } else {
+                let mut rollback = self
+                    .subscribe_resolved(request, context, None, None)
+                    .await?;
+                if ct.is_cancelled() || peer.is_transport_closed() {
+                    return Err(McpError::new(
+                        ErrorCode(-32800),
+                        "subscription request cancelled",
+                        None,
+                    ));
+                }
+                rollback.commit();
+                drop(rollback);
                 Ok(())
-            },
-            "subscribe",
-        )
-        .await
+            }
+        });
+        run_cancellable(&ct, &self.stop, peer_closed(&peer), handler)
+            .await
+            .unwrap_or_else(|_| {
+                Err(McpError::new(
+                    ErrorCode(-32800),
+                    "subscription request cancelled",
+                    None,
+                ))
+            })
     }
 
     async fn unsubscribe(
@@ -1943,6 +2928,21 @@ impl ServerHandler for McplsServer {
         request: UnsubscribeRequestParams,
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
+        if self.dispatcher.is_some() {
+            parse_uri(&request.uri).map_err(|e| self.render_error(e.into()))?;
+            let servers: Vec<_> = self
+                .workspace_sessions
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .collect();
+            for server in servers {
+                let session = server.context.session.require_stateful(&context)?;
+                session.unsubscribe(None, &request.uri).await;
+            }
+            return Ok(());
+        }
         contain_panic(
             async {
                 let session = self.context.session.require_stateful(&context)?;
@@ -2010,6 +3010,9 @@ impl ServerHandler for McplsServer {
     /// the input with a stream open makes rmcp wait out its drain timeout
     /// (a few seconds) because it does not cancel request tokens at EOF.
     async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        if self.dispatcher.is_some() {
+            return self.dispatch_listen(context).await;
+        }
         let requested = context
             .requested()
             .resource_subscriptions
@@ -2081,10 +3084,14 @@ impl ServerHandler for McplsServer {
         let mut instructions = self.context.mcp.instructions.as_ref().map_or_else(
             || {
                 format!(
-                    "{DEFAULT_INSTRUCTIONS} Call {} to see which tools work for which languages.",
+                    "{DEFAULT_INSTRUCTIONS} Call {} to see which tools work for which languages. Use {} for concrete mcpls failures, missing capabilities, or useful workarounds once per distinct observation. Skip routine success and duplicates. Never report feedback-tool failures recursively; reporting failure must not block the user's task.",
                     prefixed_tool_name(
                         self.context.mcp.tool_prefix.as_ref(),
                         McpTool::GetToolSupport.name()
+                    ),
+                    prefixed_tool_name(
+                        self.context.mcp.tool_prefix.as_ref(),
+                        McpTool::FeedbackAdd.name()
                     )
                 )
             },
@@ -2107,6 +3114,8 @@ impl ServerHandler for McplsServer {
 
 #[cfg(test)]
 mod tests {
+    include!("server/symbol_refs_tests.rs");
+
     use std::assert_matches;
     use std::path::Path;
 
@@ -2170,6 +3179,10 @@ mod tests {
     }
 
     /// As [`at`], for the tools that also take a `context`.
+    fn definition(params: Parameters<PositionParams>) -> Parameters<DefinitionParams> {
+        Parameters(params.0.into())
+    }
+
     fn nav(params: Parameters<PositionParams>) -> Parameters<NavigationParams> {
         Parameters(params.0.into())
     }
@@ -2573,15 +3586,25 @@ mod tests {
                     .await
                     .map(|_| ()),
                 server
-                    .prepare_call_hierarchy(at(Parameters(position(line, character))))
+                    .get_incoming_calls_with_origin(
+                        Parameters(CallHierarchyCallsParams::Target(
+                            position(line, character).into(),
+                        )),
+                        None,
+                    )
+                    .await
+                    .map(|_| ()),
+                server
+                    .get_outgoing_calls_with_origin(
+                        Parameters(CallHierarchyCallsParams::Target(
+                            position(line, character).into(),
+                        )),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
                     .prepare_type_hierarchy(Parameters(position(line, character)))
-                    .await
-                    .map(|_| ()),
-                server
-                    .prepare_rename(Parameters(position(line, character)))
                     .await
                     .map(|_| ()),
                 server
@@ -2590,6 +3613,7 @@ mod tests {
                     .map(|_| ()),
                 server
                     .get_code_actions(Parameters(CodeActionsParams {
+                        full: true,
                         file_path: PathBuf::from("/ws/a.rs"),
                         range: range((line, character), (line, character)),
                         kind_filter: None,
@@ -2598,6 +3622,7 @@ mod tests {
                     .map(|_| ()),
                 server
                     .format_range(Parameters(FormatRangeParams {
+                        full: true,
                         file_path: PathBuf::from("/ws/a.rs"),
                         range: range((line, character), (line, character)),
                         tab_size: crate::bridge::TabSize::default(),
@@ -2673,27 +3698,39 @@ mod tests {
         ] {
             let results = [
                 server
-                    .get_incoming_calls(Parameters(CallHierarchyCallsParams {
-                        item: item_json(range, selection),
-                    }))
+                    .get_incoming_calls_with_origin(
+                        Parameters(CallHierarchyCallsParams::Item {
+                            item: item_json(range, selection),
+                        }),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
-                    .get_outgoing_calls(Parameters(CallHierarchyCallsParams {
-                        item: item_json(range, selection),
-                    }))
+                    .get_outgoing_calls_with_origin(
+                        Parameters(CallHierarchyCallsParams::Item {
+                            item: item_json(range, selection),
+                        }),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
-                    .get_supertypes(Parameters(TypeHierarchyWalkParams {
-                        item: item_json(range, selection),
-                    }))
+                    .get_supertypes_with_origin(
+                        Parameters(TypeHierarchyWalkParams::Item {
+                            item: item_json(range, selection),
+                        }),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
                 server
-                    .get_subtypes(Parameters(TypeHierarchyWalkParams {
-                        item: item_json(range, selection),
-                    }))
+                    .get_subtypes_with_origin(
+                        Parameters(TypeHierarchyWalkParams::Item {
+                            item: item_json(range, selection),
+                        }),
+                        None,
+                    )
                     .await
                     .map(|_| ()),
             ];
@@ -2871,7 +3908,10 @@ mod tests {
         };
         let call = |item| async {
             server
-                .get_incoming_calls(Parameters(CallHierarchyCallsParams { item }))
+                .get_incoming_calls_with_origin(
+                    Parameters(CallHierarchyCallsParams::Item { item }),
+                    None,
+                )
                 .await
                 .map(|_| ())
         };
@@ -2906,11 +3946,12 @@ mod tests {
                     .await
                     .map(|_| ()),
                 server
-                    .get_definition(nav(Parameters(position(line, character))))
+                    .get_definition(definition(Parameters(position(line, character))))
                     .await
                     .map(|_| ()),
                 server
                     .get_references(Parameters(ReferencesParams {
+                        options: crate::bridge::ReferenceOptions::default(),
                         target: position(line, character).into(),
                         include_declaration: false,
                         context: crate::bridge::ResultContext::None,
@@ -2919,6 +3960,7 @@ mod tests {
                     .map(|_| ()),
                 server
                     .rename_symbol(Parameters(RenameParams {
+                        full: true,
                         target: position(line, character).into(),
                         new_name: NewName::new("x").unwrap(),
                     }))
@@ -2928,6 +3970,8 @@ mod tests {
                     .get_completions(Parameters(CompletionsParams {
                         position: position(line, character),
                         trigger: None,
+                        limit: 20,
+                        include_documentation: false,
                     }))
                     .await
                     .map(|_| ()),
@@ -2958,6 +4002,7 @@ mod tests {
 
         let oversized = server
             .format_range(Parameters(FormatRangeParams {
+                full: true,
                 file_path: PathBuf::from("/ws/a.rs"),
                 range: range((1, 1), (10_002, 1)),
                 tab_size: crate::bridge::TabSize::default(),
@@ -3131,6 +4176,7 @@ mod tests {
             description: Some(McpDescription::new("Custom description").unwrap()),
             instructions: Some(McpInstructions::new("Custom instructions.").unwrap()),
             tool_prefix: None,
+            ..McpConfig::default()
         };
         let server = create_test_server_with_mcp_config(ProjectConfigStatus::NotIgnored, mcp);
         let info = server.get_info();
@@ -3156,6 +4202,7 @@ mod tests {
             description: None,
             instructions: Some(McpInstructions::new(instructions.clone()).unwrap()),
             tool_prefix: None,
+            ..McpConfig::default()
         };
         let server = create_test_server_with_mcp_config(ProjectConfigStatus::IgnoredUntrusted, mcp);
         let info = server.get_info();
@@ -3215,7 +4262,7 @@ mod tests {
             character: 5,
         });
 
-        let result = server.get_definition(nav(params)).await;
+        let result = server.get_definition(definition(params)).await;
         assert!(result.is_err());
     }
 
@@ -3223,6 +4270,7 @@ mod tests {
     async fn test_references_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(ReferencesParams {
+            options: crate::bridge::ReferenceOptions::default(),
             target: PositionParams {
                 file_path: PathBuf::from(test_file.to_str().unwrap()),
                 line: 10,
@@ -3891,6 +4939,7 @@ mod tests {
     async fn test_rename_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(RenameParams {
+            full: true,
             target: PositionParams {
                 file_path: PathBuf::from(test_file.to_str().unwrap()),
                 line: 10,
@@ -3914,10 +4963,33 @@ mod tests {
                 character: 5,
             },
             trigger: None,
+            limit: 20,
+            include_documentation: false,
         });
 
         let result = server.get_completions(params).await;
         assert!(result.is_err());
+    }
+
+    /// Relative outline paths are rejected at the MCP boundary before routing.
+    #[tokio::test]
+    async fn test_document_outline_rejects_relative_path_over_the_wire() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(workspace.path().join("file.rs"), "fn main() {}\n").unwrap();
+        let server = server_over(workspace.path());
+        let response = tools_call_over_the_wire(
+            server,
+            serde_json::json!({
+                "name": "get_document_outline",
+                "arguments": {"file_path": "file.rs"}
+            }),
+        )
+        .await;
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+        assert_eq!(
+            response["error"]["message"], "file_path must be absolute",
+            "{response}"
+        );
     }
 
     #[tokio::test]
@@ -3935,6 +5007,7 @@ mod tests {
     async fn test_format_document_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(FormatDocumentParams {
+            full: true,
             file_path: PathBuf::from(test_file.to_str().unwrap()),
             tab_size: crate::bridge::TabSize::default(),
             insert_spaces: true,
@@ -3948,6 +5021,7 @@ mod tests {
     async fn test_workspace_symbol_search_tool_with_params() {
         let server = create_test_server();
         let params = Parameters(WorkspaceSymbolParams {
+            include_targets: false,
             query: "User".to_string(),
             kind_filter: None,
             limit: 100,
@@ -3960,6 +5034,7 @@ mod tests {
     async fn test_code_actions_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(CodeActionsParams {
+            full: true,
             file_path: PathBuf::from(test_file.to_str().unwrap()),
             range: RangeParams {
                 start_line: 10,
@@ -3970,18 +5045,6 @@ mod tests {
             kind_filter: None,
         });
         let result = server.get_code_actions(params).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_prepare_call_hierarchy_tool_with_params() {
-        let (server, _temp_dir, test_file) = create_test_server_with_real_file();
-        let params = Parameters(PositionParams {
-            file_path: PathBuf::from(test_file.to_str().unwrap()),
-            line: 10,
-            character: 5,
-        });
-        let result = server.prepare_call_hierarchy(at(params)).await;
         assert!(result.is_err());
     }
 
@@ -4002,10 +5065,10 @@ mod tests {
                 "end": {"line": 1, "character": 10}
             }
         });
-        let params = Parameters(CallHierarchyCallsParams {
+        let params = Parameters(CallHierarchyCallsParams::Item {
             item: serde_json::from_value(item).unwrap(),
         });
-        let result = server.get_incoming_calls(params).await;
+        let result = server.get_incoming_calls_with_origin(params, None).await;
         assert!(result.is_err());
     }
 
@@ -4026,10 +5089,10 @@ mod tests {
                 "end": {"line": 1, "character": 10}
             }
         });
-        let params = Parameters(CallHierarchyCallsParams {
+        let params = Parameters(CallHierarchyCallsParams::Item {
             item: serde_json::from_value(item).unwrap(),
         });
-        let result = server.get_outgoing_calls(params).await;
+        let result = server.get_outgoing_calls_with_origin(params, None).await;
         assert!(result.is_err());
     }
 
@@ -4348,23 +5411,39 @@ mod tests {
 
         let edits = server
             .structured_result(Ok(FormatDocumentResult {
-                edits: vec![TextEdit {
-                    range: Range {
-                        start: Position2D {
-                            line: 1,
-                            character: 1,
-                        },
-                        end: Position2D {
-                            line: 1,
-                            character: 2,
-                        },
+                changes: vec![crate::bridge::DocumentChanges {
+                    uri: "file:///work.rs".into(),
+                    edit_count: 1,
+                    preview: crate::bridge::EditPreview {
+                        status: crate::bridge::PreviewStatus::Complete,
+                        diff: Some("SuperSecretValue123".into()),
+                        reason: None,
+                        redacted: false,
                     },
-                    new_text: "SuperSecretValue123".to_owned(),
+                    preview_source: None,
+                    supplied_version: None,
+                    analysis_freshness: crate::bridge::AnalysisFreshness::Unknown,
+                    edits: Some(vec![TextEdit {
+                        range: Range {
+                            start: Position2D {
+                                line: 1,
+                                character: 1,
+                            },
+                            end: Position2D {
+                                line: 1,
+                                character: 2,
+                            },
+                        },
+                        new_text: "SuperSecretValue123".to_owned(),
+                    }]),
                 }],
                 positions_degraded: None,
             }))
             .unwrap();
-        assert_eq!(edits.0.edits[0].new_text, "SuperSecretValue123");
+        assert_eq!(
+            edits.0.changes[0].edits.as_ref().unwrap()[0].new_text,
+            "SuperSecretValue123"
+        );
     }
 
     /// #583: a configured secret echoed in a pushed diagnostic never reaches
@@ -5243,23 +6322,25 @@ sleep 0.3
 
         // (tool name, read_only_hint, destructive_hint, idempotent_hint)
         let expected: &[(&str, bool, bool, bool)] = &[
+            ("get_symbol_context", true, false, true),
             ("get_hover", true, false, true),
             ("get_definition", true, false, true),
             ("get_references", true, false, true),
             ("get_diagnostics", true, false, true),
+            ("diagnostics_delta", true, false, true),
             ("rename_symbol", true, false, true),
             ("get_completions", true, false, true),
             ("get_document_symbols", true, false, true),
+            ("get_document_outline", true, false, true),
             ("format_document", true, false, true),
             ("workspace_symbol_search", true, false, true),
             ("get_code_actions", true, false, true),
-            ("prepare_call_hierarchy", true, false, true),
             ("get_incoming_calls", true, false, true),
             ("get_outgoing_calls", true, false, true),
+            ("get_call_graph", true, false, true),
             ("prepare_type_hierarchy", true, false, true),
             ("get_supertypes", true, false, true),
             ("get_subtypes", true, false, true),
-            ("prepare_rename", true, false, true),
             ("get_document_highlights", true, false, true),
             ("format_range", true, false, true),
             ("get_selection_ranges", true, false, true),
@@ -5274,6 +6355,7 @@ sleep 0.3
             ("get_tool_support", true, false, true),
             ("go_to_declaration", true, false, true),
             ("restart_server", false, true, false),
+            ("feedback_add", false, false, false),
         ];
 
         assert_eq!(
@@ -5408,6 +6490,7 @@ sleep 0.3
         let uri: lsp_types::Uri =
             lsp_types::Uri::from(Url::parse("file:///sample.rs").unwrap().as_str());
         DiagnosticInfo {
+            evidence: crate::bridge::DiagnosticEvidence::default(),
             uri,
             version: Some(DocumentVersion::FIRST),
             diagnostics,
@@ -5819,6 +6902,941 @@ sleep 0.3
         .unwrap_or_else(|_| panic!("no response to {method}"));
         serving.abort();
         response
+    }
+
+    /// Direct queries must distinguish no callable from a callable with no calls,
+    /// and must not traverse ambiguous or degraded preparation.
+    #[tokio::test]
+    async fn test_direct_calls_classify_preparation_over_mcp() {
+        // The existing public preparation limit is 10,000 items.
+        const MAX_NORMALIZED_LOCATIONS: usize = 10_000;
+
+        for tool in ["get_incoming_calls", "get_outgoing_calls"] {
+            for (count, degraded, expected) in [
+                (0, false, "no_item"),
+                (1, false, "ok"),
+                (2, false, "selection_required"),
+                (MAX_NORMALIZED_LOCATIONS + 1, false, "selection_required"),
+                (0, true, "preparation_incomplete"),
+                (1, true, "preparation_incomplete"),
+                (2, true, "preparation_incomplete"),
+            ] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let items = serde_json::Value::Array(vec![item; count]);
+                let (result, requests) = hierarchy_wire_call(
+                    fixture,
+                    tool,
+                    |file| {
+                        serde_json::json!({
+                            "file_path": file, "line": 1,
+                            "character": if degraded { 15 } else { 4 },
+                        })
+                    },
+                    items,
+                    serde_json::json!([]),
+                    degraded,
+                )
+                .await;
+                assert_eq!(result["status"], expected, "{tool}: {result}");
+                assert_eq!(result["indexing_in_progress"], false);
+                let walks = requests
+                    .iter()
+                    .filter(|request| {
+                        request["method"]
+                            .as_str()
+                            .is_some_and(|method| method.starts_with("callHierarchy/"))
+                    })
+                    .count();
+                if expected == "ok" {
+                    assert_eq!(result["calls"], serde_json::json!([]));
+                    assert_eq!(walks, 1);
+                } else {
+                    assert!(result.get("calls").is_none());
+                    assert_eq!(
+                        result["items"].as_array().unwrap().len(),
+                        count.min(MAX_NORMALIZED_LOCATIONS)
+                    );
+                    assert_eq!(walks, 0, "unsafe preparation must not traverse");
+                }
+                assert_eq!(
+                    result.get("truncated").is_some(),
+                    count > MAX_NORMALIZED_LOCATIONS
+                );
+                if degraded {
+                    assert_eq!(result["positions_degraded"], "request");
+                }
+            }
+        }
+    }
+
+    /// Direct queries must distinguish no callable from a callable with no calls,
+    /// and must not traverse ambiguous or degraded preparation.
+    #[tokio::test]
+    async fn test_direct_types_classify_preparation_over_mcp() {
+        // The existing public preparation limit is 10,000 items.
+        const MAX_NORMALIZED_LOCATIONS: usize = 10_000;
+
+        for tool in ["get_supertypes", "get_subtypes"] {
+            for (count, degraded, expected) in [
+                (0, false, "no_item"),
+                (1, false, "ok"),
+                (2, false, "selection_required"),
+                (MAX_NORMALIZED_LOCATIONS + 1, false, "selection_required"),
+                (0, true, "preparation_incomplete"),
+                (1, true, "preparation_incomplete"),
+                (2, true, "preparation_incomplete"),
+                (MAX_NORMALIZED_LOCATIONS + 1, true, "preparation_incomplete"),
+            ] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let items = serde_json::Value::Array(vec![item; count]);
+                let (result, requests) = hierarchy_wire_call(
+                    fixture,
+                    tool,
+                    |file| {
+                        serde_json::json!({
+                            "file_path": file, "line": 1,
+                            "character": if degraded { 15 } else { 4 },
+                        })
+                    },
+                    items,
+                    serde_json::json!([]),
+                    degraded,
+                )
+                .await;
+                assert_eq!(result["status"], expected, "{tool}: {result}");
+                assert_eq!(result["indexing_in_progress"], false);
+                let walks = requests
+                    .iter()
+                    .filter(|request| {
+                        request["method"]
+                            .as_str()
+                            .is_some_and(|method| method.starts_with("typeHierarchy/"))
+                    })
+                    .count();
+                if expected == "ok" {
+                    assert_eq!(result["items"], serde_json::json!([]));
+                    assert_eq!(walks, 1);
+                } else {
+                    assert_eq!(
+                        result["items"].as_array().unwrap().len(),
+                        count.min(MAX_NORMALIZED_LOCATIONS)
+                    );
+                    assert_eq!(walks, 0, "unsafe preparation must not traverse");
+                }
+                assert_eq!(result["truncated"], count > MAX_NORMALIZED_LOCATIONS);
+                if degraded {
+                    assert_eq!(result["positions_degraded"], "request");
+                }
+            }
+        }
+    }
+
+    /// Graph traversal retains directed call sites, deduplicates recursion,
+    /// and rejects expansion when the root itself fills the node budget.
+    #[tokio::test]
+    async fn test_call_graph_over_mcp() {
+        for direction in ["incoming", "outgoing"] {
+            for maximum in [1, 30] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let field = if direction == "incoming" {
+                    "from"
+                } else {
+                    "to"
+                };
+                let calls = serde_json::json!([{field:item,"fromRanges":[{"start":{"line":0,"character":3},"end":{"line":0,"character":4}}]}]);
+                let (result,requests)=hierarchy_wire_call(fixture,"get_call_graph",|file|serde_json::json!({"file_path":file,"line":1,"character":4,"direction":direction,"max_nodes":maximum}),serde_json::json!([item]),calls,false).await;
+                assert_eq!(result["status"], "ok", "{result}");
+                assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+                assert_eq!(result["usage"]["output_bytes"], result.to_string().len());
+                let walks = requests
+                    .iter()
+                    .filter(|r| {
+                        r["method"]
+                            .as_str()
+                            .is_some_and(|m| m.starts_with("callHierarchy/"))
+                    })
+                    .count();
+                if maximum == 1 {
+                    assert_eq!(walks, 0);
+                    assert_eq!(result["edges"], serde_json::json!([]));
+                    assert_eq!(result["nodes"][0]["expansion_status"], "unexpanded_budget");
+                } else {
+                    assert_eq!(walks, 1);
+                    assert_eq!(result["edges"][0]["caller"], "n0");
+                    assert_eq!(result["edges"][0]["callee"], "n0");
+                    assert_eq!(result["nodes"][0]["expansion_status"], "expanded");
+                    assert_eq!(result["usage"]["ranges_examined"], 1);
+                }
+            }
+        }
+    }
+
+    /// A mixed preparation list uses one raw coordinate convention and does
+    /// not turn an excluded candidate into an authenticated continuation.
+    #[tokio::test]
+    async fn test_call_graph_raw_preparation_over_mcp() {
+        let fixture = hierarchy_wire_fixture();
+        let item = hierarchy_lsp_item(&fixture.file);
+        let mut excluded = item.clone();
+        excluded["uri"] = serde_json::json!("untitled:excluded");
+        let (result,requests)=hierarchy_wire_call(fixture,"get_call_graph",|file|serde_json::json!({"file_path":file,"line":1,"character":4,"direction":"outgoing"}),serde_json::json!([item,excluded]),serde_json::json!([]),false).await;
+        assert_eq!(result["status"], "preparation_incomplete");
+        assert_eq!(result["positions_encoding"], "utf-16");
+        assert_eq!(result["positions_base"], 0);
+        assert_eq!(result["nodes"], serde_json::json!([]));
+        assert_eq!(result["edges"], serde_json::json!([]));
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        for candidate in items {
+            assert_eq!(candidate["range"], item["range"]);
+            assert_eq!(candidate["selectionRange"], item["selectionRange"]);
+            assert_eq!(candidate["data"], item["data"]);
+            assert!(candidate.get("dispatcher_context").is_none());
+        }
+        assert!(requests.iter().all(|r| {
+            !r["method"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("callHierarchy/"))
+        }));
+        assert!(
+            requests
+                .iter()
+                .all(|r| r["params"]["textDocument"]["uri"] != "untitled:excluded")
+        );
+    }
+
+    /// Script the real LSP boundary for call-graph response regressions.
+    async fn call_graph_wire_responses(
+        direction: &str,
+        utf8: bool,
+        scenario: impl FnOnce(
+            &Path,
+        ) -> (
+            serde_json::Value,
+            std::collections::HashMap<String, serde_json::Value>,
+        ),
+    ) -> serde_json::Value {
+        use crate::test_lsp::{fake_lsp_client, read_framed_message, write_response};
+        let mut fixture = hierarchy_wire_fixture();
+        std::fs::write(
+            &fixture.file,
+            if utf8 { "🦀abcdef\n" } else { "fn f() {}\n" },
+        )
+        .unwrap();
+        let (prepared, responses) = scenario(&fixture.file);
+        let (client, mut fake) = fake_lsp_client();
+        let id = crate::config::ServerId::from_static("rust");
+        fixture
+            .server
+            .context
+            .translator
+            .register_client(id.clone(), client.clone());
+        fixture.server.context.translator.register_server(
+            id,
+            crate::lsp::LspServer::new_for_test_with_client(
+                lsp_types::ServerCapabilities {
+                    call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                    ..Default::default()
+                },
+                if utf8 {
+                    lsp_types::PositionEncodingKind::UTF8
+                } else {
+                    lsp_types::PositionEncodingKind::UTF16
+                },
+                client,
+            ),
+        );
+        fixture.fake_servers.clear();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                let response = match request["method"].as_str().unwrap() {
+                    "textDocument/prepareCallHierarchy" => prepared.clone(),
+                    "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls" => responses
+                        .get(request["params"]["item"]["name"].as_str().unwrap())
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!([])),
+                    method => panic!("unexpected LSP request: {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], response).await;
+            }
+        });
+        let result=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({"name":"get_call_graph","arguments":{"file_path":fixture.file,"line":1,"character":1,"direction":direction,"depth":2}})).await;
+        responder.abort();
+        assert!(result.get("error").is_none(), "{result}");
+        result["result"]["structuredContent"].clone()
+    }
+
+    /// Every merged edge uses raw coordinates if either record cannot convert,
+    /// in both directions and regardless of which record arrives first.
+    #[tokio::test]
+    async fn test_call_graph_merged_range_fidelity_over_mcp() {
+        for direction in ["incoming", "outgoing"] {
+            for raw_first in [false, true] {
+                let mut ranges = vec![
+                    serde_json::json!({"start":{"line":0,"character":4},"end":{"line":0,"character":5}}),
+                    serde_json::json!({"start":{"line":99,"character":1},"end":{"line":99,"character":2}}),
+                ];
+                if raw_first {
+                    ranges.reverse();
+                }
+                let expected = ranges.clone();
+                let result=call_graph_wire_responses(direction,true,|file| {
+                    let mut root=hierarchy_lsp_item(file);root["name"]=serde_json::json!("A");
+                    root["range"]=serde_json::json!({"start":{"line":0,"character":0},"end":{"line":0,"character":0}});root["selectionRange"]=root["range"].clone();
+                    let mut peer=root.clone();peer["name"]=serde_json::json!("B");
+                    let field=if direction=="incoming" {"from"} else {"to"};
+                    let records=ranges.into_iter().map(|r|serde_json::json!({field:peer,"fromRanges":[r]})).collect::<Vec<_>>();
+                    (serde_json::json!([root]),std::collections::HashMap::from([("A".into(),serde_json::json!(records))]))
+                }).await;
+                assert_eq!(result["nodes"].as_array().unwrap().len(), 2);
+                assert_eq!(result["edges"].as_array().unwrap().len(), 1);
+                assert_eq!(result["edges"][0]["positions_base"], 0, "{result}");
+                assert_eq!(result["edges"][0]["positions_encoding"], "utf-8");
+                assert_eq!(
+                    result["edges"][0]["from_ranges"],
+                    serde_json::json!(expected)
+                );
+                assert_eq!(result["usage"]["ranges_examined"], 2);
+            }
+        }
+    }
+
+    /// Invalid relationship ranges fail their branch without retaining an orphan
+    /// peer, while a queued independent branch still returns its valid edge.
+    #[tokio::test]
+    async fn test_call_graph_invalid_range_is_atomic_over_mcp() {
+        let result=call_graph_wire_responses("outgoing",false,|file| {
+            let make=|name:&str| {let mut item=hierarchy_lsp_item(file);item["name"]=serde_json::json!(name);item};
+            let range=serde_json::json!({"start":{"line":0,"character":0},"end":{"line":0,"character":1}});
+            let relation=|name:&str|serde_json::json!({"to":make(name),"fromRanges":[range]});
+            let mut bad=relation("D");bad["fromRanges"][0]["start"]["line"]=serde_json::json!("invalid");
+            (serde_json::json!([make("A")]),std::collections::HashMap::from([("A".into(),serde_json::json!([relation("B"),relation("C")])),("B".into(),serde_json::json!([bad])),("C".into(),serde_json::json!([relation("E")]))]))
+        }).await;
+        let nodes = result["nodes"].as_array().unwrap();
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|n| n["item"]["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C", "E"]
+        );
+        assert_eq!(nodes[1]["expansion_status"], "failed");
+        assert_eq!(nodes[2]["expansion_status"], "expanded");
+        assert_eq!(result["edges"].as_array().unwrap().len(), 3);
+        assert_eq!(result["warnings"], serde_json::json!(["branch_failed"]));
+        assert!(
+            !result["stop_reasons"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("child_truncated"))
+        );
+        assert_eq!(result["usage"]["omitted_relationships"], 1);
+    }
+
+    /// Both direct addressing forms return real relationships and forward opaque
+    /// JSON unchanged. Legacy reuse retains the old result shape.
+    #[tokio::test]
+    async fn test_direct_calls_and_item_reuse_over_mcp() {
+        for tool in ["get_incoming_calls", "get_outgoing_calls"] {
+            let field = if tool == "get_incoming_calls" {
+                "from"
+            } else {
+                "to"
+            };
+            for by_name in [false, true] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let opaque = item["data"].clone();
+                let calls = serde_json::json!([{
+                    field: item, "fromRanges": [{
+                        "start": {"line": 0, "character": 3},
+                        "end": {"line": 0, "character": 4},
+                    }],
+                }]);
+                let (result, requests) = hierarchy_wire_call(
+                    fixture, tool,
+                    |file| if by_name {
+                        serde_json::json!({"file_path": file, "symbol_name": "f", "symbol_kind": "function"})
+                    } else {
+                        serde_json::json!({"file_path": file, "line": 1, "character": 4})
+                    },
+                    serde_json::json!([item]), calls.clone(), false,
+                ).await;
+                assert_eq!(result["status"], "ok", "{result}");
+                assert_eq!(result["calls"][0][field]["name"], "f");
+                assert_eq!(result["calls"][0][field]["data"], opaque);
+                assert_eq!(result.get("resolved_symbol").is_some(), by_name);
+                let walk = requests
+                    .iter()
+                    .find(|request| {
+                        request["method"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("callHierarchy/")
+                    })
+                    .unwrap();
+                assert_eq!(walk["params"]["item"]["data"], opaque);
+            }
+        }
+    }
+
+    /// Direct type results preserve opaque data for selected-item traversal.
+    #[tokio::test]
+    async fn test_direct_types_position_name_and_item_reuse_over_mcp() {
+        for tool in ["get_supertypes", "get_subtypes"] {
+            for by_name in [false, true] {
+                let fixture = hierarchy_wire_fixture();
+                let item = hierarchy_lsp_item(&fixture.file);
+                let opaque = item["data"].clone();
+                let (result, requests) = hierarchy_wire_call(
+                    fixture, tool,
+                    |file| if by_name {
+                        serde_json::json!({"file_path": file, "symbol_name": "f", "symbol_kind": "function"})
+                    } else {
+                        serde_json::json!({"file_path": file, "line": 1, "character": 4})
+                    },
+                    serde_json::json!([item]), serde_json::json!([item]), false,
+                ).await;
+                assert_eq!(result["status"], "ok", "{result}");
+                assert_eq!(result["items"][0]["data"], opaque);
+                assert_eq!(result.get("resolved_symbol").is_some(), by_name);
+                let walks: Vec<_> = requests
+                    .iter()
+                    .filter(|r| {
+                        r["method"]
+                            .as_str()
+                            .is_some_and(|m| m.starts_with("typeHierarchy/"))
+                    })
+                    .collect();
+                assert_eq!(walks.len(), 2);
+                assert!(walks.iter().all(|r| r["params"]["item"]["data"] == opaque));
+            }
+        }
+    }
+
+    /// Both forms and statuses are discoverable through the public list endpoint.
+    #[tokio::test]
+    async fn test_direct_call_schemas_over_mcp() {
+        let (listed, _) =
+            request_over_the_wire(create_test_server(), "tools/list", serde_json::json!({})).await;
+        for name in ["get_incoming_calls", "get_outgoing_calls"] {
+            let tool = listed["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            for field in [
+                "item",
+                "file_path",
+                "line",
+                "character",
+                "symbol_name",
+                "symbol_kind",
+                "container",
+            ] {
+                assert!(
+                    tool["inputSchema"]["properties"].get(field).is_some(),
+                    "{name}: {field}"
+                );
+            }
+            assert_eq!(
+                tool["outputSchema"]["type"], "object",
+                "{name}: MCP Tool.outputSchema requires an object root"
+            );
+            let output = tool["outputSchema"].to_string();
+            for status in [
+                "ok",
+                "no_item",
+                "selection_required",
+                "preparation_incomplete",
+            ] {
+                assert!(output.contains(status), "{name}: {status}");
+            }
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
+    }
+
+    /// Static profiles must agree across discovery, support, schemas and dispatch.
+    #[tokio::test]
+    async fn test_static_profiles_over_mcp() {
+        for prefix in [None, Some("p")] {
+            let mut agent_tools = Vec::new();
+            for profile in [ToolProfile::Agent, ToolProfile::Full] {
+                let server = create_test_server_with_mcp_config(
+                    ProjectConfigStatus::NotIgnored,
+                    McpConfig {
+                        tool_profile: profile,
+                        tool_prefix: prefix.map(|p| p.parse().unwrap()),
+                        ..Default::default()
+                    },
+                );
+                let name =
+                    |tool: &str| prefix.map_or_else(|| tool.to_owned(), |p| format!("{p}_{tool}"));
+                let (listed, _) = request_over_the_wire(
+                    server.for_new_session(),
+                    "tools/list",
+                    serde_json::json!({}),
+                )
+                .await;
+                let tools = listed["result"]["tools"].as_array().unwrap();
+                assert_eq!(
+                    tools.len(),
+                    if profile == ToolProfile::Agent {
+                        31
+                    } else {
+                        34
+                    }
+                );
+                let supported = tools_call_over_the_wire(
+                    server.for_new_session(),
+                    serde_json::json!({"name": name("get_tool_support"), "arguments": {}}),
+                )
+                .await;
+                let report = supported["result"]["structuredContent"]["tools"]
+                    .as_array()
+                    .unwrap();
+                let mut listed_names: Vec<_> = tools.iter().map(|t| t["name"].clone()).collect();
+                let mut supported_names: Vec<_> =
+                    report.iter().map(|t| t["name"].clone()).collect();
+                listed_names.sort_by_key(ToString::to_string);
+                supported_names.sort_by_key(ToString::to_string);
+                assert_eq!(listed_names, supported_names);
+                if profile == ToolProfile::Agent {
+                    agent_tools = tools.clone();
+                    let unknown = tools_call_over_the_wire(
+                        server.for_new_session(),
+                        serde_json::json!({"name": name("unknown"), "arguments": {}}),
+                    )
+                    .await;
+                    for excluded in [
+                        "get_folding_ranges",
+                        "get_selection_ranges",
+                        "prepare_type_hierarchy",
+                    ] {
+                        let response = tools_call_over_the_wire(
+                            server.for_new_session(),
+                            serde_json::json!({"name": name(excluded), "arguments": {}}),
+                        )
+                        .await;
+                        assert_eq!(response["error"]["code"], unknown["error"]["code"]);
+                        assert!(!listed_names.contains(&serde_json::json!(name(excluded))));
+                    }
+                } else {
+                    for agent in &agent_tools {
+                        assert_eq!(
+                            tools
+                                .iter()
+                                .find(|full| full["name"] == agent["name"])
+                                .unwrap(),
+                            agent
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Direct queries replace standalone MCP preparation in both inventories.
+    #[tokio::test]
+    async fn test_removed_call_preparation_over_mcp() {
+        for prefix in [None, Some("optics")] {
+            let config = McpConfig {
+                tool_prefix: prefix.map(|value| value.parse().unwrap()),
+                ..Default::default()
+            };
+            let server =
+                create_test_server_with_mcp_config(ProjectConfigStatus::NotIgnored, config);
+            let name = |tool: &str| {
+                prefix.map_or_else(|| tool.to_owned(), |prefix| format!("{prefix}_{tool}"))
+            };
+            let (listed, _) = request_over_the_wire(
+                server.for_new_session(),
+                "tools/list",
+                serde_json::json!({}),
+            )
+            .await;
+            let tools = listed["result"]["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 31);
+            assert!(
+                !tools
+                    .iter()
+                    .any(|tool| tool["name"] == name("prepare_call_hierarchy"))
+            );
+            let supported = tools_call_over_the_wire(
+                server.for_new_session(),
+                serde_json::json!({"name": name("get_tool_support"), "arguments": {}}),
+            )
+            .await;
+            let tools = supported["result"]["structuredContent"]["tools"]
+                .as_array()
+                .unwrap();
+            assert_eq!(tools.len(), 31);
+            assert!(
+                !tools
+                    .iter()
+                    .any(|tool| tool["name"] == name("prepare_call_hierarchy"))
+            );
+            let removed = tools_call_over_the_wire(server.for_new_session(), serde_json::json!({"name": name("prepare_call_hierarchy"), "arguments": {"file_path": "/a.rs", "line": 1, "character": 4}})).await;
+            let unknown = tools_call_over_the_wire(
+                server.for_new_session(),
+                serde_json::json!({"name": name("unknown_tool"), "arguments": {}}),
+            )
+            .await;
+            assert!(removed.get("error").is_some(), "{removed}");
+            assert_eq!(removed["error"]["code"], unknown["error"]["code"]);
+            assert_eq!(
+                removed["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .replace(&name("prepare_call_hierarchy"), "unknown_tool"),
+                unknown["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .replace(&name("unknown_tool"), "unknown_tool")
+            );
+        }
+    }
+
+    /// Invalid direct forms fail before any language-server operation.
+    #[tokio::test]
+    async fn test_direct_calls_reject_invalid_forms_over_mcp() {
+        for tool in ["get_incoming_calls", "get_outgoing_calls"] {
+            for arguments in [
+                serde_json::json!({}),
+                serde_json::json!({"file_path": "/a.rs"}),
+                serde_json::json!({"file_path": "/a.rs", "line": 1}),
+                serde_json::json!({"file_path": "/a.rs", "character": 1}),
+                serde_json::json!({"file_path": "/a.rs", "symbol_kind": "function"}),
+                serde_json::json!({"file_path": "/a.rs", "container": "C"}),
+                serde_json::json!({"file_path": "/a.rs", "line": 1, "character": 1, "symbol_name": "f"}),
+                serde_json::json!({"file_path": "/a.rs", "symbol_name": "f", "unknown": 1}),
+                serde_json::json!({"file_path": "relative.rs", "line": 1, "character": 1}),
+                serde_json::json!({"file_path": "/a.rs", "line": 0, "character": 1}),
+            ] {
+                let result = tools_call_over_the_wire(
+                    create_test_server(),
+                    serde_json::json!({"name": tool, "arguments": arguments}),
+                )
+                .await;
+                assert!(
+                    result["error"]["code"] == -32602 || result["result"]["isError"] == true,
+                    "{tool}: {result}"
+                );
+            }
+            let fixture = hierarchy_wire_fixture();
+            let item = hierarchy_lsp_item(&fixture.file);
+            let result = tools_call_over_the_wire(create_test_server(), serde_json::json!({"name": tool, "arguments": {"item": item, "file_path": "/a.rs", "symbol_name": "f"}})).await;
+            assert_eq!(result["result"]["isError"], true);
+        }
+    }
+
+    /// Exercise real MCP decoding, tool routing, redaction, and framed LSP requests.
+    async fn completions_wire_call(
+        response: serde_json::Value,
+        options: serde_json::Value,
+    ) -> (serde_json::Value, Vec<serde_json::Value>) {
+        use crate::test_lsp::{read_framed_message, write_response};
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    completion_provider: Some(lsp_types::CompletionOptions::default()),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let (client, mut fake, _lanes) = crate::test_lsp::fake_lsp_client_with_redactions(
+            Redactions::new([("API_TOKEN".to_owned(), "synthetic-secret".to_owned())]),
+        );
+        fixture.fake_servers.clear();
+        fixture
+            .server
+            .context
+            .translator
+            .register_client(crate::config::ServerId::from_static("rust"), client);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                seen.lock().await.push(request.clone());
+                if request.get("id").is_some() {
+                    assert_eq!(request["method"], "textDocument/completion");
+                    write_response(&mut fake.read_half_stdin, &request["id"], response.clone())
+                        .await;
+                }
+            }
+        });
+        let mut arguments =
+            serde_json::json!({"file_path": fixture.file, "line": 1, "character": 1});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        let result = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({"name": "get_completions", "arguments": arguments}),
+        )
+        .await;
+        responder.abort();
+        let requests = requests.lock().await.clone();
+        (result, requests)
+    }
+
+    #[tokio::test]
+    async fn test_completions_wire_defaults_projection_and_completeness() {
+        let items: Vec<_> = (0..21)
+            .map(|n| {
+                serde_json::json!({
+                    "label": format!("candidate-{n}"), "documentation": "docs", "detail": "",
+                })
+            })
+            .collect();
+        for signal in [true, false] {
+            let (result, requests) = completions_wire_call(
+                serde_json::json!({"isIncomplete": signal, "items": items}),
+                serde_json::json!({}),
+            )
+            .await;
+            let value = &result["result"]["structuredContent"];
+            assert_eq!(value["items"].as_array().unwrap().len(), 20, "{result}");
+            assert_eq!(value["items"][0]["label"], "candidate-0");
+            assert_eq!(value["items"][19]["label"], "candidate-19");
+            assert_eq!(value["items"][0]["detail"], "");
+            assert!(value["items"][0]["documentation"].is_null());
+            assert_eq!(value["items"][0]["truncated_fields"], serde_json::json!([]));
+            assert_eq!(value["provider_is_incomplete"], signal);
+            assert_eq!(value["omitted_count"], 1);
+            assert_eq!(value["truncated"], true);
+            let params = &requests
+                .iter()
+                .find(|r| r["method"] == "textDocument/completion")
+                .unwrap()["params"];
+            assert_eq!(
+                params["position"],
+                serde_json::json!({"line": 0, "character": 0})
+            );
+            assert!(params.get("limit").is_none());
+            assert!(params.get("include_documentation").is_none());
+        }
+        for response in [serde_json::json!([]), serde_json::Value::Null] {
+            let (result, _) = completions_wire_call(response, serde_json::json!({})).await;
+            let value = &result["result"]["structuredContent"];
+            assert!(value["provider_is_incomplete"].is_null(), "{result}");
+            assert_eq!(value["items"], serde_json::json!([]));
+            assert_eq!(value["omitted_count"], 0);
+            assert_eq!(value["truncated"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_completions_wire_final_redaction_field_and_json_bounds() {
+        let label = format!("{}😀", "l".repeat(511));
+        let detail = format!("{}synthetic-secret", "d".repeat(2032));
+        let documentation = format!("{}😀", "\\\"".repeat(2047));
+        let item =
+            serde_json::json!({"label": label, "detail": detail, "documentation": documentation});
+        let (result, _) = completions_wire_call(
+            serde_json::json!({"isIncomplete": false, "items": vec![item; 100]}),
+            serde_json::json!({"limit": 100, "include_documentation": true}),
+        )
+        .await;
+        let value = &result["result"]["structuredContent"];
+        let items = value["items"].as_array().unwrap();
+        assert!(!items.is_empty() && items.len() < 100, "{result}");
+        assert_eq!(items[0]["label"], "l".repeat(511));
+        assert_eq!(
+            items[0]["detail"],
+            format!("{}[redacted:API_TO", "d".repeat(2032))
+        );
+        assert_eq!(items[0]["documentation"], "\\\"".repeat(2047));
+        assert_eq!(
+            items[0]["truncated_fields"],
+            serde_json::json!(["label", "detail", "documentation"])
+        );
+        assert_eq!(
+            value["omitted_count"].as_u64().unwrap(),
+            100 - u64::try_from(items.len()).unwrap()
+        );
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["provider_is_incomplete"], false);
+        assert!(serde_json::to_vec(value).unwrap().len() <= 65536);
+        let legacy: serde_json::Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(legacy, *value);
+        let mut next = value.clone();
+        next["items"].as_array_mut().unwrap().push(items[0].clone());
+        next["omitted_count"] = serde_json::json!(value["omitted_count"].as_u64().unwrap() - 1);
+        assert!(serde_json::to_vec(&next).unwrap().len() > 65536);
+    }
+
+    #[tokio::test]
+    async fn test_completions_wire_rejects_invalid_options_without_lsp_request() {
+        for options in [
+            serde_json::json!({"limit": 0}),
+            serde_json::json!({"limit": -1}),
+            serde_json::json!({"limit": 101}),
+            serde_json::json!({"limit": 1.5}),
+            serde_json::json!({"limit": null}),
+            serde_json::json!({"limit": "20"}),
+            serde_json::json!({"include_documentation": null}),
+            serde_json::json!({"include_documentation": 1}),
+            serde_json::json!({"unexpected": true}),
+        ] {
+            let (result, requests) = completions_wire_call(serde_json::json!([]), options).await;
+            assert!(
+                result.get("error").is_some() || result["result"]["isError"] == true,
+                "{result}"
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request["method"] != "textDocument/completion")
+            );
+        }
+    }
+
+    fn hierarchy_wire_fixture() -> SupportFixture {
+        support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                    type_hierarchy_provider: Some(lsp_types::TypeHierarchyProvider::Bool(true)),
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        )
+    }
+
+    fn hierarchy_lsp_item(file: &Path) -> serde_json::Value {
+        let range = serde_json::json!({"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 4}});
+        serde_json::json!({
+            "name": "f", "kind": 12,
+            "uri": url::Url::from_file_path(file).unwrap().as_str(),
+            "range": range, "selectionRange": range,
+            "data": {"nested": [null, {"selectionRange": "opaque", "token": "unchanged"}]},
+        })
+    }
+
+    async fn hierarchy_wire_call(
+        mut fixture: SupportFixture,
+        tool: &str,
+        arguments: impl FnOnce(&Path) -> serde_json::Value,
+        prepared: serde_json::Value,
+        calls: serde_json::Value,
+        utf8: bool,
+    ) -> (serde_json::Value, Vec<serde_json::Value>) {
+        use crate::test_lsp::{read_framed_message, write_response};
+        std::fs::write(&fixture.file, "fn f() {} // 😀\n").unwrap();
+        if utf8 {
+            fixture.server.context.translator.register_server(
+                crate::config::ServerId::from_static("rust"),
+                crate::lsp::LspServer::new_for_test_with_encoding(
+                    lsp_types::ServerCapabilities {
+                        call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                        type_hierarchy_provider: Some(lsp_types::TypeHierarchyProvider::Bool(true)),
+                        ..Default::default()
+                    },
+                    lsp_types::PositionEncodingKind::UTF8,
+                ),
+            );
+        }
+        let arguments = arguments(&fixture.file);
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                seen.lock().await.push(request.clone());
+                let response = match request["method"].as_str().unwrap() {
+                    "textDocument/prepareCallHierarchy" | "textDocument/prepareTypeHierarchy" => {
+                        prepared.clone()
+                    }
+                    "callHierarchy/incomingCalls"
+                    | "callHierarchy/outgoingCalls"
+                    | "typeHierarchy/supertypes"
+                    | "typeHierarchy/subtypes" => calls.clone(),
+                    "textDocument/documentSymbol" => serde_json::json!([{
+                        "name": "f", "kind": 12,
+                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 9}},
+                        "selectionRange": {"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 4}},
+                    }]),
+                    _ if request.get("id").is_none() => continue,
+                    method => panic!("unexpected LSP request: {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], response).await;
+            }
+        });
+        let result = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({"name": tool, "arguments": arguments}),
+        )
+        .await;
+        let field = if tool == "get_incoming_calls" {
+            "from"
+        } else {
+            "to"
+        };
+        let direct = &result["result"]["structuredContent"];
+        if direct["status"] == "ok"
+            && direct["calls"]
+                .as_array()
+                .is_some_and(|calls| !calls.is_empty())
+        {
+            let item = &direct["calls"][0][field];
+            let reused = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name": tool, "arguments": {"item": item},
+                }),
+            )
+            .await;
+            let legacy = &reused["result"]["structuredContent"];
+            assert!(legacy.get("status").is_none(), "{reused}");
+            assert!(legacy.get("indexing_in_progress").is_none());
+            assert_eq!(legacy["calls"], direct["calls"]);
+        }
+        if direct["status"] == "ok"
+            && direct["items"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+        {
+            let reused = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({"name": tool, "arguments": {"item": direct["items"][0]}}),
+            )
+            .await;
+            let legacy = &reused["result"]["structuredContent"];
+            assert!(legacy.get("status").is_none(), "{reused}");
+            assert!(legacy.get("indexing_in_progress").is_none());
+            assert!(legacy.get("truncated").is_none());
+            assert_eq!(legacy["items"], direct["items"]);
+        }
+        responder.abort();
+        let requests = requests.lock().await.clone();
+        assert!(
+            result.get("error").is_none() && result["result"]["isError"] != true,
+            "{result}"
+        );
+        (result["result"]["structuredContent"].clone(), requests)
     }
 
     /// Sends one `initialize` per entry of `versions` over a fresh in-memory
@@ -6728,6 +8746,14 @@ sleep 0.3
         );
     }
 
+    #[test]
+    fn test_agent_tool_surface_matches_golden_snapshot() {
+        let tools = McplsServer::build_profile_tool_router(None, ToolProfile::Agent).list_all();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("tool_surface_agent.json")).unwrap();
+        assert_eq!(serde_json::to_value(tools).unwrap(), expected);
+    }
+
     /// Only the six enrichment tools declare `context`, with exactly the
     /// two closed values; `get_cached_diagnostics` must not.
     #[test]
@@ -6809,6 +8835,39 @@ sleep 0.3
         }
     }
 
+    /// The composed result variants and tool removal are visible over MCP.
+    #[tokio::test]
+    async fn test_rename_proposal_surface_over_mcp() {
+        let (listed, _) =
+            request_over_the_wire(create_test_server(), "tools/list", serde_json::json!({})).await;
+        let tools = listed["result"]["tools"].as_array().unwrap();
+        assert!(!tools.iter().any(|tool| tool["name"] == "prepare_rename"));
+        let rename = tools
+            .iter()
+            .find(|tool| tool["name"] == "rename_symbol")
+            .unwrap();
+        assert_eq!(rename["outputSchema"]["type"], "object");
+        let output = rename["outputSchema"].to_string();
+        for field in [
+            "proposed",
+            "not_renameable",
+            "preparation",
+            "position",
+            "unsupported",
+            "default_behavior",
+        ] {
+            assert!(
+                output.contains(field),
+                "missing rename schema field {field}"
+            );
+        }
+        let (removed, _) = request_over_the_wire(create_test_server(), "tools/call", serde_json::json!({"name": "prepare_rename", "arguments": {"file_path": "/ws/a.rs", "line": 1, "character": 1}})).await;
+        assert!(
+            removed.get("error").is_some(),
+            "removed tool must return an unknown-tool error: {removed}"
+        );
+    }
+
     // ------------------------------------------------------------------
     // get_tool_support tests
     // ------------------------------------------------------------------
@@ -6819,7 +8878,7 @@ sleep 0.3
     /// registers, so the report can neither omit nor invent a tool.
     #[test]
     fn test_mcp_tool_catalogue_matches_declared_router() {
-        let mut declared: Vec<String> = McplsServer::declared_tool_router()
+        let mut declared: Vec<String> = McplsServer::unshaped_tool_router()
             .map
             .keys()
             .map(ToString::to_string)
@@ -6853,7 +8912,7 @@ sleep 0.3
         server: McplsServer,
         dir: tempfile::TempDir,
         file: PathBuf,
-        _fake_servers: Vec<crate::test_lsp::FakeServer>,
+        fake_servers: Vec<crate::test_lsp::FakeServer>,
     }
 
     /// One live (registered, non-dead) catch-all server per `(id, language,
@@ -6903,8 +8962,15 @@ sleep 0.3
         let mut fake_servers = Vec::new();
         for (id, _, caps) in servers {
             let (client, fake) = fake_lsp_client();
-            translator.register_client(ServerId::new(id).unwrap(), client);
-            translator.register_server(ServerId::new(id).unwrap(), LspServer::new_for_test(caps));
+            translator.register_client(ServerId::new(id).unwrap(), client.clone());
+            translator.register_server(
+                ServerId::new(id).unwrap(),
+                LspServer::new_for_test_with_client(
+                    caps,
+                    lsp_types::PositionEncodingKind::UTF16,
+                    client,
+                ),
+            );
             fake_servers.push(fake);
         }
         let server = McplsServer::new(
@@ -6919,7 +8985,7 @@ sleep 0.3
             server,
             dir,
             file,
-            _fake_servers: fake_servers,
+            fake_servers,
         }
     }
 
@@ -6949,7 +9015,7 @@ sleep 0.3
                 "start": {"line": 1, "character": 1},
                 "end": {"line": 1, "character": 10}
             });
-            CallHierarchyCallsParams {
+            CallHierarchyCallsParams::Item {
                 item: serde_json::from_value(serde_json::json!({
                     "name": "f", "kind": 12, "uri": uri,
                     "range": range, "selectionRange": range
@@ -6960,7 +9026,7 @@ sleep 0.3
         let type_item = || {
             let uri = url::Url::from_file_path(file).unwrap().to_string();
             let at = |character| crate::bridge::Position2D { line: 1, character };
-            TypeHierarchyWalkParams {
+            TypeHierarchyWalkParams::Item {
                 item: crate::bridge::HierarchyItem {
                     name: "T".to_string(),
                     kind: 5,
@@ -6980,6 +9046,14 @@ sleep 0.3
             }
         };
         match tool {
+            McpTool::GetSymbolContext => server
+                .get_symbol_context(Parameters(crate::mcp::tools::SymbolContextParams {
+                    target: position().into(),
+                    resolve: crate::mcp::tools::ContextResolve::Direct,
+                    sections: vec!["source".into()],
+                }))
+                .await
+                .map(|_| ()),
             McpTool::GetHover => server
                 .get_hover(Parameters(position().into()))
                 .await
@@ -6990,6 +9064,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::GetReferences => server
                 .get_references(Parameters(ReferencesParams {
+                    options: crate::bridge::ReferenceOptions::default(),
                     target: position().into(),
                     include_declaration: false,
                     context: ResultContext::None,
@@ -7003,8 +9078,18 @@ sleep 0.3
                 }))
                 .await
                 .map(|_| ()),
+            McpTool::DiagnosticsDelta => server
+                .diagnostics_delta(Parameters(
+                    serde_json::json!({"file_path":file_path,"action":"capture"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ))
+                .await
+                .map(|_| ()),
             McpTool::RenameSymbol => server
                 .rename_symbol(Parameters(RenameParams {
+                    full: true,
                     target: position().into(),
                     new_name: NewName::new("renamed").unwrap(),
                 }))
@@ -7014,6 +9099,8 @@ sleep 0.3
                 .get_completions(Parameters(CompletionsParams {
                     position: position(),
                     trigger: None,
+                    limit: 20,
+                    include_documentation: false,
                 }))
                 .await
                 .map(|_| ()),
@@ -7023,8 +9110,20 @@ sleep 0.3
                 }))
                 .await
                 .map(|_| ()),
+            McpTool::GetDocumentOutline => server
+                .get_document_outline(Parameters(DocumentOutlineParams {
+                    include_targets: false,
+                    file_path: PathBuf::from(file_path.clone()),
+                    query: None,
+                    kind_filter: None,
+                    offset: 0,
+                    limit: 100,
+                }))
+                .await
+                .map(|_| ()),
             McpTool::FormatDocument => server
                 .format_document(Parameters(FormatDocumentParams {
+                    full: true,
                     file_path: PathBuf::from(file_path.clone()),
                     tab_size: crate::bridge::TabSize::default(),
                     insert_spaces: true,
@@ -7033,6 +9132,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::WorkspaceSymbolSearch => server
                 .workspace_symbol_search(Parameters(WorkspaceSymbolParams {
+                    include_targets: false,
                     query: "main".to_string(),
                     kind_filter: None,
                     limit: 10,
@@ -7041,22 +9141,32 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::GetCodeActions => server
                 .get_code_actions(Parameters(CodeActionsParams {
+                    full: true,
                     file_path: PathBuf::from(file_path.clone()),
                     range: range(),
                     kind_filter: None,
                 }))
                 .await
                 .map(|_| ()),
-            McpTool::PrepareCallHierarchy => server
-                .prepare_call_hierarchy(Parameters(position().into()))
+            McpTool::GetIncomingCalls => server
+                .get_incoming_calls_with_origin(Parameters(item()), None)
                 .await
                 .map(|_| ()),
-            McpTool::GetIncomingCalls => server
-                .get_incoming_calls(Parameters(item()))
+            McpTool::GetCallGraph => server
+                .get_call_graph_with_origin(
+                    super::super::tools::CallGraphParams {
+                        target: item(),
+                        direction: crate::bridge::CallGraphDirection::Outgoing,
+                        depth: 2,
+                        max_nodes: 30,
+                    },
+                    None,
+                    false,
+                )
                 .await
                 .map(|_| ()),
             McpTool::GetOutgoingCalls => server
-                .get_outgoing_calls(Parameters(item()))
+                .get_outgoing_calls_with_origin(Parameters(item()), None)
                 .await
                 .map(|_| ()),
             McpTool::PrepareTypeHierarchy => server
@@ -7064,15 +9174,11 @@ sleep 0.3
                 .await
                 .map(|_| ()),
             McpTool::GetSupertypes => server
-                .get_supertypes(Parameters(type_item()))
+                .get_supertypes_with_origin(Parameters(type_item()), None)
                 .await
                 .map(|_| ()),
             McpTool::GetSubtypes => server
-                .get_subtypes(Parameters(type_item()))
-                .await
-                .map(|_| ()),
-            McpTool::PrepareRename => server
-                .prepare_rename(Parameters(position()))
+                .get_subtypes_with_origin(Parameters(type_item()), None)
                 .await
                 .map(|_| ()),
             McpTool::GetDocumentHighlights => server
@@ -7092,6 +9198,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::FormatRange => server
                 .format_range(Parameters(FormatRangeParams {
+                    full: true,
                     file_path: PathBuf::from(file_path.clone()),
                     range: range(),
                     tab_size: crate::bridge::TabSize::default(),
@@ -7141,6 +9248,17 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::GetToolSupport => server
                 .get_tool_support(Parameters(ToolSupportParams::default()))
+                .await
+                .map(|_| ()),
+            // Invalid feedback exercises the local handler without writing to
+            // the user's state directory during the capability parity matrix.
+            McpTool::FeedbackAdd => server
+                .feedback_add(Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({"operation":"", "observation":"test"}),
+                    )
+                    .unwrap(),
+                ))
                 .await
                 .map(|_| ()),
             McpTool::RestartServer => server
@@ -7632,5 +9750,1152 @@ sleep 0.3
 
         assert!(server.get_tool("p_get_hover").is_some());
         assert!(server.get_tool("get_hover").is_none());
+    }
+    /// Public discovery envelopes keep exact points through all six consumers.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one public matrix verifies producer-consumer identity and rejection without dispatch"
+    )]
+    async fn portable_targets_roundtrip_and_reject_stale_over_mcp() {
+        use sha2::{Digest, Sha256};
+
+        use crate::test_lsp::{read_framed_message, write_response};
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    workspace_symbol_provider: Some(lsp_types::WorkspaceSymbolProvider::Bool(true)),
+                    hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                    definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+                    references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
+                    call_hierarchy_provider: Some(lsp_types::CallHierarchyProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let original = "mod a { fn same() {} }\nmod b { fn same() {} }\n";
+        std::fs::write(&fixture.file, original).unwrap();
+        let uri = crate::bridge::path_to_uri(&fixture.file)
+            .unwrap()
+            .to_string();
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                seen.lock().await.push(request.clone());
+                let point = request["params"]["position"].clone();
+                let range =
+                    serde_json::json!({"start":point,"end":{"line":point["line"],"character":15}});
+                let item = serde_json::json!({"name":"same","kind":12,"uri":uri,"range":range,"selectionRange":range,"data":{"point":point,"opaque":[1,{"x":true}]}});
+                let result = match request["method"].as_str().unwrap() {
+                    "textDocument/documentSymbol" => serde_json::json!((0..2).map(|line| serde_json::json!({
+                        "name":"same","kind":12,"range":{"start":{"line":line,"character":8},"end":{"line":line,"character":20}},
+                        "selectionRange":{"start":{"line":line,"character":11},"end":{"line":line,"character":15}}
+                    })).collect::<Vec<_>>()),
+                    "workspace/symbol" => serde_json::json!((0..if request["params"]["query"] == "many" { 17 } else { 2 }).map(|line| serde_json::json!({"name":"same","kind":12,"location":{"uri":uri,"range":{"start":{"line":line % 2,"character":11},"end":{"line":line % 2,"character":15}}}})).collect::<Vec<_>>()),
+                    "textDocument/hover" => serde_json::json!({"contents":format!("point:{}:{}",point["line"],point["character"])}),
+                    "textDocument/definition" | "textDocument/references" => serde_json::json!([{"uri":uri,"range":range}]),
+                    "textDocument/prepareCallHierarchy" => serde_json::json!([item]),
+                    "callHierarchy/incomingCalls" => serde_json::json!([{"from":request["params"]["item"],"fromRanges":[]}]),
+                    "callHierarchy/outgoingCalls" => serde_json::json!([{"to":request["params"]["item"],"fromRanges":[]}]),
+                    method => panic!("unexpected semantic request: {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], result).await;
+            }
+        });
+        for enabled in [false, true] {
+            let before = requests.lock().await.len();
+            let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                "name":"workspace_symbol_search", "arguments":{"query":"many","include_targets":enabled}
+            })).await;
+            let symbols = response["result"]["structuredContent"]["symbols"]
+                .as_array()
+                .expect("retained symbol list");
+            assert_eq!(symbols.len(), 17);
+            assert_eq!(
+                requests.lock().await.len(),
+                before + 1,
+                "enrichment adds no semantic operation"
+            );
+            for (index, entry) in symbols.iter().enumerate() {
+                if !enabled {
+                    assert!(
+                        entry.get("symbol_target").is_none()
+                            && entry.get("symbol_target_unavailable").is_none()
+                    );
+                } else if index < 16 {
+                    assert!(entry["symbol_target"].is_object(), "{entry}");
+                } else {
+                    assert_eq!(
+                        entry["symbol_target_unavailable"]["reason"],
+                        "budget_exhausted"
+                    );
+                }
+            }
+        }
+        let producers = [
+            (
+                "workspace_symbol_search",
+                serde_json::json!({"query":"same","include_targets":true}),
+                "symbols",
+                1,
+            ),
+            (
+                "get_document_outline",
+                serde_json::json!({"file_path":fixture.file,"include_targets":true}),
+                "symbols",
+                1,
+            ),
+            (
+                "get_definition",
+                serde_json::json!({"file_path":fixture.file,"line":2,"character":12,"include_targets":true}),
+                "locations",
+                0,
+            ),
+            (
+                "get_symbol_context",
+                serde_json::json!({"file_path":fixture.file,"line":2,"character":12,"sections":["source"]}),
+                "",
+                0,
+            ),
+        ];
+        let consumers = [
+            "get_symbol_context",
+            "get_hover",
+            "get_definition",
+            "get_references",
+            "get_incoming_calls",
+            "get_outgoing_calls",
+        ];
+        let mut target = serde_json::Value::Null;
+        for (producer, arguments, list, index) in producers {
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({"name":producer,"arguments":arguments}),
+            )
+            .await;
+            let result = &response["result"]["structuredContent"];
+            target = if list.is_empty() {
+                result["symbol_target"].clone()
+            } else {
+                result[list][index]["symbol_target"].clone()
+            };
+            assert!(target.is_object(), "{producer}: {response}");
+            let reference: serde_json::Value =
+                serde_json::from_str(target["symbol_ref"].as_str().unwrap()).unwrap();
+            let context = fixture.server.context.translator.symbol_ref_test_context();
+            let file = std::fs::canonicalize(&fixture.file).unwrap();
+            let binding =
+                serde_json::to_vec(&serde_json::json!(["mcpls-symbol-ref-v2", context, file]))
+                    .unwrap();
+            assert_eq!(
+                reference,
+                serde_json::json!([
+                    2,
+                    format!("{:x}", Sha256::digest(binding)),
+                    format!("{:x}", Sha256::digest(original.as_bytes())),
+                    2,
+                    12
+                ])
+            );
+            if producer == "get_symbol_context" {
+                assert!(result.get("symbol_ref").is_none(), "{response}");
+                assert!(result.get("symbol_ref_unavailable").is_none(), "{response}");
+            }
+            let legacy = serde_json::json!({
+                "version":1,"context":context,"file":file,
+                "line":2,"character":12,"sha256":reference[2]
+            })
+            .to_string();
+            for addressing in [
+                serde_json::json!({"symbol_target":target}),
+                serde_json::json!({"file_path":fixture.file,"symbol_ref":target["symbol_ref"]}),
+                serde_json::json!({"symbol_target":{"file_path":fixture.file,"symbol_ref":legacy}}),
+                serde_json::json!({"file_path":fixture.file,"symbol_ref":legacy}),
+            ] {
+                for consumer in consumers {
+                    if consumer.ends_with("_calls") && addressing.get("symbol_ref").is_some() {
+                        continue;
+                    }
+
+                    let before = requests.lock().await.len();
+                    let mut arguments = addressing.clone();
+                    if consumer == "get_symbol_context" {
+                        arguments["sections"] = serde_json::json!(["hover"]);
+                    }
+                    let response = tools_call_over_the_wire(
+                        fixture.server.for_new_session(),
+                        serde_json::json!({"name":consumer,"arguments":arguments}),
+                    )
+                    .await;
+                    assert!(
+                        response.get("error").is_none(),
+                        "{producer} -> {consumer}: {response}"
+                    );
+                    let result = &response["result"]["structuredContent"];
+                    assert!(result.is_object(), "{response}");
+                    let observed = requests.lock().await;
+                    let semantic = observed
+                        .iter()
+                        .skip(before)
+                        .find(|request| request["params"].get("position").is_some())
+                        .expect("consumer dispatched original point");
+                    assert_eq!(
+                        semantic["params"]["position"],
+                        serde_json::json!({"line":1,"character":11}),
+                        "{producer} -> {consumer}"
+                    );
+                    if consumer == "get_hover" || consumer == "get_symbol_context" {
+                        assert!(result.to_string().contains("point:1:11"), "{response}");
+                    }
+                    if consumer.ends_with("_calls") {
+                        let walk = observed.last().unwrap();
+                        assert_eq!(
+                            walk["params"]["item"]["data"]["point"],
+                            serde_json::json!({"line":1,"character":11})
+                        );
+                        assert_eq!(
+                            walk["params"]["item"]["data"]["opaque"],
+                            serde_json::json!([1,{"x":true}])
+                        );
+                        assert!(result.to_string().contains("same"), "{response}");
+                    }
+                    drop(observed);
+                }
+            }
+        }
+        for consumer in consumers {
+            for (field, value) in [
+                ("file_path", serde_json::json!(fixture.file)),
+                ("symbol_ref", serde_json::json!("extra")),
+                ("line", serde_json::json!(2)),
+                ("character", serde_json::json!(12)),
+                ("symbol_name", serde_json::json!("same")),
+                ("symbol_kind", serde_json::json!(12)),
+                ("container", serde_json::json!("b")),
+                ("item", serde_json::json!({})),
+            ] {
+                let before = requests.lock().await.len();
+                let mut arguments = serde_json::json!({"symbol_target":target});
+                arguments[field] = value;
+                let response = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    serde_json::json!({"name":consumer,"arguments":arguments}),
+                )
+                .await;
+                assert!(
+                    response.get("error").is_some() || response["result"]["isError"] == true,
+                    "{consumer} mixed {field}: {response}"
+                );
+                assert_eq!(
+                    requests.lock().await.len(),
+                    before,
+                    "mixed addressing must not dispatch"
+                );
+            }
+        }
+        let valid: serde_json::Value =
+            serde_json::from_str(target["symbol_ref"].as_str().unwrap()).unwrap();
+        let mut rejected_refs = vec![
+            (serde_json::json!([2]), "invalid_symbol_ref"),
+            (
+                serde_json::json!([2, valid[1], valid[2], 2, 12, 0]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([3, valid[1], valid[2], 2, 12]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([2, valid[1], valid[2], 0, 12]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([2, valid[1], valid[2], 2, 4_294_967_296_u64]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([2, valid[1], valid[2], 2, 1000]),
+                "unverifiable_target",
+            ),
+            (
+                serde_json::json!([2, "0".repeat(64), valid[2], 2, 12]),
+                "symbol_ref_context_mismatch",
+            ),
+            (
+                serde_json::json!([2, valid[1], "f".repeat(64), 2, 12]),
+                "stale_target",
+            ),
+            (
+                serde_json::json!([2, valid[1], "A".repeat(64), 2, 12]),
+                "invalid_symbol_ref",
+            ),
+            (
+                serde_json::json!([2, "A".repeat(64), valid[2], 2, 12]),
+                "invalid_symbol_ref",
+            ),
+        ];
+        let legacy = serde_json::json!({
+            "version":1,"context":fixture.server.context.translator.symbol_ref_test_context(),
+            "file":std::fs::canonicalize(&fixture.file).unwrap(),
+            "line":2,"character":12,"sha256":valid[2]
+        });
+        let mut extra_field = legacy.clone();
+        extra_field["extra"] = serde_json::json!(true);
+        rejected_refs.push((extra_field, "invalid_symbol_ref"));
+        let mut uppercase_legacy = legacy.clone();
+        uppercase_legacy["sha256"] = serde_json::json!(valid[2].as_str().unwrap().to_uppercase());
+        rejected_refs.push((uppercase_legacy, "stale_target"));
+        rejected_refs.push((
+            serde_json::json!([
+                1,
+                legacy["context"],
+                legacy["file"],
+                2,
+                12,
+                legacy["sha256"]
+            ]),
+            "invalid_symbol_ref",
+        ));
+        for (reference, kind) in rejected_refs {
+            for consumer in consumers {
+                let before = requests.lock().await.len();
+                let response = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    serde_json::json!({"name":consumer,"arguments":{"symbol_target":{
+                        "file_path":fixture.file,"symbol_ref":reference.to_string()
+                    }}}),
+                )
+                .await;
+                assert_eq!(
+                    response["error"]["data"]["kind"], kind,
+                    "{consumer}: {response}"
+                );
+                assert_eq!(
+                    requests.lock().await.len(),
+                    before,
+                    "rejection must not dispatch"
+                );
+            }
+        }
+        let outside = tempfile::TempDir::new().unwrap();
+        let outside_file = outside.path().join("outside.rs");
+        std::fs::write(&outside_file, original).unwrap();
+        for consumer in consumers {
+            for reference in [target["symbol_ref"].as_str().unwrap(), "broken", ""] {
+                let before = requests.lock().await.len();
+                let response = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    serde_json::json!({"name":consumer,"arguments":{"symbol_target":{
+                        "file_path":outside_file,"symbol_ref":reference
+                    }}}),
+                )
+                .await;
+                assert!(
+                    response["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("path outside workspace"),
+                    "{consumer}: {response}"
+                );
+                assert!(
+                    response["error"]
+                        .get("data")
+                        .and_then(|data| data.get("kind"))
+                        .is_none(),
+                    "{response}"
+                );
+                assert_eq!(
+                    requests.lock().await.len(),
+                    before,
+                    "unauthorized references must not dispatch"
+                );
+            }
+        }
+        let other_file = fixture.dir.path().join("other.rs");
+        std::fs::write(&other_file, original).unwrap();
+        let response = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({"name":"get_hover","arguments":{"symbol_target":{
+                "file_path":other_file,"symbol_ref":target["symbol_ref"]
+            }}}),
+        )
+        .await;
+        assert_eq!(
+            response["error"]["data"]["kind"], "symbol_ref_context_mismatch",
+            "{response}"
+        );
+        std::fs::write(&fixture.file, original.replace("same", "away")).unwrap();
+        for consumer in consumers {
+            let before = requests.lock().await.len();
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({"name":consumer,"arguments":{"symbol_target":target}}),
+            )
+            .await;
+            assert_eq!(
+                response["error"]["data"]["kind"], "stale_target",
+                "{consumer}: {response}"
+            );
+            assert_eq!(
+                requests.lock().await.len(),
+                before,
+                "rejected target must not dispatch"
+            );
+        }
+        responder.abort();
+    }
+
+    /// Public MCP source bundles preserve original file bytes and independent statuses.
+    /// Definition mode follows one reliable target and leaves ambiguous candidates untouched.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one public workflow checks definition resolution and query-reference accounting"
+    )]
+    async fn symbol_context_definition_resolves_once_and_rejects_ambiguity() {
+        use crate::test_lsp::{read_framed_message, write_response};
+        for duplicates in [false, true] {
+            let mut fixture = support_fixture(
+                vec![(
+                    "rust",
+                    "rust",
+                    lsp_types::ServerCapabilities {
+                        definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+                        document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(
+                            true,
+                        )),
+                        hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                        ..Default::default()
+                    },
+                )],
+                McpConfig::default(),
+            );
+            let definition = fixture.dir.path().join("definition.rs");
+            std::fs::write(&definition, "fn target() {}\n").unwrap();
+            let definition_uri = url::Url::from_file_path(&definition).unwrap().to_string();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let methods = seen.clone();
+            let mut fake = fixture.fake_servers.pop().unwrap();
+            let responder = tokio::spawn(async move {
+                let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+                loop {
+                    let request = read_framed_message(&mut wire).await;
+                    if request.get("id").is_none() {
+                        continue;
+                    }
+                    methods
+                        .lock()
+                        .await
+                        .push(request["method"].as_str().unwrap().to_owned());
+                    let result = match request["method"].as_str().unwrap() {
+                        "textDocument/definition" => {
+                            let location = serde_json::json!({"uri":definition_uri,"range":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}}});
+                            if duplicates {
+                                serde_json::json!([location, location])
+                            } else {
+                                serde_json::json!([location])
+                            }
+                        }
+                        "textDocument/documentSymbol" => {
+                            serde_json::json!([{"name":"target","kind":12,
+                            "range":{"start":{"line":0,"character":0},"end":{"line":1,"character":0}},
+                            "selectionRange":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}}}])
+                        }
+                        "textDocument/hover" => {
+                            assert_eq!(request["params"]["textDocument"]["uri"], definition_uri);
+                            serde_json::json!({"contents":"target docs"})
+                        }
+                        method => panic!("unexpected semantic request {method}"),
+                    };
+                    write_response(&mut fake.read_half_stdin, &request["id"], result).await;
+                }
+            });
+            let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"resolve":"definition"}
+            })).await;
+            let bundle = &response["result"]["structuredContent"];
+            assert!(bundle.get("symbol_ref").is_none(), "{response}");
+            assert!(bundle.get("symbol_ref_unavailable").is_none(), "{response}");
+            assert_eq!(
+                bundle["query"]["file_path"],
+                serde_json::json!(fixture.file),
+                "{response}"
+            );
+            if duplicates {
+                assert_eq!(
+                    bundle["resolution"]["reason"], "multiple_definitions",
+                    "{response}"
+                );
+                assert!(bundle["target"].is_null());
+                assert_eq!(
+                    bundle["sections"]["source"]["reason"],
+                    "resolution_not_resolved"
+                );
+                assert_eq!(*seen.lock().await, vec!["textDocument/definition"]);
+            } else {
+                assert_eq!(bundle["resolution"]["status"], "resolved", "{response}");
+                assert_eq!(bundle["target"]["file_path"], serde_json::json!(definition));
+                assert_eq!(
+                    bundle["sections"]["source"]["data"]["text"],
+                    "fn target() {}\n"
+                );
+                assert_eq!(
+                    bundle["sections"]["source"]["data"]["completeness"],
+                    "complete_symbol"
+                );
+                assert_eq!(
+                    bundle["sections"]["hover"]["data"]["contents"],
+                    "target docs"
+                );
+            }
+            if duplicates {
+                let direct = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                    "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"sections":["source"]}
+                })).await;
+                let reference =
+                    direct["result"]["structuredContent"]["symbol_target"]["symbol_ref"]
+                        .as_str()
+                        .unwrap();
+                seen.lock().await.clear();
+                let reused = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                    "name":"get_symbol_context","arguments":{"file_path":fixture.file,"symbol_ref":reference,"resolve":"definition","sections":["source"]}
+                })).await;
+                let source = &reused["result"]["structuredContent"]["sections"]["source"];
+                assert_eq!(source["reason"], "resolution_not_resolved", "{reused}");
+                assert_eq!(
+                    source["source_acquisition_bytes"],
+                    std::fs::metadata(&fixture.file).unwrap().len()
+                );
+                assert_eq!(*seen.lock().await, vec!["textDocument/definition"]);
+            }
+            responder.abort();
+        }
+    }
+
+    /// Oversized selected metadata returns a bounded failure without target fanout.
+    #[tokio::test]
+    async fn symbol_context_definition_bounds_selected_metadata() {
+        use crate::test_lsp::{read_framed_message, write_response};
+        for oversized in [false, true] {
+            let mut fixture = support_fixture(
+                vec![(
+                    "rust",
+                    "rust",
+                    lsp_types::ServerCapabilities {
+                        definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+                        document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(
+                            true,
+                        )),
+                        hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                        ..Default::default()
+                    },
+                )],
+                McpConfig::default(),
+            );
+            let uri = format!(
+                "file:///outside/{}.rs",
+                if oversized {
+                    "x".repeat(70_000)
+                } else {
+                    "target".into()
+                }
+            );
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let methods = seen.clone();
+            let mut fake = fixture.fake_servers.pop().unwrap();
+            let responder = tokio::spawn(async move {
+                let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+                loop {
+                    let request = read_framed_message(&mut wire).await;
+                    if request.get("id").is_none() {
+                        continue;
+                    }
+                    methods
+                        .lock()
+                        .await
+                        .push(request["method"].as_str().unwrap().to_owned());
+                    assert_eq!(
+                        request["method"], "textDocument/definition",
+                        "unexpected target fanout"
+                    );
+                    write_response(&mut fake.read_half_stdin, &request["id"], serde_json::json!([
+                        {"uri":uri,"range":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}}}
+                    ])).await;
+                }
+            });
+            let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"resolve":"definition"}
+            })).await;
+            let result = &response["result"];
+            let bundle = &result["structuredContent"];
+            assert!(serde_json::to_vec(result).unwrap().len() <= 131_072);
+            assert_eq!(
+                bundle["query"]["file_path"],
+                serde_json::json!(fixture.file)
+            );
+            assert_eq!(bundle["resolution"]["status"], "unavailable");
+            assert_eq!(bundle["resolution"]["provider_truncated"], false);
+            if oversized {
+                assert_eq!(bundle["resolution"]["reason"], "response_budget");
+                assert_eq!(bundle["truncated"], true);
+                assert!(bundle["target"].is_null());
+                assert_eq!(bundle["resolution"]["candidates"], serde_json::json!([]));
+            } else {
+                assert_eq!(bundle["resolution"]["reason"], "target_unavailable");
+                assert_eq!(bundle["target"]["file_path"], "/outside/target.rs");
+            }
+            for section in ["source", "hover"] {
+                assert_eq!(
+                    bundle["sections"][section]["reason"],
+                    "resolution_not_resolved"
+                );
+            }
+            assert!(bundle.get("symbol_ref").is_none());
+            assert!(bundle.get("symbol_target").is_none());
+            assert_eq!(*seen.lock().await, vec!["textDocument/definition"]);
+            responder.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn symbol_context_preserves_source_and_null_hover() {
+        use sha2::{Digest, Sha256};
+
+        use crate::test_lsp::{read_framed_message, write_response};
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let original = "// before\r\nfn main() {\r\n    run();\r\n}\r\n// after";
+        std::fs::write(&fixture.file, original).unwrap();
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let methods = seen.clone();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                methods
+                    .lock()
+                    .await
+                    .push(request["method"].as_str().unwrap().to_owned());
+                let response = match request["method"].as_str().unwrap() {
+                    "textDocument/documentSymbol" => serde_json::json!([{
+                        "name":"main","kind":12,
+                        "range":{"start":{"line":1,"character":0},"end":{"line":4,"character":0}},
+                        "selectionRange":{"start":{"line":1,"character":3},"end":{"line":1,"character":7}}
+                    }]),
+                    "textDocument/hover" => serde_json::Value::Null,
+                    method => panic!("unrequested semantic operation {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], response).await;
+            }
+        });
+        let response=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+            "name":"get_symbol_context","arguments":{"file_path":fixture.file,"symbol_name":"main"}
+        })).await;
+        let bundle = &response["result"]["structuredContent"];
+        assert_eq!(bundle["target"]["range_fidelity"], "symbol", "{response}");
+        assert_eq!(
+            bundle["sections"]["source"]["data"]["text"],
+            "fn main() {\r\n    run();\r\n}\r\n"
+        );
+        assert_eq!(
+            bundle["sections"]["source"]["data"]["sha256"],
+            format!("{:x}", Sha256::digest(original.as_bytes()))
+        );
+        assert_eq!(
+            bundle["sections"]["source"]["data"]["completeness"],
+            "complete_symbol"
+        );
+        assert_eq!(
+            bundle["sections"]["source"]["source_acquisition_bytes"],
+            original.len() * 2
+        );
+        assert_eq!(bundle["sections"]["hover"]["status"], "empty");
+        assert_eq!(bundle["analysis_freshness"], "unknown");
+        assert_eq!(bundle["atomic_snapshot"], false);
+        assert_eq!(bundle["sections"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            *seen.lock().await,
+            vec![
+                "textDocument/documentSymbol",
+                "textDocument/documentSymbol",
+                "textDocument/hover"
+            ]
+        );
+        assert_eq!(std::fs::read_to_string(&fixture.file).unwrap(), original);
+        responder.abort();
+    }
+
+    /// Reusable targets reject changed tracked source before any semantic request.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one public MCP workflow covers reuse, staleness, and restoration with the same fixture"
+    )]
+    async fn symbol_ref_roundtrip_and_stale_source_over_mcp() {
+        use crate::test_lsp::{read_framed_message, write_response};
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    hover_provider: Some(lsp_types::HoverProvider::Bool(true)),
+                    definition_provider: Some(lsp_types::DefinitionProvider::Bool(true)),
+                    references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let original = "// 😀\nfn main() {}\n";
+        std::fs::write(&fixture.file, original).unwrap();
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let request = read_framed_message(&mut wire).await;
+                if request.get("id").is_none() {
+                    continue;
+                }
+                let result = match request["method"].as_str().unwrap() {
+                    "textDocument/hover" => serde_json::json!({"contents":"target docs"}),
+                    "textDocument/documentSymbol"
+                    | "textDocument/definition"
+                    | "textDocument/references" => serde_json::json!([]),
+                    method => panic!("unexpected method {method}"),
+                };
+                write_response(&mut fake.read_half_stdin, &request["id"], result).await;
+            }
+        });
+        let response = tools_call_over_the_wire(fixture.server.for_new_session(), serde_json::json!({
+            "name":"get_symbol_context", "arguments":{"file_path":fixture.file,"line":2,"character":4,"sections":["source"]}
+        })).await;
+        let reference = response["result"]["structuredContent"]["symbol_target"]["symbol_ref"]
+            .as_str()
+            .expect("issued reference")
+            .to_owned();
+        let mut split_surrogate: serde_json::Value = serde_json::from_str(&reference).unwrap();
+        split_surrogate[3] = serde_json::json!(1);
+        split_surrogate[4] = serde_json::json!(5);
+        let invalid_point = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({"name":"get_hover","arguments":{
+                "file_path":fixture.file,"symbol_ref":split_surrogate.to_string()
+            }}),
+        )
+        .await;
+        assert_eq!(
+            invalid_point["error"]["data"]["kind"],
+            "unverifiable_target"
+        );
+        for name in [
+            "get_hover",
+            "get_definition",
+            "get_references",
+            "get_symbol_context",
+        ] {
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":name,"arguments":{"file_path":fixture.file,"symbol_ref":reference}
+                }),
+            )
+            .await;
+            assert!(response.get("error").is_none(), "{response}");
+            assert!(
+                response["result"].get("structuredContent").is_some(),
+                "{response}"
+            );
+            let explicit = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":name,"arguments":{"file_path":fixture.file,"line":2,"character":4}
+                }),
+            )
+            .await;
+            let mut reused = response["result"]["structuredContent"].clone();
+            let mut expected = explicit["result"]["structuredContent"].clone();
+            if name == "get_symbol_context" {
+                assert_eq!(
+                    reused["sections"]["source"]["source_acquisition_bytes"],
+                    original.len() * 3
+                );
+                assert_eq!(
+                    expected["sections"]["source"]["source_acquisition_bytes"],
+                    original.len() * 2
+                );
+                reused["sections"]["source"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source_acquisition_bytes");
+                expected["sections"]["source"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source_acquisition_bytes");
+            }
+            assert_eq!(reused, expected, "{name}");
+        }
+        std::fs::write(&fixture.file, original.replace("main", "away")).unwrap();
+        for name in [
+            "get_hover",
+            "get_definition",
+            "get_references",
+            "get_symbol_context",
+        ] {
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":name,"arguments":{"file_path":fixture.file,"symbol_ref":reference}
+                }),
+            )
+            .await;
+            assert_eq!(
+                response["error"]["data"]["kind"], "stale_target",
+                "{response}"
+            );
+        }
+        std::fs::write(&fixture.file, original).unwrap();
+        let response = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({
+                "name":"get_hover","arguments":{"file_path":fixture.file,"symbol_ref":reference}
+            }),
+        )
+        .await;
+        assert!(response.get("error").is_none(), "{response}");
+        responder.abort();
+    }
+
+    /// Missing semantic capabilities leave source useful, with honest range uncertainty.
+    #[tokio::test]
+    async fn symbol_context_source_survives_unsupported_semantics_and_bounds_bytes() {
+        let fixture = support_fixture(
+            vec![("rust", "rust", lsp_types::ServerCapabilities::default())],
+            McpConfig::default(),
+        );
+        let source = format!("fn main() {{}}\n{}", "x".repeat(20_000));
+        std::fs::write(&fixture.file, &source).unwrap();
+        let response=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+            "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,
+                "sections":["highlights","hover","source","diagnostics","inlay_hints"]}
+        })).await;
+        let bundle = &response["result"]["structuredContent"];
+        assert_eq!(
+            bundle["sections"]["source"]["status"], "partial",
+            "{response}"
+        );
+        assert_eq!(bundle["sections"]["source"]["reason"], "text_budget");
+        assert_eq!(
+            bundle["sections"]["source"]["data"]["text"],
+            "fn main() {}\n"
+        );
+        assert_eq!(bundle["sections"]["hover"]["status"], "unsupported");
+        for name in ["diagnostics", "inlay_hints", "highlights"] {
+            assert_eq!(bundle["sections"][name]["status"], "unavailable");
+            assert_eq!(bundle["sections"][name]["reason"], "range_unavailable");
+        }
+        assert_eq!(bundle["target"]["range_fidelity"], "unknown");
+        assert_eq!(bundle["truncated"], true);
+        assert!(serde_json::to_vec(&response["result"]).unwrap().len() <= 131_072);
+        std::fs::write(&fixture.file, "x".repeat(1_048_577)).unwrap();
+        let oversized=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+            "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"sections":["source"]}
+        })).await;
+        let bundle = &oversized["result"]["structuredContent"];
+        assert!(bundle.get("symbol_ref").is_none(), "{oversized}");
+        assert!(
+            bundle.get("symbol_ref_unavailable").is_none(),
+            "{oversized}"
+        );
+        assert!(bundle.get("symbol_target").is_none(), "{oversized}");
+        assert_eq!(
+            bundle["symbol_target_unavailable"]["reason"],
+            "source_unavailable"
+        );
+        assert_eq!(
+            oversized["result"]["structuredContent"]["sections"]["source"]["reason"],
+            "file_too_large"
+        );
+    }
+
+    /// Invalid section and targeting envelopes never invoke a provider.
+    #[tokio::test]
+    async fn symbol_context_rejects_invalid_public_requests() {
+        for extra in [
+            serde_json::json!({"sections":[]}),
+            serde_json::json!({"sections":["source","source"]}),
+            serde_json::json!({"sections":["unknown"]}),
+            serde_json::json!({"budget":100}),
+            serde_json::json!({"resolve":null}),
+            serde_json::json!({"resolve":"recursive"}),
+            serde_json::json!({"symbol_name":"main"}),
+        ] {
+            let mut arguments = serde_json::json!({"file_path":"/a.rs","line":1,"character":4});
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let result = tools_call_over_the_wire(
+                create_test_server(),
+                serde_json::json!({"name":"get_symbol_context","arguments":arguments}),
+            )
+            .await;
+            assert!(
+                result.get("error").is_some() || result["result"]["isError"] == true,
+                "{result}"
+            );
+        }
+    }
+    /// Unknown ranges use a clipped centered window, including short file edges.
+    #[tokio::test]
+    async fn symbol_context_clips_centered_source_at_file_edges() {
+        let fixture = support_fixture(
+            vec![("rust", "rust", lsp_types::ServerCapabilities::default())],
+            McpConfig::default(),
+        );
+        let source = format!("1\n2\n3\n4\n5\n{}\n7\n8\n9\n10", "x".repeat(20_000));
+        std::fs::write(&fixture.file, source).unwrap();
+        for (line, start, text) in [(1, 1, "1\n2\n3\n"), (10, 8, "8\n9\n10")] {
+            let response=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":line,"character":1,"sections":["source"]}
+            })).await;
+            let source = &response["result"]["structuredContent"]["sections"]["source"];
+            assert_eq!(source["status"], "partial", "{response}");
+            assert_eq!(source["reason"], "range_unavailable");
+            assert_eq!(source["data"]["start_line"], start);
+            assert_eq!(source["data"]["text"], text);
+        }
+    }
+
+    /// Bundles retain provider order and a published empty cache after a failed pull.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exercise bundle and unchanged standalone outcomes against the same provider and cache"
+    )]
+    async fn symbol_context_diagnostics_preserve_bundle_policy_and_standalone_compatibility() {
+        use crate::test_lsp::{read_framed_message, write_error_response, write_response};
+        for failed in [false, true] {
+            let mut fixture = support_fixture(
+                vec![(
+                    "rust",
+                    "rust",
+                    lsp_types::ServerCapabilities {
+                        document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(
+                            true,
+                        )),
+                        ..Default::default()
+                    },
+                )],
+                McpConfig::default(),
+            );
+            std::fs::write(&fixture.file, "fn main() {\n}\n").unwrap();
+            if failed {
+                let uri = crate::bridge::path_to_uri(&fixture.file).unwrap();
+                fixture
+                    .server
+                    .context
+                    .notification_cache
+                    .lock()
+                    .await
+                    .store_diagnostics(
+                        &crate::config::ServerId::from_static("rust"),
+                        &uri,
+                        Some(1),
+                        vec![],
+                    );
+            }
+            let mut fake = fixture.fake_servers.pop().unwrap();
+            let responder = tokio::spawn(async move {
+                let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+                loop {
+                    let request = read_framed_message(&mut wire).await;
+                    if request.get("id").is_none() {
+                        continue;
+                    }
+                    let response = match request["method"].as_str().unwrap() {
+                        "textDocument/documentSymbol" => {
+                            serde_json::json!([{"name":"main","kind":12,
+                            "range":{"start":{"line":0,"character":0},"end":{"line":1,"character":1}},
+                            "selectionRange":{"start":{"line":0,"character":3},"end":{"line":0,"character":7}}}])
+                        }
+                        "textDocument/diagnostic" if failed => {
+                            write_error_response(
+                                &mut fake.read_half_stdin,
+                                &request["id"],
+                                -32603,
+                                "failed pull",
+                            )
+                            .await;
+                            continue;
+                        }
+                        "textDocument/diagnostic" => serde_json::json!({"kind":"full","items":[
+                            {"message":"later-first","range":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}}},
+                            {"message":"earlier-second","range":{"start":{"line":0,"character":4},"end":{"line":0,"character":5}}}
+                        ]}),
+                        method => panic!("unexpected request {method}"),
+                    };
+                    write_response(&mut fake.read_half_stdin, &request["id"], response).await;
+                }
+            });
+            let response=tools_call_over_the_wire(fixture.server.for_new_session(),serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,"line":1,"character":4,"sections":["diagnostics"]}
+            })).await;
+            let section = &response["result"]["structuredContent"]["sections"]["diagnostics"];
+            if failed {
+                assert_eq!(section["status"], "partial", "{response}");
+                assert_eq!(section["reason"], "pull_failed");
+                assert_eq!(section["data"]["origin"], "cache_after_failed_pull");
+                assert_eq!(section["data"]["availability"], "published");
+                assert_eq!(section["data"]["diagnostics"], serde_json::json!([]));
+            } else {
+                assert_eq!(section["status"], "ok", "{response}");
+                assert_eq!(section["data"]["diagnostics"][0]["message"], "later-first");
+                assert_eq!(
+                    section["data"]["diagnostics"][1]["message"],
+                    "earlier-second"
+                );
+            }
+            let standalone = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":"get_diagnostics","arguments":{"file_path":fixture.file}
+                }),
+            )
+            .await;
+            if failed {
+                assert!(
+                    standalone.get("error").is_some() || standalone["result"]["isError"] == true,
+                    "{standalone}"
+                );
+            } else {
+                assert_eq!(
+                    standalone["result"]["structuredContent"]["diagnostics"][0]["message"],
+                    "earlier-second"
+                );
+            }
+            responder.abort();
+        }
+    }
+
+    /// Source windows preserve logical EOF lines without changing bytes or prefix budgets.
+    #[tokio::test]
+    async fn symbol_context_source_logical_line_boundary_matrix() {
+        use sha2::{Digest, Sha256};
+        let fixture = support_fixture(
+            vec![("rust", "rust", lsp_types::ServerCapabilities::default())],
+            McpConfig::default(),
+        );
+        let mut cases = vec![(String::new(), 1, 1, String::new(), "range_unavailable")];
+        for separator in ["\n", "\r\n", "\r"] {
+            let text = format!("α🦀{separator}b{separator}c{separator}");
+            for line in [1, 3] {
+                cases.push((text.clone(), line, 1, text.clone(), "range_unavailable"));
+            }
+            cases.push((
+                text,
+                4,
+                2,
+                format!("b{separator}c{separator}"),
+                "range_unavailable",
+            ));
+            let text = format!("α🦀{separator}b{separator}c");
+            cases.push((text.clone(), 3, 1, text, "range_unavailable"));
+            for line in [1, 2] {
+                cases.push((
+                    separator.to_owned(),
+                    line,
+                    1,
+                    separator.to_owned(),
+                    "range_unavailable",
+                ));
+            }
+            cases.push((
+                format!("a{separator}{}{separator}", "x".repeat(20_000)),
+                1,
+                1,
+                format!("a{separator}"),
+                "text_budget",
+            ));
+        }
+        for (text, line, start, expected, reason) in cases {
+            std::fs::write(&fixture.file, &text).unwrap();
+            let response = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({
+                    "name":"get_symbol_context","arguments":{"file_path":fixture.file,
+                        "line":line,"character":1,"sections":["source"]}
+                }),
+            )
+            .await;
+            let bundle = &response["result"]["structuredContent"];
+            let section = &bundle["sections"]["source"];
+            assert_eq!(
+                section["status"], "partial",
+                "line {line}, text {text:?}: {response}"
+            );
+            assert_eq!(section["reason"], reason);
+            assert_eq!(section["data"]["text"], expected);
+            assert_eq!(section["data"]["start_line"], start);
+            assert_eq!(section["data"]["completeness"], "excerpt");
+            assert_eq!(
+                section["data"]["sha256"],
+                format!("{:x}", Sha256::digest(text.as_bytes()))
+            );
+            assert_eq!(bundle["truncated"], reason == "text_budget");
+        }
+        let (client, _fake, _lanes) =
+            crate::test_lsp::fake_lsp_client_with_redactions(crate::redaction::Redactions::new([
+                ("TEST_TOKEN".to_owned(), "line-token-secret".to_owned()),
+            ]));
+        fixture
+            .server
+            .context
+            .translator
+            .register_client(crate::config::ServerId::from_static("rust"), client);
+        let text = format!("line-token-secret\n{}\n", "x".repeat(20_000));
+        std::fs::write(&fixture.file, &text).unwrap();
+        let response = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            serde_json::json!({
+                "name":"get_symbol_context","arguments":{"file_path":fixture.file,
+                    "line":1,"character":1,"sections":["source"]}
+            }),
+        )
+        .await;
+        let source = &response["result"]["structuredContent"]["sections"]["source"];
+        assert_eq!(source["status"], "partial", "{response}");
+        assert_eq!(source["reason"], "text_budget");
+        assert_eq!(source["data"]["text"], "[redacted:TEST_TOKEN]\n");
+        assert_eq!(source["data"]["redacted"], true);
+        assert_eq!(
+            source["data"]["sha256"],
+            format!("{:x}", Sha256::digest(text.as_bytes()))
+        );
     }
 }

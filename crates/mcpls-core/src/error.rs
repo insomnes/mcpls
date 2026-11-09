@@ -1236,6 +1236,13 @@ impl fmt::Display for SymbolCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "resolution", rename_all = "snake_case")]
 pub enum SymbolResolutionData {
+    /// A reusable observed target was rejected.
+    Reference {
+        /// Stable rejection category.
+        kind: String,
+        /// Explanation suitable for the caller.
+        message: String,
+    },
     /// The name matches several symbols; nothing was picked.
     Ambiguous {
         /// The requested name.
@@ -1271,6 +1278,7 @@ pub enum SymbolResolutionData {
 impl fmt::Display for SymbolResolutionData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Reference { message, .. } => f.write_str(message),
             Self::Ambiguous {
                 name,
                 candidates,
@@ -1660,6 +1668,9 @@ impl fmt::Display for StdioStream {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigError {
+    /// Dispatcher configuration violates its service boundary.
+    #[error("invalid dispatcher configuration: {0}")]
+    Dispatcher(String),
     /// A server entry lists a `file_patterns` form that maps to no extension.
     #[error("lsp_servers entry '{server}'")]
     UnsupportedFilePattern {
@@ -2063,6 +2074,12 @@ pub enum Error {
         io: std::io::Error,
     },
 
+    /// Client filesystem coverage could not be established or was lost.
+    #[error(
+        "file watching backend unavailable; inspect backend configuration and restart the workspace runtime"
+    )]
+    FileWatchingUnavailable,
+
     /// LSP protocol error during message parsing.
     #[error("LSP protocol error: {}", escape_control(.0.as_str()))]
     LspProtocolError(RedactedText),
@@ -2149,6 +2166,10 @@ pub enum Error {
     /// Invalid tool parameters provided.
     #[error("invalid tool parameters: {0}")]
     InvalidToolParams(String),
+
+    /// The current call graph has attempted its maximum analysis requests.
+    #[error("call graph analysis request budget exhausted")]
+    CallGraphRequestLimit,
 
     /// A client-supplied file path is empty or contains a NUL byte.
     #[error(transparent)]
@@ -2588,7 +2609,8 @@ impl Error {
                 ))
             }
 
-            Self::LspInitFailed { .. }
+            Self::CallGraphRequestLimit
+            | Self::LspInitFailed { .. }
             | Self::LspServerError(..)
             | Self::McpServerStart(_)
             | Self::TaskFailed { .. }
@@ -2609,6 +2631,7 @@ impl Error {
             | Self::Timeout(_)
             | Self::ServerSpawnFailed { .. }
             | Self::ServerNotFound { .. }
+            | Self::FileWatchingUnavailable
             | Self::LspProtocolError(_)
             | Self::ServerTerminated
             | Self::ShutdownTimeout
@@ -2665,6 +2688,7 @@ impl Error {
             | Self::Timeout(..)
             | Self::ServerSpawnFailed { .. }
             | Self::ServerNotFound { .. }
+            | Self::FileWatchingUnavailable
             | Self::LspProtocolError(..)
             | Self::NoResolvableListenUris
             | Self::InvalidPositionInput(..)
@@ -2678,6 +2702,7 @@ impl Error {
             | Self::ServerExitedDuringInit { .. }
             | Self::ServerUnavailable { .. }
             | Self::InvalidToolParams(..)
+            | Self::CallGraphRequestLimit
             | Self::InvalidClientPath(..)
             | Self::DocumentLimitExceeded { .. }
             | Self::SubscriptionLimitReached { .. }

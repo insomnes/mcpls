@@ -208,7 +208,7 @@ async fn run_references(
     context: ResultContext,
     references: Value,
     symbol_answers: Vec<(&str, Option<Value>)>,
-) -> crate::bridge::LocationsResult {
+) -> super::dto::ReferenceLocationsResult {
     let handle = {
         let translator = Arc::clone(&fx.translator);
         let path = main.to_string_lossy().into_owned();
@@ -259,8 +259,11 @@ async fn run_references(
         .result
 }
 
-fn outcome(result: &crate::bridge::LocationsResult, index: usize) -> EnclosingSymbolOutcome {
-    result.locations[index].enclosing_symbol.clone().unwrap()
+fn outcome(result: &impl serde::Serialize, index: usize) -> EnclosingSymbolOutcome {
+    serde_json::from_value(
+        serde_json::to_value(result).unwrap()["locations"][index]["enclosing_symbol"].clone(),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -313,7 +316,7 @@ async fn test_references_enclosing_symbol_one_request_per_file() {
 }
 
 #[tokio::test]
-async fn test_references_default_output_is_unchanged_and_issues_no_symbol_request() {
+async fn test_references_defaults_omit_source_and_issue_no_symbol_request() {
     let mut fx = fixture(full_caps(), None);
     let main = fx.write("main.rs", "fn main() {}\n");
     let uri = file_uri(&main);

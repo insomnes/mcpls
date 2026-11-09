@@ -107,3 +107,8 @@ pub fn lsp317_target() {
     let s = add(1, 2);
     let _ = (p, s);
 }
+
+/// Two-hop call hierarchy entry for bounded graph queries.
+pub fn graph_entry() -> i32 {
+    caller()
+}

@@ -53,7 +53,7 @@ mod sweep_tests;
 /// a deserialization error where today it degrades to an empty diagnostics
 /// list. This preserves the union gluon's `DocumentDiagnosticReportResult`
 /// used to provide, via the untyped `LspClient::request`.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize)]
 #[serde(untagged)]
 enum DocumentDiagnosticReportResult {
     Report(lsp_types::DocumentDiagnosticReport),
@@ -68,6 +68,28 @@ enum DocumentDiagnosticReportResult {
         )]
         lsp_types::DocumentDiagnosticReportPartialResult,
     ),
+}
+
+impl<'de> serde::Deserialize<'de> for DocumentDiagnosticReportResult {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(kind) = value.get_mut("kind") {
+            // Stock gopls v0.24.0 emits an empty discriminator for full reports.
+            // Decode through the full-report type so items remain required and validated.
+            if kind.as_str() == Some("") {
+                *kind = serde_json::Value::String("full".to_owned());
+            }
+            serde_json::from_value(value)
+                .map(Self::Report)
+                .map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value(value)
+                .map(Self::Partial)
+                .map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 /// `textDocument/diagnostic` with [`DocumentDiagnosticReportResult`] as its
@@ -87,10 +109,12 @@ impl lsp_types::Request for PullDiagnosticRequest {
 /// How a pull request ended.
 enum PullAttempt {
     /// The server answered; holds the items of a full report.
-    Answered(Option<BoundedDiagnostics>),
+    Answered(Option<BoundedDiagnostics>, &'static str, Option<String>),
     /// No pull answered and none is expected to: the request was not sent, or a
     /// server advertising no provider refused it with `-32601`.
     PushOnly,
+    /// A failed provider probe, suppressed only by the legacy diagnostics adapter.
+    ProbeFailed(Error),
     /// The request failed.
     Failed(Error),
 }
@@ -99,8 +123,8 @@ impl PullAttempt {
     /// Where an answer built after this attempt came from.
     const fn origin(&self) -> DiagnosticsOrigin {
         match self {
-            Self::Answered(_) => DiagnosticsOrigin::Pull,
-            Self::PushOnly => DiagnosticsOrigin::PushCache,
+            Self::Answered(..) => DiagnosticsOrigin::Pull,
+            Self::PushOnly | Self::ProbeFailed(_) => DiagnosticsOrigin::PushCache,
             Self::Failed(_) => DiagnosticsOrigin::CacheAfterFailedPull,
         }
     }
@@ -109,10 +133,11 @@ impl PullAttempt {
 /// What a `textDocument/diagnostic` answer says about the file.
 enum PullReport {
     /// A full report: the file's diagnostics as the server sees them now.
-    Full(Vec<lsp_types::Diagnostic>),
+    Full(Vec<lsp_types::Diagnostic>, Option<String>),
     /// An `unchanged` or partial answer, which says nothing a cache could
     /// replace its slot with.
-    NotStored,
+    Unchanged(String),
+    Partial,
 }
 
 impl From<DocumentDiagnosticReportResult> for PullReport {
@@ -120,11 +145,16 @@ impl From<DocumentDiagnosticReportResult> for PullReport {
         match response {
             DocumentDiagnosticReportResult::Report(
                 lsp_types::DocumentDiagnosticReport::RelatedFullDocumentDiagnosticReport(full),
-            ) => Self::Full(full.full_document_diagnostic_report.items),
+            ) => Self::Full(
+                full.full_document_diagnostic_report.items,
+                full.full_document_diagnostic_report.result_id,
+            ),
             DocumentDiagnosticReportResult::Report(
-                lsp_types::DocumentDiagnosticReport::RelatedUnchangedDocumentDiagnosticReport(_),
-            )
-            | DocumentDiagnosticReportResult::Partial(_) => Self::NotStored,
+                lsp_types::DocumentDiagnosticReport::RelatedUnchangedDocumentDiagnosticReport(
+                    report,
+                ),
+            ) => Self::Unchanged(report.unchanged_document_diagnostic_report.result_id),
+            DocumentDiagnosticReportResult::Partial(_) => Self::Partial,
         }
     }
 }
@@ -151,12 +181,15 @@ struct PullSettlement {
 
 /// What a pull round made of a file.
 pub(super) struct PullRound {
-    origin: DiagnosticsOrigin,
+    pub(crate) origin: DiagnosticsOrigin,
+    pub(crate) pull_kind: &'static str,
+    pub(crate) continuity: bool,
     /// Why the pull request failed, when it did.
-    failure: Option<Error>,
+    pub(crate) failure: Option<Error>,
+    probe_failure: Option<Error>,
     /// The file's merged view with the report in it.
-    merged: Option<DiagnosticInfo>,
-    availability: DiagnosticsAvailability,
+    pub(crate) merged: Option<DiagnosticInfo>,
+    pub(crate) availability: DiagnosticsAvailability,
 }
 
 /// The notifications a pull write owes its subscribers.
@@ -358,6 +391,18 @@ impl Translator {
         context: ResultContext,
         notification_cache: &Mutex<NotificationCache>,
     ) -> Result<DiagnosticsAnswer> {
+        self.handle_validated_diagnostics_for_context(path, context, notification_cache, false)
+            .await
+    }
+
+    /// Bundle-only order and known-empty-cache semantics; other callers retain existing behavior.
+    pub(crate) async fn handle_validated_diagnostics_for_context(
+        &self,
+        path: &WorkspacePath,
+        context: ResultContext,
+        notification_cache: &Mutex<NotificationCache>,
+        bundle: bool,
+    ) -> Result<DiagnosticsAnswer> {
         let doc = self
             .prepare_document_for_path(path, ToolKind::Diagnostics)
             .await?;
@@ -368,7 +413,10 @@ impl Translator {
             failure,
             merged: diag_info,
             availability,
-        } = self.pull_round(&doc, notification_cache).await;
+            ..
+        } = self
+            .pull_round_for_context(&doc, notification_cache, bundle)
+            .await;
 
         let merged = Self::diagnostics_from_cache_entry(
             diag_info.as_ref(),
@@ -378,6 +426,7 @@ impl Translator {
         .await;
         if let Some(e) = failure
             && merged.diagnostics.is_empty()
+            && !(bundle && availability == DiagnosticsAvailability::Published)
         {
             return Err(e);
         }
@@ -405,6 +454,48 @@ impl Translator {
         })
     }
 
+    pub(crate) async fn refresh_delta_route(&self, path: &WorkspacePath) -> Result<()> {
+        self.resolve_client_for_file(path.as_path(), ToolKind::Diagnostics)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn delta_observation(
+        &self,
+        path: &WorkspacePath,
+        cache: &Mutex<NotificationCache>,
+    ) -> Result<(
+        Option<DiagnosticInfo>,
+        DiagnosticsAvailability,
+        String,
+        &'static str,
+        bool,
+    )> {
+        let doc = self
+            .prepare_document_for_path(path, ToolKind::Diagnostics)
+            .await?;
+        let round = self.pull_round_for_context(&doc, cache, false).await;
+        if let Some(error) = round.failure.or(round.probe_failure)
+            && round.merged.is_none()
+        {
+            return Err(error);
+        }
+        let origin = match (round.pull_kind, round.origin) {
+            ("failed", _) | (_, DiagnosticsOrigin::CacheAfterFailedPull) => {
+                "cache_after_failed_pull"
+            }
+            (_, DiagnosticsOrigin::Pull) => "pull",
+            (_, DiagnosticsOrigin::PushCache) => "push_cache",
+        };
+        Ok((
+            round.merged,
+            round.availability,
+            origin.to_owned(),
+            round.pull_kind,
+            round.continuity,
+        ))
+    }
+
     /// Pulls the document `doc` names, stores a full report as its pulled slot
     /// and tells the subscribers what that changed.
     ///
@@ -418,6 +509,16 @@ impl Translator {
         &self,
         doc: &PreparedDocument,
         notification_cache: &Mutex<NotificationCache>,
+    ) -> PullRound {
+        self.pull_round_for_context(doc, notification_cache, false)
+            .await
+    }
+
+    async fn pull_round_for_context(
+        &self,
+        doc: &PreparedDocument,
+        notification_cache: &Mutex<NotificationCache>,
+        bundle: bool,
     ) -> PullRound {
         let (server_id, uri) = (doc.server_id(), doc.uri());
         let support = self.pull_support(server_id);
@@ -434,10 +535,11 @@ impl Translator {
 
         let attempt = self.request_pull(doc, support).await;
         let origin = attempt.origin();
-        let (pulled, failure) = match attempt {
-            PullAttempt::Answered(pulled) => (pulled, None),
-            PullAttempt::PushOnly => (None, None),
-            PullAttempt::Failed(e) => (None, Some(e)),
+        let (pulled, failure, probe_failure, pull_kind, result_id) = match attempt {
+            PullAttempt::Answered(pulled, kind, id) => (pulled, None, None, kind, id),
+            PullAttempt::PushOnly => (None, None, None, "not_requested", None),
+            PullAttempt::ProbeFailed(e) => (None, None, Some(e), "failed", None),
+            PullAttempt::Failed(e) => (None, Some(e), None, "failed", None),
         };
 
         let wiring = self.wiring.get().map(Arc::clone);
@@ -454,14 +556,26 @@ impl Translator {
             let mut cache = notification_cache.lock().await;
             self.settle_pull(&mut cache, doc, stamp, pulled, snapshot_before)
         };
-        let merged = sources.merge();
+        // Resource notifications retain the standalone normalized order.
+        let notification_merged = (bundle && wiring.is_some()).then(|| sources.clone().merge());
+        let merged = sources.merge_for_context(bundle);
+        let continuity = pull_kind != "unchanged"
+            || merged
+                .as_ref()
+                .is_some_and(|info| result_id.is_some() && info.evidence.result_id == result_id);
 
         if let Some(wiring) = wiring {
             let outcome = match storage {
-                PullStorage::Stored(SlotChange::Replaced { before }) => before
-                    .map_or(ChangeOutcome::Changed, |before| {
-                        ChangeOutcome::of(before.merge().as_ref(), merged.as_ref())
-                    }),
+                PullStorage::Stored(SlotChange::Replaced { before }) => {
+                    before.map_or(ChangeOutcome::Changed, |before| {
+                        ChangeOutcome::of(
+                            before.merge().as_ref(),
+                            notification_merged
+                                .as_ref()
+                                .map_or(merged.as_ref(), Option::as_ref),
+                        )
+                    })
+                }
                 PullStorage::Stored(SlotChange::Identical) | PullStorage::NotStored => {
                     ChangeOutcome::Unchanged
                 }
@@ -479,7 +593,10 @@ impl Translator {
 
         PullRound {
             origin,
+            pull_kind,
+            continuity,
             failure,
+            probe_failure,
             merged,
             availability,
         }
@@ -508,18 +625,28 @@ impl Translator {
                         PullProbe::Answered
                     });
                 }
-                PullAttempt::Answered(match PullReport::from(response) {
-                    PullReport::Full(mut items) => {
+                match PullReport::from(response) {
+                    PullReport::Full(mut items, result_id) => {
                         let redactions = client.redactions();
-                        if !redactions.is_empty() {
-                            for d in &mut items {
-                                redactions.redact_diagnostic(d);
-                            }
+                        for d in &mut items {
+                            redactions.redact_diagnostic(d);
                         }
-                        Some(BoundedDiagnostics::new(uri, items))
+                        let mut bounded = BoundedDiagnostics::new(uri, items);
+                        bounded.evidence.result_id = result_id.and_then(|mut id| {
+                            let original = id.clone();
+                            redactions.redact_in_place(&mut id);
+                            if id != original || id.len() > 1024 {
+                                bounded.evidence.metadata_omitted = true;
+                                None
+                            } else {
+                                Some(id)
+                            }
+                        });
+                        PullAttempt::Answered(Some(bounded), "full", None)
                     }
-                    PullReport::NotStored => None,
-                })
+                    PullReport::Unchanged(id) => PullAttempt::Answered(None, "unchanged", Some(id)),
+                    PullReport::Partial => PullAttempt::Answered(None, "partial", None),
+                }
             }
             Err(unclassified) if support == PullSupport::Probing => {
                 self.conclude_probe(server_id, client.connection_id(), sent_with, unclassified)
@@ -544,6 +671,7 @@ impl Translator {
         let Some(outcome) = ProbeOutcome::of(&unclassified) else {
             return PullAttempt::Failed(unclassified.surface());
         };
+        let refused = matches!(outcome, ProbeOutcome::Refuse);
         let error = unclassified.handled();
         match outcome {
             ProbeOutcome::Refuse => {
@@ -576,7 +704,11 @@ impl Translator {
                 "probe pull could not be answered right now; answering from the push cache"
             ),
         }
-        PullAttempt::PushOnly
+        if refused {
+            PullAttempt::PushOnly
+        } else {
+            PullAttempt::ProbeFailed(error)
+        }
     }
 
     /// What is known about `id` answering `textDocument/diagnostic`.
@@ -1281,8 +1413,13 @@ mod tests {
 
     /// #583: pulled diagnostics are redacted like pushed ones, before they are
     /// merged, so a pulled item and its already-redacted cached twin dedupe.
+    #[rstest::rstest]
+    #[case("full")]
+    #[case("")]
     #[tokio::test]
-    async fn test_handle_diagnostics_redacts_pull_items_before_merging_with_the_cache() {
+    async fn test_handle_diagnostics_redacts_pull_items_before_merging_with_the_cache(
+        #[case] kind: &str,
+    ) {
         let dir = TempDir::new().unwrap();
         let mut translator = Translator::new()
             .with_extensions(crate::test_lsp::test_extensions())
@@ -1345,7 +1482,7 @@ mod tests {
             &mut server.read_half_stdin,
             &request["id"],
             serde_json::json!({
-                "kind": "full",
+                "kind": kind,
                 "items": [
                     {"range": range, "severity": 2, "message": "leaked SuperSecretValue123"},
                     {
@@ -1369,6 +1506,104 @@ mod tests {
         assert!(!shown.contains("SuperSecretValue123"), "{shown}");
         assert_eq!(result.diagnostics.len(), 2, "{shown}");
         assert!(shown.contains("leaked [redacted:API_TOKEN]"), "{shown}");
+    }
+
+    /// Full reports publish and clear the cache; unchanged and partial reports retain it.
+    #[tokio::test]
+    async fn test_diagnostic_compatibility_reports_through_translator() {
+        let range = serde_json::json!({
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 1}
+        });
+        let item = serde_json::json!({"range": range, "message": "broken", "severity": 1});
+        let malformed = [
+            serde_json::json!({"kind": "mystery", "items": [item]}),
+            serde_json::json!({"items": [item]}),
+            serde_json::json!({"kind": ""}),
+            serde_json::json!({"kind": "", "items": null}),
+            serde_json::json!({"kind": "", "items": {}}),
+            serde_json::json!({"kind": "", "items": [{"message": "no range"}]}),
+            serde_json::json!({"kind": "mystery", "relatedDocuments": {}}),
+            serde_json::json!({"kind": "", "items": [null], "relatedDocuments": {}}),
+        ];
+        for first_kind in ["full", ""] {
+            let dir = TempDir::new().unwrap();
+            let mut translator = Translator::new()
+                .with_extensions(crate::test_lsp::test_extensions())
+                .with_router(ToolRouter::catch_all([(
+                    ServerId::from_static("rust"),
+                    LanguageId::from_static("rust"),
+                )]));
+            translator.set_workspace_roots(
+                WorkspaceRoots::from_paths(&[dir.path().to_path_buf()]).unwrap(),
+            );
+            let (client, mut server) = fake_lsp_client();
+            translator.register_client(ServerId::from_static("rust"), client);
+            let path = dir.path().join("lib.rs");
+            fs::write(&path, "fn main() {}").unwrap();
+            let uri = path_to_uri(&path.canonicalize().unwrap()).unwrap();
+            let cache = Mutex::new(NotificationCache::new());
+            cache
+                .lock()
+                .await
+                .attach_documents(Arc::clone(translator.document_tracker()));
+            let mut wire = BufReader::new(&mut server.write_stdout);
+            let cases = malformed.iter().cloned().map(|v| (v, None)).chain([
+                (
+                    serde_json::json!({"kind": first_kind, "items": [item]}),
+                    Some(1),
+                ),
+                (
+                    serde_json::json!({"kind": "unchanged", "resultId": "1"}),
+                    Some(1),
+                ),
+                (serde_json::json!({"relatedDocuments": {}}), Some(1)),
+                (serde_json::json!({"kind": "", "items": []}), Some(0)),
+            ]);
+            for (index, (payload, expected)) in cases.enumerate() {
+                let request =
+                    translator.handle_diagnostics(client_path(&path), ResultContext::None, &cache);
+                let reply = async {
+                    if index == 0 {
+                        assert_eq!(
+                            read_framed_message(&mut wire).await["method"],
+                            "textDocument/didOpen"
+                        );
+                    }
+                    let request = read_framed_message(&mut wire).await;
+                    assert_eq!(request["method"], "textDocument/diagnostic");
+                    write_response(&mut server.read_half_stdin, &request["id"], payload.clone())
+                        .await;
+                };
+                let (result, ()) = Box::pin(timeout(Duration::from_secs(2), async {
+                    tokio::join!(request, reply)
+                }))
+                .await
+                .unwrap();
+                if let Some(count) = expected {
+                    assert_eq!(result.unwrap().diagnostics.len(), count, "{payload}");
+                    let info = cache.lock().await.diagnostic_sources(&uri).merge();
+                    let cached = Translator::diagnostics_from_cache_entry(
+                        info.as_ref(),
+                        PositionEncoding::Utf16,
+                        &test_tracker(),
+                    )
+                    .await;
+                    assert_eq!(cached.diagnostics.len(), count, "{payload}");
+                } else {
+                    assert!(result.is_err(), "malformed report accepted: {payload}");
+                    assert!(
+                        cache
+                            .lock()
+                            .await
+                            .diagnostic_sources(&uri)
+                            .merge()
+                            .is_none(),
+                        "malformed report published: {payload}"
+                    );
+                }
+            }
+        }
     }
 
     /// S1 regression (#244): a push-only server (or one that times out)

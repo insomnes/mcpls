@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::Translator;
-use super::dto::{Position, Position2D};
+use super::dto::{Position, Position2D, PositionDegradation};
 use super::encoding_ctx::EncodingCtx;
 use super::routing::Capability;
 use crate::bridge::ClientPath;
@@ -83,6 +83,8 @@ pub struct SymbolQuery {
 /// How a tool addresses its target: by 1-based position or by symbol name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolTarget {
+    /// Opaque reference to an observed source position.
+    Reference(String),
     /// An exact 1-based position.
     Position(Position),
     /// A symbol resolved by name within the file.
@@ -92,6 +94,8 @@ pub enum SymbolTarget {
 /// The tools that accept a [`SymbolTarget`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressableTool {
+    /// Composite symbol context, resolved independently of section capabilities.
+    SymbolContext,
     /// `get_hover`.
     Hover,
     /// `get_definition`.
@@ -104,6 +108,8 @@ pub enum AddressableTool {
     TypeDefinition,
     /// `prepare_call_hierarchy`.
     PrepareCallHierarchy,
+    /// Direct type hierarchy preparation.
+    PrepareTypeHierarchy,
     /// `rename_symbol`.
     Rename,
 }
@@ -111,12 +117,14 @@ pub enum AddressableTool {
 impl AddressableTool {
     const fn capability(self) -> Capability {
         match self {
+            Self::SymbolContext => Capability::DocumentSymbols,
             Self::Hover => Capability::Hover,
             Self::Definition => Capability::Definition,
             Self::References => Capability::References,
             Self::Implementation => Capability::Implementation,
             Self::TypeDefinition => Capability::TypeDefinition,
             Self::PrepareCallHierarchy => Capability::CallHierarchy,
+            Self::PrepareTypeHierarchy => Capability::TypeHierarchy,
             Self::Rename => Capability::Rename,
         }
     }
@@ -165,10 +173,14 @@ pub struct Addressed<T> {
 /// The position a tool is to run at, and how it was obtained.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTarget {
+    /// Source acquisition bytes charged while validating a reference.
+    pub source_acquisition_bytes: usize,
     /// The 1-based position to query.
     pub position: Position,
     /// The resolved symbol; `None` when the caller gave the position.
     pub resolved: Option<ResolvedSymbol>,
+    /// Worst conversion warning produced while resolving the name.
+    pub positions_degraded: Option<PositionDegradation>,
 }
 
 /// One symbol of a document-symbol answer, flattened.
@@ -554,10 +566,33 @@ impl Translator {
         tool: AddressableTool,
     ) -> Result<ResolvedTarget> {
         let query = match target {
-            SymbolTarget::Position(position) => {
+            SymbolTarget::Reference(reference) => {
+                if !matches!(
+                    tool,
+                    AddressableTool::SymbolContext
+                        | AddressableTool::Hover
+                        | AddressableTool::Definition
+                        | AddressableTool::References
+                        | AddressableTool::PrepareCallHierarchy
+                ) {
+                    return Err(crate::error::Error::InvalidToolParams(
+                        "symbol_ref is not supported by this tool".into(),
+                    ));
+                }
+                let (position, charge) = self.validate_symbol_ref(file_path, &reference).await?;
                 return Ok(ResolvedTarget {
+                    source_acquisition_bytes: charge,
                     position,
                     resolved: None,
+                    positions_degraded: None,
+                });
+            }
+            SymbolTarget::Position(position) => {
+                return Ok(ResolvedTarget {
+                    source_acquisition_bytes: 0,
+                    position,
+                    resolved: None,
+                    positions_degraded: None,
                 });
             }
             SymbolTarget::Name(query) => query,
@@ -576,7 +611,9 @@ impl Translator {
                 let located = locate_identifier(self, &fetched.ctx, &uri, entry).await;
                 match located {
                     IdentifierPosition::Verified(position, source) => Ok(ResolvedTarget {
+                        source_acquisition_bytes: 0,
                         position: Position::from_server_output(&position),
+                        positions_degraded: fetched.ctx.positions_degraded(),
                         resolved: Some(ResolvedSymbol {
                             name: entry.name.clone(),
                             kind: u32::from(entry.kind),

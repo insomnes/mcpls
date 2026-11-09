@@ -396,6 +396,12 @@ impl Default for ResourceSubscriptions {
 }
 
 impl ResourceSubscriptions {
+    pub(crate) async fn len(&self) -> usize {
+        self.0.read().await.canonical.len()
+    }
+    pub(crate) async fn clear(&self) {
+        *self.0.write().await = SubscriptionState::default();
+    }
     /// Create an empty subscription set.
     #[must_use]
     pub fn new() -> Self {

@@ -6,6 +6,7 @@
 mod bounded_number;
 mod bounded_secs;
 mod command_stem;
+mod dispatcher;
 mod host_os;
 mod language;
 mod language_id;
@@ -29,6 +30,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub use bounded_secs::{BoundedSecs, IndexingReadyTimeoutSecs, InvalidSecs, TimeoutSecs};
 pub use command_stem::CommandStem;
+pub use dispatcher::{DispatcherConfig, DispatcherEntry};
 pub use host_os::HostOs;
 pub use language::{base_language_id, react_variant_language_id};
 pub use language_id::{InvalidLanguageId, LanguageId};
@@ -84,6 +86,9 @@ pub struct LanguageExtensionMapping {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
+    /// Opt-in worktree dispatcher configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatcher: Option<DispatcherConfig>,
     /// MCP `serverInfo`/`initialize` presentation overrides.
     #[serde(default)]
     pub mcp: McpConfig,
@@ -119,7 +124,7 @@ pub struct ServerConfig {
 
 /// Optional overrides for the text mcpls reports about itself over MCP.
 ///
-/// Every field is `None` by default, which keeps today's hardcoded
+/// Presentation fields are `None` by default, which keeps the hardcoded
 /// `serverInfo.title`/`description` and built-in capability blurb
 /// unchanged. `serverInfo.name`, `version`, and `website_url` are not
 /// configurable here: `name` is the MCP-spec machine identifier asserted in
@@ -156,6 +161,10 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
+    /// Static tool catalog. Omission selects the smaller agent catalog.
+    #[serde(default)]
+    pub tool_profile: ToolProfile,
+
     /// Overrides `serverInfo.title`. Omit to keep the built-in title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<McpTitle>,
@@ -178,6 +187,17 @@ pub struct McpConfig {
     /// names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_prefix: Option<ToolPrefix>,
+}
+
+/// Static MCP tool catalog, fixed when a session starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProfile {
+    /// Common agent operations (28 tools).
+    #[default]
+    Agent,
+    /// All supported operations (31 tools).
+    Full,
 }
 
 /// Maximum byte length of a configured [`McpConfig::title`].
@@ -332,10 +352,61 @@ impl InvalidToolPrefix {
     }
 }
 
+/// Client-side filesystem watching configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileWatchingConfig {
+    /// Backend selection; disabled by default.
+    #[serde(default)]
+    pub backend: FileWatchingBackend,
+    /// Executable name or path, never shell text.
+    #[serde(default = "watchman_command", deserialize_with = "watchman_executable")]
+    pub command: String,
+}
+
+impl Default for FileWatchingConfig {
+    fn default() -> Self {
+        Self {
+            backend: FileWatchingBackend::Disabled,
+            command: watchman_command(),
+        }
+    }
+}
+
+fn watchman_executable<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let command = String::deserialize(deserializer)?;
+    if command.trim().is_empty() || command.contains('\0') {
+        return Err(serde::de::Error::custom(
+            "file watching command must be a nonempty executable",
+        ));
+    }
+    Ok(command)
+}
+
+fn watchman_command() -> String {
+    "watchman".to_owned()
+}
+
+/// Available filesystem watching backends.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileWatchingBackend {
+    /// Preserve server-managed watching.
+    #[default]
+    Disabled,
+    /// Use a private Linux Watchman daemon.
+    Watchman,
+}
+
 /// Workspace-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
+    /// Optional client-side filesystem watching.
+    #[serde(default)]
+    pub file_watching: FileWatchingConfig,
     /// Root directories for the workspace.
     ///
     /// Entries are kept as written (relative entries of a loaded config file
@@ -422,6 +493,7 @@ impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             roots: Vec::new(),
+            file_watching: FileWatchingConfig::default(),
             position_encodings: PositionEncodings::DEFAULT,
             language_extensions: default_language_extensions(),
             heuristics_max_depth: SearchDepth::DEFAULT,
@@ -969,7 +1041,9 @@ impl ServerConfig {
         if let (WorkspaceTrust::Untrusted(_), Some((source, origin))) = (workspace, source) {
             self.ensure_outside_workspace(source, origin)?;
         }
-        Self::check_allowlist(workspace, &self.lsp_servers)?;
+        if !self.dispatcher.as_ref().is_some_and(|d| d.enabled) {
+            Self::check_allowlist(workspace, &self.lsp_servers)?;
+        }
         self.workspace_trust = workspace.clone();
         Ok(())
     }
@@ -1105,7 +1179,18 @@ impl ServerConfig {
         let mut config: Self = toml::from_str(&content)
             .map_err(|error| Error::TomlDe(TomlParseError::new(error, &content)))?;
 
-        rebase_relative_roots(&mut config.workspace.roots, path, relative_root_base)?;
+        if config.dispatcher.as_ref().is_some_and(|d| d.enabled) {
+            let raw: toml::Value = toml::from_str(&content)
+                .map_err(|error| Error::TomlDe(TomlParseError::new(error, &content)))?;
+            if raw.get("workspace").is_some() || raw.get("lsp_servers").is_some() {
+                return Err(ConfigError::Dispatcher(
+                    "dispatcher mode forbids top-level workspace and lsp_servers".into(),
+                )
+                .into());
+            }
+        } else {
+            rebase_relative_roots(&mut config.workspace.roots, path, relative_root_base)?;
+        }
 
         Ok(config)
     }
@@ -1160,6 +1245,9 @@ impl ServerConfig {
     /// assert!(config.validate().is_ok());
     /// ```
     pub fn validate(&self) -> Result<()> {
+        if self.dispatcher.as_ref().is_some_and(|d| d.enabled) {
+            return Ok(());
+        }
         Self::check_allowlist(&self.workspace_trust, &self.lsp_servers)
     }
 
@@ -1205,6 +1293,18 @@ impl ServerConfig {
             path: source.to_path_buf(),
             source: io,
         })?;
+        if let Some(dispatcher) = self
+            .dispatcher
+            .as_ref()
+            .filter(|dispatcher| dispatcher.enabled)
+        {
+            if crate::dispatcher::config_is_inside_workspace(source, dispatcher)
+                .map_err(|error| ConfigError::Dispatcher(error.wire().message.into_owned()))?
+            {
+                return Err(Error::ConfigInsideWorkspace { path: canonical });
+            }
+            return Ok(());
+        }
         let roots = WorkspaceRoots::from_configured(&self.workspace.roots)?;
         let home = trust::login_home_dir();
         let roots = roots.untrusted_boundary(&self.workspace.roots, home.as_deref());
@@ -1225,6 +1325,7 @@ impl ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            dispatcher: None,
             mcp: McpConfig::default(),
             workspace: WorkspaceConfig::default(),
             lsp_servers: vec![
@@ -1992,6 +2093,7 @@ mod tests {
             typescript.command =
                 LaunchCommand::auto(ServerCommand::new(command.to_string()).unwrap()).unwrap();
             let config = ServerConfig {
+                dispatcher: None,
                 lsp_servers: vec![typescript],
                 ..ServerConfig::default()
             };
@@ -2386,6 +2488,7 @@ mod tests {
     #[test]
     fn test_build_extension_map() {
         let workspace = WorkspaceConfig {
+            file_watching: FileWatchingConfig::default(),
             roots: vec![],
             position_encodings: PositionEncodings::DEFAULT,
             language_extensions: vec![
@@ -2420,6 +2523,7 @@ mod tests {
     #[test]
     fn test_build_effective_language_map_overrides_with_file_patterns() {
         let config = ServerConfig {
+            dispatcher: None,
             mcp: McpConfig::default(),
             workspace: WorkspaceConfig::default(),
             lsp_servers: vec![LspServerConfig {
@@ -2452,6 +2556,7 @@ mod tests {
     #[test]
     fn test_build_effective_language_map_derives_tsx_language_id() {
         let config = ServerConfig {
+            dispatcher: None,
             mcp: McpConfig::default(),
             workspace: WorkspaceConfig::default(),
             lsp_servers: vec![LspServerConfig {
@@ -2488,6 +2593,7 @@ mod tests {
     #[test]
     fn test_build_effective_language_map_derives_jsx_language_id() {
         let config = ServerConfig {
+            dispatcher: None,
             mcp: McpConfig::default(),
             workspace: WorkspaceConfig::default(),
             lsp_servers: vec![LspServerConfig {
@@ -2592,6 +2698,7 @@ mod tests {
     #[test]
     fn test_language_for_extension() {
         let workspace = WorkspaceConfig {
+            file_watching: FileWatchingConfig::default(),
             roots: vec![],
             position_encodings: PositionEncodings::DEFAULT,
             language_extensions: vec![
@@ -3080,6 +3187,7 @@ mod tests {
     #[test]
     fn test_workspace_config_toml_round_trip() {
         let original = WorkspaceConfig {
+            file_watching: FileWatchingConfig::default(),
             roots: vec![ConfiguredRoot::new("/tmp/round-trip").unwrap()],
             position_encodings: PositionEncodings::new(vec![PositionEncoding::Utf8]).unwrap(),
             language_extensions: vec![LanguageExtensionMapping {
@@ -3530,6 +3638,7 @@ mod tests {
 
         fn config_with_servers(trust: WorkspaceTrust) -> ServerConfig {
             ServerConfig {
+                dispatcher: None,
                 workspace_trust: trust,
                 ..ServerConfig::default()
             }
@@ -3662,6 +3771,45 @@ mod tests {
                 temp_roots_config(roots.path())
                     .ensure_outside_workspace(&file, ConfigOrigin::Environment)
                     .is_ok()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tool_profile_tests {
+    use super::*;
+
+    #[test]
+    fn config_accepts_only_known_profiles_and_defaults_to_agent() {
+        for (text, profile) in [
+            ("", ToolProfile::Agent),
+            ("[mcp]\ntool_profile = \"agent\"", ToolProfile::Agent),
+            ("[mcp]\ntool_profile = \"full\"", ToolProfile::Full),
+        ] {
+            let config: ServerConfig = toml::from_str(text).unwrap();
+            assert_eq!(config.mcp.tool_profile, profile);
+        }
+        for value in ["\"unknown\"", "1", "true", "[]", "{}"] {
+            assert!(
+                toml::from_str::<ServerConfig>(&format!("[mcp]\ntool_profile = {value}")).is_err()
+            );
+        }
+    }
+    #[test]
+    fn file_watching_configuration_is_opt_in_and_validated() {
+        let default: ServerConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            default.workspace.file_watching.backend,
+            FileWatchingBackend::Disabled
+        );
+        let enabled: ServerConfig =
+            toml::from_str("[workspace.file_watching]\nbackend='watchman'").unwrap();
+        assert_eq!(enabled.workspace.file_watching.command, "watchman");
+        for text in ["backend='other'", "command=''", "command='   '"] {
+            assert!(
+                toml::from_str::<ServerConfig>(&format!("[workspace.file_watching]\n{text}"))
+                    .is_err()
             );
         }
     }

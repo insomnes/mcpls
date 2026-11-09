@@ -9,12 +9,18 @@
 
 **Give your AI coding agent a compiler's understanding of your code.**
 
-mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 31 MCP tools, so an AI client reasons about code the way an IDE does.
+mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 30 default MCP tools (33 with the full profile), so an AI client reasons about code the way an IDE does.
 
 ```mermaid
 flowchart LR
     C["AI client"] <-->|MCP| M["mcpls"] <-->|LSP| S["rust-analyzer / pyright / gopls / ..."]
 ```
+
+The default `[mcp].tool_profile = "agent"` exposes 31 tools. Set `tool_profile = "full"` to restore all 34 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+
+Tool schemas retain validation constraints and expose complete finite union branches to clients. Numeric symbol-kind strings (for example, `"12"`) remain string inputs. Client declarations can limit recursive expansion: Codex 0.166.0 displays document-symbol fields through the first child, then uses an unknown deeper tail. The MCP schema and runtime still support recursive symbols. Arbitrary JSON fields remain unconstrained.
+
+To capture actual Codex declarations for an HTTP candidate, run `python3 scripts/capture-client-declarations.py --url http://127.0.0.1:PORT/mcp --binary /absolute/path/to/mcpls --output /private/new-directory --auth-file /path/to/auth.json`. The script creates a fresh isolated client and removes temporary authentication. Repeat for each tool profile. Compare the retained declarations with raw `tools/list` from that exact endpoint; capture alone does not establish schema compatibility.
 
 ## Documentation
 
@@ -25,8 +31,9 @@ The full documentation is the mcpls book: **<https://bug-ops.github.io/mcpls/>**
 | Install and first run | [Installation](https://bug-ops.github.io/mcpls/getting-started/installation.html) |
 | Connect Claude Code or another client | [Connect an AI Client](https://bug-ops.github.io/mcpls/getting-started/connect-client.html) |
 | Configure language servers | [Configuration](https://bug-ops.github.io/mcpls/guide/configuration.html) |
-| All 31 tools | [Tools Overview](https://bug-ops.github.io/mcpls/tools/overview.html) |
+| Tool catalog | [Tools Overview](https://bug-ops.github.io/mcpls/tools/overview.html) |
 | Something does not work | [Troubleshooting](https://bug-ops.github.io/mcpls/guide/troubleshooting.html) |
+| Shared Git worktree service | [Worktree service](book/src/advanced/worktree-service.md) |
 | HTTP transport and allowlists | [Transports](https://bug-ops.github.io/mcpls/advanced/transports.html) |
 | Security model and untrusted workspaces | [Security and Trust](https://bug-ops.github.io/mcpls/advanced/security.html) |
 | Every flag and config key | [Reference](https://bug-ops.github.io/mcpls/reference/cli.html) |

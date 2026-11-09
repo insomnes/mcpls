@@ -398,7 +398,10 @@ async fn every_positioned_tool_rejects_a_line_beyond_the_document() {
     );
     reject!("declaration", t.handle_declaration(file(), beyond, ctx));
     reject!("references", t.handle_references(file(), beyond, true, ctx));
-    reject!("completions", t.handle_completions(file(), beyond, None));
+    reject!(
+        "completions",
+        t.handle_completions(file(), beyond, None, 20, false)
+    );
     reject!("signature_help", t.handle_signature_help(file(), beyond));
     reject!(
         "call_hierarchy",
@@ -412,12 +415,18 @@ async fn every_positioned_tool_rejects_a_line_beyond_the_document() {
     reject!("selection_range", t.handle_selection_range(file(), beyond));
     reject!(
         "rename",
-        t.handle_rename(file(), beyond, crate::bridge::NewName::new("x").unwrap())
+        t.handle_rename_with_options(
+            file(),
+            beyond,
+            crate::bridge::NewName::new("x").unwrap(),
+            true,
+            None
+        )
     );
     reject!("prepare_rename", t.handle_prepare_rename(file(), beyond));
     reject!(
         "code_actions",
-        t.handle_code_actions(file(), bounded(pos(1, 1), beyond), None)
+        t.handle_code_actions_with_options(file(), bounded(pos(1, 1), beyond), None, true)
     );
     reject!(
         "inlay_hints",
@@ -427,7 +436,7 @@ async fn every_positioned_tool_rejects_a_line_beyond_the_document() {
     let past = pos(100, 1);
     reject!(
         "code_actions_start",
-        t.handle_code_actions(file(), bounded(beyond, past), None)
+        t.handle_code_actions_with_options(file(), bounded(beyond, past), None, true)
     );
     reject!(
         "inlay_hints_start",
@@ -490,10 +499,11 @@ async fn capability_error_wins_over_a_line_beyond_the_document() {
         .unwrap_err();
     assert_matches!(rename, Error::CapabilityNotSupported { .. });
     let format = translator
-        .handle_format_range(
+        .handle_format_range_with_options(
             file(),
             bounded(pos(1, 1), pos(99, 1)),
             TabSize::default(),
+            true,
             true,
         )
         .await
@@ -705,11 +715,12 @@ async fn format_range_with(
         let path = path.to_string_lossy().into_owned();
         tokio::spawn(async move {
             translator
-                .handle_format_range(
+                .handle_format_range_with_options(
                     client_path(path),
                     bounded(pos(2, 1), pos(3, 6)),
                     TabSize::try_from(2).unwrap(),
                     false,
+                    true,
                 )
                 .await
         })
@@ -756,9 +767,9 @@ async fn format_range_sends_zero_based_range_and_options() {
     );
     assert_eq!(params["options"]["tabSize"], 2);
     assert_eq!(params["options"]["insertSpaces"], false);
-    assert_eq!(result.edits.len(), 1);
+    assert_eq!(result.changes[0].edits.as_ref().unwrap().len(), 1);
     assert_eq!(
-        result.edits[0].range.start,
+        result.changes[0].edits.as_ref().unwrap()[0].range.start,
         Position2D {
             line: 2,
             character: 2
@@ -781,14 +792,20 @@ async fn format_range_converts_utf8_edit_columns() {
         }]),
     )
     .await;
-    assert_eq!(result.edits[0].range.start.character, 3);
+    assert_eq!(
+        result.changes[0].edits.as_ref().unwrap()[0]
+            .range
+            .start
+            .character,
+        3
+    );
     assert_eq!(result.positions_degraded, None);
 }
 
 #[tokio::test]
 async fn format_range_null_response_has_no_edits() {
     let (_, result) = format_range_with("a\nb\nc", None, serde_json::Value::Null).await;
-    assert!(result.edits.is_empty());
+    assert!(result.changes[0].edits.as_ref().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -800,10 +817,11 @@ async fn format_range_with_a_line_beyond_the_document_is_rejected_before_the_req
     for (start, end, line) in [(pos(1, 1), pos(9, 1), 9), (pos(7, 1), pos(8, 1), 7)] {
         let err = timeout(
             Duration::from_secs(5),
-            translator.handle_format_range(
+            translator.handle_format_range_with_options(
                 client_file(),
                 bounded(start, end),
                 TabSize::default(),
+                true,
                 true,
             ),
         )
@@ -827,10 +845,11 @@ async fn format_range_end_character_past_the_line_end_is_forwarded() {
         let path = path.to_string_lossy().into_owned();
         tokio::spawn(async move {
             translator
-                .handle_format_range(
+                .handle_format_range_with_options(
                     client_path(path),
                     bounded(pos(1, 1), pos(2, 999)),
                     TabSize::default(),
+                    true,
                     true,
                 )
                 .await
@@ -871,13 +890,160 @@ async fn format_range_without_capability_is_rejected() {
     let path = dir.path().join("a.rs");
     fs::write(&path, "a\nb\n").unwrap();
     let err = translator
-        .handle_format_range(
+        .handle_format_range_with_options(
             client_path(path.to_string_lossy().into_owned()),
             bounded(pos(1, 1), pos(2, 1)),
             TabSize::default(),
+            true,
             true,
         )
         .await
         .unwrap_err();
     assert_matches!(err, Error::CapabilityNotSupported { .. });
+}
+
+/// A single public translator call must prepare before rename, retain the queried
+/// position, distinguish rejection from empty edits, and leave source unchanged.
+async fn composed_rename_with(answer: Answer, permits_rename: bool) -> Result<serde_json::Value> {
+    let dir = TempDir::new().unwrap();
+    let (translator, mut server) =
+        translator_with_capabilities(&dir, &ServerId::from_static("rust"), prepare_caps());
+    let path = dir.path().join("a.rs");
+    let source = "fn old_name() {}";
+    fs::write(&path, source).unwrap();
+    let request_path = path.clone();
+    let task = tokio::spawn(async move {
+        translator
+            .handle_rename_with_options(
+                client_path(request_path),
+                pos(1, 5),
+                super::dto::NewName::new("new_name").unwrap(),
+                true,
+                None,
+            )
+            .await
+    });
+    let mut wire = BufReader::new(&mut server.write_stdout);
+    assert_eq!(
+        read_framed_message(&mut wire).await["method"],
+        "textDocument/didOpen"
+    );
+    let prepare = read_framed_message(&mut wire).await;
+    assert_eq!(prepare["method"], "textDocument/prepareRename");
+    match answer {
+        Answer::Result(value) => {
+            write_response(&mut server.read_half_stdin, &prepare["id"], value).await;
+        }
+        Answer::Error(code, message) => {
+            write_error_response(
+                &mut server.read_half_stdin,
+                &prepare["id"],
+                i64::from(code),
+                message,
+            )
+            .await;
+        }
+    }
+    if permits_rename {
+        let rename = read_framed_message(&mut wire).await;
+        assert_eq!(rename["method"], "textDocument/rename");
+        assert_eq!(rename["params"]["position"], prepare["params"]["position"]);
+        assert_eq!(
+            rename["params"]["textDocument"],
+            prepare["params"]["textDocument"]
+        );
+        assert_eq!(rename["params"]["newName"], "new_name");
+        write_response(
+            &mut server.read_half_stdin,
+            &rename["id"],
+            serde_json::Value::Null,
+        )
+        .await;
+    }
+    // A forbidden rename would wait for an unanswered response and fail this watchdog.
+    let result = timeout(Duration::from_secs(2), task)
+        .await
+        .expect("rename must finish without an unpermitted request")
+        .unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+    result.map(|result| serde_json::to_value(result).unwrap())
+}
+
+#[tokio::test]
+async fn composed_rename_preparation_success_variants() {
+    let cases = [
+        (range_json(), "renameable", false),
+        (
+            serde_json::json!({"range": range_json(), "placeholder": "old_name"}),
+            "renameable",
+            true,
+        ),
+        (
+            serde_json::json!({"defaultBehavior": true}),
+            "default_behavior",
+            false,
+        ),
+    ];
+    for (answer, status, placeholder) in cases {
+        let result = composed_rename_with(Answer::Result(answer), true)
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "proposed");
+        assert_eq!(
+            result["position"],
+            serde_json::json!({"line": 1, "character": 5})
+        );
+        assert_eq!(result["changes"], serde_json::json!([]));
+        assert_eq!(result["preparation"]["status"], status);
+        assert_eq!(
+            result["preparation"].get("placeholder").is_some(),
+            placeholder
+        );
+        assert_eq!(
+            result["preparation"].get("range").is_some(),
+            status == "renameable"
+        );
+    }
+}
+
+#[tokio::test]
+async fn composed_rename_rejections_never_request_edits() {
+    for answer in [
+        Answer::Result(serde_json::Value::Null),
+        Answer::Result(serde_json::json!({"defaultBehavior": false})),
+        Answer::Error(-32602, "cannot rename keyword"),
+        Answer::Error(-32001, "no symbol"),
+    ] {
+        let result = composed_rename_with(answer, false).await.unwrap();
+        assert_eq!(result["status"], "not_renameable");
+        assert_eq!(
+            result["position"],
+            serde_json::json!({"line": 1, "character": 5})
+        );
+        for forbidden in ["changes", "dropped", "preparation"] {
+            assert!(result.get(forbidden).is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn composed_rename_operational_failures_never_request_edits() {
+    for code in [-32601, -32800, -32803, -32603] {
+        assert!(
+            composed_rename_with(Answer::Error(code, "request failed"), false)
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        composed_rename_with(
+            Answer::Error(
+                -32602,
+                "Invalid offset LineCol { line: 9, col: 0 } (line index length: 16)"
+            ),
+            false
+        )
+        .await
+        .is_err()
+    );
 }

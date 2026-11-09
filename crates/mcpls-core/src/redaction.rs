@@ -317,7 +317,7 @@ impl Redactions {
             );
             collect_secret_args(&config.args, &mut candidates);
             if let Some(options) = &config.initialization_options {
-                collect_secret_json(options.as_value(), None, &mut candidates);
+                collect_secret_json(options, None, &mut candidates);
             }
             if let Some(settings) = &config.settings {
                 collect_secret_json(&settings.to_value(), None, &mut candidates);

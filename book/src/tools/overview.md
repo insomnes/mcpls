@@ -1,24 +1,29 @@
 # Tools Overview
 
-In this chapter you learn the conventions every mcpls tool shares: how code is addressed, what the advisory flags in results mean, and how to read errors. The next chapters then cover the 31 tools by task. Learn these rules once and every tool becomes predictable.
+In this chapter you learn the conventions every mcpls tool shares: how code is addressed, what the advisory flags in results mean, and how to read errors. The next chapters then cover the tools by task. Learn these rules once and every tool becomes predictable.
 
 ## Prerequisites
 
 - A [connected client](../getting-started/connect-client.md).
 
-## The 31 tools at a glance
+## Tools at a glance
 
 | Task | Tools |
 |------|-------|
-| [Read and navigate code](code-intelligence.md) | `get_hover`, `get_definition`, `get_references`, `get_completions`, `get_document_symbols`, `workspace_symbol_search`, `get_document_highlights`, `get_signature_help`, `get_inlay_hints` |
-| [Diagnostics and formatting](diagnostics.md) | `get_diagnostics`, `get_cached_diagnostics`, `format_document`, `format_range`, `get_folding_ranges`, `get_selection_ranges` |
-| [Refactor](refactoring.md) | `prepare_rename`, `rename_symbol`, `get_code_actions` |
-| [Hierarchies and navigation](hierarchies.md) | `go_to_implementation`, `go_to_type_definition`, `go_to_declaration`, `prepare_call_hierarchy`, `get_incoming_calls`, `get_outgoing_calls`, `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
+| [Read and navigate code](code-intelligence.md) | `get_symbol_context`, `get_hover`, `get_definition`, `get_references`, `get_completions`, `get_document_symbols`, `get_document_outline`, `workspace_symbol_search`, `get_document_highlights`, `get_signature_help`, `get_inlay_hints` |
+| [Diagnostics and formatting](diagnostics.md) | `get_diagnostics`, `diagnostics_delta`, `get_cached_diagnostics`, `format_document`, `format_range`, `get_folding_ranges`, `get_selection_ranges` |
+| [Refactor](refactoring.md) | `rename_symbol`, `get_code_actions` |
+| [Hierarchies and navigation](hierarchies.md) | `go_to_implementation`, `go_to_type_definition`, `go_to_declaration`, `get_incoming_calls`, `get_outgoing_calls`, `get_call_graph`, `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
+| [Report feedback](#local-feedback) | `feedback_add` |
 | [Monitor and control servers](server-control.md) | `get_server_logs`, `get_server_messages`, `get_tool_support`, `restart_server` |
 
-Every tool is read-only except `restart_server`, which stops and starts language server processes. Tools that produce edits (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) return them without applying them.
+`feedback_add` appends explicit feedback to local storage. `restart_server` stops and starts language server processes. Other tools are read-only. Tools that produce edits (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) return them without applying them.
 
 If you set `mcp.tool_prefix`, every name above gains the prefix, as in `{tool_prefix}_get_hover`.
+
+The table includes full-profile-only tools: `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`.
+
+The default `[mcp].tool_profile = "agent"` exposes 31 tools. Set `tool_profile = "full"` to restore all 34 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 ## Addressing code
 
@@ -33,7 +38,7 @@ Range tools take `start_line`, `start_character`, `end_line` and `end_character`
 
 ### Addressing a symbol by name
 
-`get_hover`, `get_definition`, `get_references`, `go_to_implementation`, `go_to_type_definition`, `prepare_call_hierarchy` and `rename_symbol` accept a symbol name instead of a position:
+`get_symbol_context`, `get_hover`, `get_definition`, `get_references`, `go_to_implementation`, `go_to_type_definition`, `get_incoming_calls`, `get_outgoing_calls`, `get_call_graph`, `get_supertypes`, `get_subtypes` and `rename_symbol` accept a symbol name instead of a position:
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -70,7 +75,7 @@ List-returning tools are capped at a fixed maximum. When more exist, the result 
 
 ### Advisory flags
 
-Two flags never block or filter a result; they tell the assistant when to be careful.
+These flags describe locations and position reliability. Direct call and type queries stop before automatic traversal when preparation reports degraded positions.
 
 - **`out_of_workspace`** is set on each location that falls outside every workspace root, such as the standard library or a dependency. The location is valid; it is simply not under your roots.
 - **`positions_degraded`** appears when a column could not be converted exactly for a server that does not use UTF-16. `"request"` means the position you sent reached the server unconverted, so the result may describe a different symbol and should not be trusted. `"response"` means only returned `character` offsets may be inexact. The flag is omitted when everything converted exactly.
@@ -137,3 +142,24 @@ See [Troubleshooting](../guide/troubleshooting.md) for the fixes.
 ## What's Next
 
 Start with [Code Intelligence](code-intelligence.md), the tools you will use most.
+
+Navigation tools optionally attach bounded source with `include_source:true` (default false).
+See [Optional navigation source](code-intelligence.md#optional-navigation-source) for outcomes, limits, and observed-byte hashes.
+
+## Local feedback
+
+Use `feedback_add` to report concrete mcpls failures, missing capabilities, and useful workarounds once per distinct observation. Skip routine success and duplicate reports. Do not report feedback-tool failures recursively. A reporting failure must not block the user's task.
+
+Supply `operation` (nonblank, at most 128 UTF-8 bytes) and `observation` (nonblank, at most 2,048 bytes). Optional `category` is `friction`, `missing`, or `useful`; optional `workaround` must be nonblank and at most 2,048 bytes. Supplied text is preserved. Do not include secrets or source code. No source, arguments, or workspace context is captured automatically.
+
+The tool needs no workspace or language server. It creates storage only after a valid submission and returns `{"stored": true}` after appending a record. Each record includes a UTC RFC3339 `timestamp` and the mcpls package `version`. Repeated submissions append separate records.
+
+On Linux, records are stored in `$XDG_STATE_HOME/mcpls/feedback.jsonl`, or `~/.local/state/mcpls/feedback.jsonl` when `XDG_STATE_HOME` is unset. Platforms without a state directory use the local data directory. The tool fails when neither directory is available. On Unix, the mcpls directory is created with mode `0700` and the file with mode `0600`. Existing storage must be private, owned by the current user, and a regular file without symlinks or extra hard links. Unsafe existing destinations are rejected without changing their permissions.
+
+Inspect records with:
+
+```bash
+jq . "${XDG_STATE_HOME:-$HOME/.local/state}/mcpls/feedback.jsonl"
+```
+
+Concurrent processes use an exclusive file lock for each append. Appends are not synced to disk. An interrupted write can leave a partial final record; an ambiguous failure can produce duplicates on retry. Storage errors are explicit MCP errors. There is no rotation, deduplication, or automatic task creation.

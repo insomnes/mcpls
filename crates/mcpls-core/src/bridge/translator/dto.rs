@@ -601,30 +601,132 @@ pub struct TextEdit {
     pub new_text: String,
 }
 
-/// Changes to a document.
+/// Presentation of edits against observed source, not a verified analysis baseline.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EditPreview {
+    /// Complete, truncated, or unavailable presentation.
+    pub status: PreviewStatus,
+    /// Unified diff with three context lines, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// Why the preview could not be completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Configured secret redaction changed the displayed diff.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub redacted: bool,
+}
+
+/// Preview presentation state, independent of retained edits.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewStatus {
+    /// All rendered diff text is present.
+    Complete,
+    /// Display or work limits shortened the presentation.
+    Truncated,
+    /// No reliable diff can be rendered.
+    Unavailable,
+}
+
+/// Identity of the exact unredacted source bytes observed for a proposal.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PreviewSource {
+    /// Source acquisition origin; this does not prove server analysis input.
+    pub origin: SourceOrigin,
+    /// Lowercase SHA-256 of the observed bytes.
+    pub sha256: String,
+}
+
+/// Version field supplied by the selected text-document edit.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SuppliedVersion {
+    /// Server-supplied integer or explicit null, without freshness verification.
+    #[schemars(required)]
+    pub version: Option<i32>,
+}
+
+/// Unverified relationship between observed source and server analysis.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisFreshness {
+    /// No analyzed baseline has been verified.
+    Unknown,
+}
+
+/// Changes proposed for one document. No files are written.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DocumentChanges {
-    /// URI of the document.
+    /// Original document URI.
     pub uri: String,
-    /// List of edits to apply.
-    pub edits: Vec<TextEdit>,
+    /// Number of retained edits, including when raw edits are omitted.
+    pub edit_count: usize,
+    /// Bounded presentation against observed source.
+    pub preview: EditPreview,
+    /// Observed source identity, omitted when no source bytes were acquired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_source: Option<PreviewSource>,
+    /// Present only if the selected text-document edit supplied a version field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplied_version: Option<SuppliedVersion>,
+    /// Always unknown; hashes and supplied versions do not establish freshness.
+    pub analysis_freshness: AnalysisFreshness,
+    /// Exact normalized raw edits, present only with full:true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<Vec<TextEdit>>,
 }
 
 /// Result of a rename request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RenameResult {
-    /// Changes to apply across documents.
-    pub changes: Vec<DocumentChanges>,
-    /// Entries withheld from `changes` -- see [`DroppedEdits`]. A non-empty
-    /// value means the rename is incomplete even if `changes` is non-empty,
-    /// and callers must not treat this result as the full rename otherwise.
-    #[serde(default, skip_serializing_if = "DroppedEdits::is_empty")]
-    pub dropped: DroppedEdits,
-    /// Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise.
-    ///
-    /// Tells whether the queried position or only the returned offsets are affected.
+    /// Queried client position (1-based UTF-16).
+    pub position: Position2D,
+    /// Proposal or rejection, with fields specific to that outcome.
+    #[serde(flatten)]
+    pub outcome: RenameOutcome,
+    /// Worst position-conversion warning across this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub positions_degraded: Option<PositionDegradation>,
+}
+
+/// A rename proposal or a preparation rejection.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RenameOutcome {
+    /// The server returned a proposal; an empty edit set is still a proposal.
+    Proposed {
+        /// Preparation performed before requesting edits.
+        preparation: RenamePreparation,
+        /// Proposed per-document edits. mcpls does not apply them.
+        changes: Vec<DocumentChanges>,
+        /// Withheld edits. A non-empty value means the proposal is incomplete.
+        #[serde(default, skip_serializing_if = "DroppedEdits::is_empty")]
+        dropped: DroppedEdits,
+    },
+    /// Preparation rejected this position. No rename request was sent.
+    NotRenameable {
+        /// Redacted explanation supplied by the language server, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        server_message: Option<String>,
+    },
+}
+
+/// Preparation that permitted the rename request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RenamePreparation {
+    /// The server supplied the identifier range.
+    Renameable {
+        /// Identifier range (1-based UTF-16).
+        range: Range,
+        /// Current name, when supplied by the server.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+    },
+    /// The server permits rename without supplying an identifier range.
+    DefaultBehavior,
+    /// The server explicitly does not advertise preparation support.
+    Unsupported,
 }
 
 /// Counts of `WorkspaceEdit` entries withheld during conversion to MCP DTOs,
@@ -679,14 +781,16 @@ const fn is_zero(count: &usize) -> bool {
 /// A completion item.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Completion {
-    /// Label of the completion.
+    /// Display label, at most 512 UTF-8 bytes; a clipped label is partial.
     pub label: String,
     /// LSP numeric completion-item kind (e.g. 3 for Function).
     pub kind: Option<u32>,
-    /// Detail information.
+    /// Display detail, at most 2048 UTF-8 bytes after redaction.
     pub detail: Option<String>,
-    /// Documentation.
+    /// Opt-in display documentation, at most 4096 UTF-8 bytes after redaction.
     pub documentation: Option<String>,
+    /// Clipped fields, in label, detail, documentation order; empty when unchanged.
+    pub truncated_fields: Vec<String>,
 }
 
 /// Result of a completions request.
@@ -694,12 +798,12 @@ pub struct Completion {
 pub struct CompletionsResult {
     /// List of completion items.
     pub items: Vec<Completion>,
-    /// Whether mcpls dropped items to stay within its completion cap.
-    ///
-    /// Items are ranked by how well they match the identifier typed before the cursor, so a
-    /// longer typed prefix narrows the list. A server's own `isIncomplete` is not reflected here.
-    /// Omitted (defaults to `false`) when serialized.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Explicit provider completeness signal; null for bare arrays and null responses.
+    #[schemars(required, extend("type" = ["boolean", "null"]))]
+    pub provider_is_incomplete: Option<bool>,
+    /// Provider candidates omitted by local count or serialized-output limits.
+    pub omitted_count: usize,
+    /// True exactly when candidates were omitted or retained fields were clipped.
     pub truncated: bool,
     /// Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise.
     ///
@@ -737,11 +841,62 @@ pub struct DocumentSymbolsResult {
     pub positions_degraded: Option<PositionDegradation>,
 }
 
+/// Copyable source-bound target for the six supported read-only consumers.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolTargetEnvelope {
+    /// Absolute authorized file path.
+    pub file_path: std::path::PathBuf,
+    /// Existing opaque content- and runtime-bound reference.
+    pub symbol_ref: String,
+}
+
+/// Why a retained discovery entry has no portable target.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolTargetUnavailable {
+    /// Stable `snake_case` reason.
+    pub reason: String,
+}
+
+/// One compact navigation entry.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OutlineSymbol {
+    /// Absent unless portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target: Option<SymbolTargetEnvelope>,
+    /// Explicit unavailability when portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
+    /// Ancestor names followed by the symbol name.
+    pub name_path: Vec<String>,
+    /// Numeric LSP symbol kind.
+    pub kind: u32,
+    /// Navigation position; approximate for flat responses.
+    pub position: Position2D,
+}
+
+/// A page of document symbols in server order.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentOutlineResult {
+    /// Matching navigation entries.
+    pub symbols: Vec<OutlineSymbol>,
+    /// Ancestry supplied by the server.
+    pub fidelity: super::SymbolFidelity,
+    /// Further matching entries remain.
+    pub truncated: bool,
+    /// Next offset, or null when complete.
+    pub next_offset: Option<usize>,
+    /// Set when returned character offsets are inexact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "PositionDegradation")]
+    pub positions_degraded: Option<PositionDegradation>,
+}
+
 /// Result of a format document request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FormatDocumentResult {
-    /// List of edits to format the document.
-    pub edits: Vec<TextEdit>,
+    /// One proposed document, including an empty successful edit set.
+    pub changes: Vec<DocumentChanges>,
     /// Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise.
     ///
     /// Tells whether the queried position or only the returned offsets are affected.
@@ -752,6 +907,12 @@ pub struct FormatDocumentResult {
 /// A workspace symbol.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceSymbol {
+    /// Absent unless portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target: Option<SymbolTargetEnvelope>,
+    /// Explicit unavailability when portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
     /// Name of the symbol.
     pub name: String,
     /// LSP numeric symbol kind (e.g. 12 for Function).
@@ -1049,6 +1210,103 @@ pub struct LocationsResult {
     pub enrichment: Option<EnrichmentSummary>,
 }
 
+/// Navigation locations with optional bounded source observations.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NavigationResult {
+    /// Locations in server order, including duplicates.
+    pub locations: Vec<NavigationLocation>,
+    /// The server returned more locations than retained.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    /// Existing position-conversion warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions_degraded: Option<PositionDegradation>,
+    /// Existing enclosing-symbol lookup summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrichment: Option<EnrichmentSummary>,
+}
+
+/// A navigation location and its opt-in source outcome.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NavigationLocation {
+    /// Absent unless portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target: Option<SymbolTargetEnvelope>,
+    /// Explicit unavailability when portable target enrichment was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
+    /// Original location and enclosing context.
+    #[serde(flatten)]
+    pub location: ContextualLocation,
+    /// Absent unless `include_source` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<NavigationSource>,
+}
+
+/// Bounded observed source, independent of language-server analysis.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum NavigationSource {
+    /// At most five lines centered on the target starting line.
+    Text {
+        /// Source text with original separators and configured secret redaction.
+        text: String,
+        /// First source line, 1-based.
+        start_line: u32,
+        /// Source acquisition origin.
+        origin: SourceOrigin,
+        /// SHA-256 of complete unredacted observed bytes; not analyzed freshness.
+        sha256: String,
+        /// Only the whole target line fit the display allowance.
+        shortened: bool,
+    },
+    /// Source lookup failed without removing the location.
+    Unavailable {
+        /// Stable source lookup failure.
+        reason: SourceUnavailableReason,
+    },
+}
+
+impl NavigationSource {
+    pub(super) fn from_excerpt(source: ReferenceSource, sha256: String) -> Self {
+        match source {
+            ReferenceSource::Text {
+                text,
+                start_line,
+                origin,
+                shortened,
+            } => Self::Text {
+                text,
+                start_line,
+                origin,
+                shortened,
+                sha256,
+            },
+            ReferenceSource::Unavailable { reason } => Self::Unavailable { reason },
+        }
+    }
+}
+
+impl From<LocationsResult> for NavigationResult {
+    fn from(result: LocationsResult) -> Self {
+        Self {
+            locations: result
+                .locations
+                .into_iter()
+                .map(|location| NavigationLocation {
+                    symbol_target: None,
+                    symbol_target_unavailable: None,
+                    location,
+                    source: None,
+                })
+                .collect(),
+            truncated: result.truncated,
+            positions_degraded: result.positions_degraded,
+            enrichment: result.enrichment,
+        }
+    }
+}
+
 /// What an empty references or workspace-symbol answer covers.
 ///
 /// A language server that indexes only documents sent with `didOpen` answers an empty list for
@@ -1062,15 +1320,220 @@ pub struct IndexCoverage {
     pub server_restarted: bool,
 }
 
+/// Source excerpt for one reference. Failure never removes its location.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReferenceSource {
+    /// Text centered on the reference's starting line.
+    Text {
+        /// Source text, preserving its line endings.
+        text: String,
+        /// First excerpt line, 1-based.
+        start_line: u32,
+        /// Whether text came from a tracked snapshot or disk.
+        origin: SourceOrigin,
+        /// The full window did not fit; only the reference line is included.
+        shortened: bool,
+    },
+    /// No text is available under this request's access and resource limits.
+    Unavailable {
+        /// Stable reason identifying the failed or skipped source lookup.
+        reason: SourceUnavailableReason,
+    },
+}
+
+/// Where observed source text was obtained.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOrigin {
+    /// The text last synchronized to the server.
+    Tracked,
+    /// A contained file read from disk.
+    Disk,
+}
+
+/// Why a reference has no source text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceUnavailableReason {
+    /// More than 100 locations requested source.
+    CandidateLimit,
+    /// More than 16 distinct files requested source.
+    FileLimit,
+    /// Source read/copy allowance exhausted.
+    SourceBudget,
+    /// Excerpt output allowance exhausted or reference line is too long.
+    TextBudget,
+    /// Two-second best-effort deadline expired.
+    Deadline,
+    /// File URI is invalid or workspace access is denied.
+    AccessDenied,
+    /// The file could not be read.
+    ReadFailed,
+    /// Source is larger than the per-file allowance.
+    FileTooLarge,
+    /// Source is not UTF-8.
+    InvalidUtf8,
+    /// The reference starts past the end of the source.
+    LineUnavailable,
+}
+
+/// A reference location with optional source context.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceLocation {
+    /// Location and optional enclosing-symbol context.
+    #[serde(flatten)]
+    pub location: ContextualLocation,
+    /// Present whenever source was requested, including failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ReferenceSource>,
+}
+
+impl std::ops::Deref for ReferenceLocation {
+    type Target = ContextualLocation;
+    fn deref(&self) -> &Self::Target {
+        &self.location
+    }
+}
+
+/// Reference-specific locations, preserving navigation warnings.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceLocationsResult {
+    /// Matching locations in server order, including duplicates.
+    pub locations: Vec<ReferenceLocation>,
+    /// Matching locations or known file groups were omitted, or file counting is incomplete.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    /// Position conversion warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions_degraded: Option<PositionDegradation>,
+    /// Optional enclosing-symbol lookup summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrichment: Option<EnrichmentSummary>,
+}
+
+/// One group of references with identical provider URI.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceFile {
+    /// Exact provider URI; URI aliases remain separate groups.
+    pub uri: String,
+    /// Absolute lexical path usable as `path_filter`, when supported.
+    pub file_path: Option<std::path::PathBuf>,
+    /// Why path filtering cannot address this URI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_filter_unavailable: Option<String>,
+    /// Number of processed matches, including duplicates.
+    pub count: usize,
+    /// First matching location for this URI.
+    pub example: ReferenceLocation,
+}
+
+/// Fixed limits applied to file summaries.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceFileLimits {
+    /// Maximum examined provider locations.
+    pub max_processed_locations: usize,
+    /// Maximum aggregate UTF-8 URI bytes examined.
+    pub max_uri_bytes: usize,
+    /// Maximum distinct matching URI groups.
+    pub max_files: usize,
+    /// Maximum compact serialized summary bytes, including enrichment.
+    pub max_output_bytes: usize,
+}
+
+/// Bounded distribution of the received references, not workspace coverage.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReferenceFileSummary {
+    /// Groups in first-seen provider order.
+    pub files: Vec<ReferenceFile>,
+    /// Number of locations in the received provider array.
+    pub received_count: usize,
+    /// Number examined, including nonmatching locations.
+    pub processed_count: usize,
+    /// Whether the entire received array was examined; otherwise counts are lower bounds.
+    pub counts_complete: bool,
+    /// Distinct matching URIs in the processed prefix.
+    pub file_count: usize,
+    /// Known groups omitted by the group limit or byte budget.
+    pub omitted_file_count: usize,
+    /// Whether known groups were omitted from output.
+    pub output_truncated: bool,
+    /// Counts describe received locations and include duplicates.
+    pub counting_basis: String,
+    /// Fixed processing and output limits.
+    pub limits: ReferenceFileLimits,
+}
+
+impl ReferenceFileSummary {
+    /// Keep a whole-group prefix under the compact JSON byte budget.
+    pub(super) fn bound_output(&mut self) {
+        // Serialization counts bytes without allocating a second serialized result.
+        #[derive(Default)]
+        struct Bytes(usize);
+        impl std::io::Write for Bytes {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.saturating_add(bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        fn size(value: &impl Serialize) -> usize {
+            let mut bytes = Bytes::default();
+            if serde_json::to_writer(&mut bytes, value).is_err() {
+                usize::MAX
+            } else {
+                bytes.0
+            }
+        }
+        let files = std::mem::take(&mut self.files);
+        let mut group_bytes: usize = 0;
+        let mut kept = Vec::new();
+        for file in files {
+            let candidate_bytes = group_bytes
+                .saturating_add(usize::from(!kept.is_empty()))
+                .saturating_add(size(&file));
+            self.omitted_file_count = self.file_count.saturating_sub(kept.len().saturating_add(1));
+            self.output_truncated = self.omitted_file_count > 0;
+            if size(self).saturating_add(candidate_bytes) > self.limits.max_output_bytes {
+                break;
+            }
+            group_bytes = candidate_bytes;
+            kept.push(file);
+        }
+        self.omitted_file_count = self.file_count.saturating_sub(kept.len());
+        self.output_truncated = self.omitted_file_count > 0;
+        // Metadata digit counts can grow when the last candidate was omitted.
+        while !kept.is_empty()
+            && size(self).saturating_add(group_bytes) > self.limits.max_output_bytes
+        {
+            let Some(removed) = kept.pop() else {
+                break;
+            };
+            group_bytes = group_bytes
+                .saturating_sub(size(&removed).saturating_add(usize::from(!kept.is_empty())));
+            self.omitted_file_count = self.file_count.saturating_sub(kept.len());
+            self.output_truncated = self.omitted_file_count > 0;
+        }
+        self.files = kept;
+    }
+}
+
 /// Result of a references request: the locations plus an optional index-coverage note.
 ///
 /// A separate type from [`LocationsResult`] so the note's schema is paid for by one tool only.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReferencesResult {
+    /// Present only in files mode; locations is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_summary: Option<ReferenceFileSummary>,
     /// The locations found.
     #[serde(flatten)]
-    pub result: LocationsResult,
-    /// Set only when `locations` is empty: what the routed server's answer covers.
+    pub result: ReferenceLocationsResult,
+    /// Matching processed locations; a lower bound when file-summary counts are incomplete.
+    pub matched_count: usize,
+    /// Set only when the original server response is empty: what the routed server's answer covers.
     ///
     /// Omitted for a non-empty result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1213,6 +1676,7 @@ pub enum InvalidHierarchyItem {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CheckedHierarchyItem {
+    pub(super) origin: Option<super::HierarchyOrigin>,
     pub(super) name: String,
     pub(super) kind: u32,
     pub(super) detail: Option<String>,
@@ -1234,6 +1698,7 @@ impl CheckedHierarchyItem {
         let selection_range =
             checked_range(&item.selection_range).map_err(InvalidHierarchyItem::SelectionRange)?;
         Ok(Self {
+            origin: None,
             name: item.name,
             kind: item.kind,
             detail: item.detail,
@@ -1242,6 +1707,11 @@ impl CheckedHierarchyItem {
             selection_range,
             data: item.data,
         })
+    }
+
+    pub(crate) fn with_origin(mut self, origin: Option<super::HierarchyOrigin>) -> Self {
+        self.origin = origin;
+        self
     }
 
     /// The item's document URI, as the client sent it.
@@ -1557,13 +2027,61 @@ impl ServerText for LocationsResult {
     }
 }
 
+impl ServerText for NavigationResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        let mut remaining = super::references::OUTPUT_BYTES;
+        for item in &mut self.locations {
+            item.location.redact_server_text(redactions);
+            if matches!(item.source, Some(NavigationSource::Text { .. })) {
+                let Some(NavigationSource::Text {
+                    text,
+                    start_line,
+                    origin,
+                    shortened,
+                    sha256,
+                }) = item.source.take()
+                else {
+                    continue;
+                };
+                let mut reference = ReferenceLocation {
+                    location: item.location.clone(),
+                    source: Some(ReferenceSource::Text {
+                        text,
+                        start_line,
+                        origin,
+                        shortened,
+                    }),
+                };
+                super::references::redact_source(&mut reference, redactions, &mut remaining);
+                item.source = reference
+                    .source
+                    .map(|source| NavigationSource::from_excerpt(source, sha256));
+            }
+        }
+    }
+}
+
 impl ServerText for ReferencesResult {
     fn redact_server_text(&mut self, redactions: &Redactions) {
         let Self {
             result,
             index_coverage: _,
+            matched_count: _,
+            file_summary,
         } = self;
-        result.redact_server_text(redactions);
+        for item in &mut result.locations {
+            item.location.redact_server_text(redactions);
+        }
+        super::references::redact_sources(&mut result.locations, redactions);
+        if let Some(summary) = file_summary {
+            let mut remaining = super::references::OUTPUT_BYTES;
+            for file in &mut summary.files {
+                file.example.location.redact_server_text(redactions);
+                super::references::redact_source(&mut file.example, redactions, &mut remaining);
+            }
+            summary.bound_output();
+            result.truncated = summary.output_truncated || !summary.counts_complete;
+        }
     }
 }
 
@@ -1611,20 +2129,40 @@ impl ServerText for TextEdit {
 
 impl ServerText for DocumentChanges {
     fn redact_server_text(&mut self, redactions: &Redactions) {
-        let Self { uri, edits } = self;
-        redactions.note_payload(uri);
-        edits.redact_server_text(redactions);
+        redactions.note_payload(&self.uri);
+        self.edits.redact_server_text(redactions);
+        if let Some(diff) = &mut self.preview.diff {
+            let before = diff.clone();
+            redactions.redact_in_place(diff);
+            self.preview.redacted |= *diff != before;
+        }
     }
 }
 
 impl ServerText for RenameResult {
     fn redact_server_text(&mut self, redactions: &Redactions) {
-        let Self {
-            changes,
-            dropped: _,
-            positions_degraded: _,
-        } = self;
-        changes.redact_server_text(redactions);
+        match &mut self.outcome {
+            RenameOutcome::Proposed {
+                preparation,
+                changes,
+                ..
+            } => {
+                if let RenamePreparation::Renameable {
+                    placeholder: Some(placeholder),
+                    ..
+                } = preparation
+                {
+                    redactions.redact_in_place(placeholder);
+                }
+                changes.redact_server_text(redactions);
+                super::previews::limit_display(changes.iter_mut());
+            }
+            RenameOutcome::NotRenameable { server_message } => {
+                if let Some(message) = server_message {
+                    redactions.redact_in_place(message);
+                }
+            }
+        }
     }
 }
 
@@ -1635,6 +2173,7 @@ impl ServerText for Completion {
             kind: _,
             detail,
             documentation,
+            truncated_fields: _,
         } = self;
         redactions.note_payload(label);
         for prose in [detail, documentation].into_iter().flatten() {
@@ -1647,6 +2186,8 @@ impl ServerText for CompletionsResult {
     fn redact_server_text(&mut self, redactions: &Redactions) {
         let Self {
             items,
+            provider_is_incomplete: _,
+            omitted_count: _,
             truncated: _,
             positions_degraded: _,
         } = self;
@@ -1680,13 +2221,24 @@ impl ServerText for DocumentSymbolsResult {
     }
 }
 
+impl ServerText for DocumentOutlineResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        for symbol in &mut self.symbols {
+            for name in &mut symbol.name_path {
+                redactions.note_payload(name);
+            }
+        }
+    }
+}
+
 impl ServerText for FormatDocumentResult {
     fn redact_server_text(&mut self, redactions: &Redactions) {
         let Self {
-            edits,
+            changes,
             positions_degraded: _,
         } = self;
-        edits.redact_server_text(redactions);
+        changes.redact_server_text(redactions);
+        super::previews::limit_display(changes.iter_mut());
     }
 }
 
@@ -1697,6 +2249,8 @@ impl ServerText for WorkspaceSymbol {
             kind: _,
             location,
             container_name,
+            symbol_target: _,
+            symbol_target_unavailable: _,
             server: _,
         } = self;
         redactions.note_payload(name);
@@ -1770,6 +2324,12 @@ impl ServerText for CodeActionsResult {
             positions_degraded: _,
         } = self;
         actions.redact_server_text(redactions);
+        super::previews::limit_display(
+            actions
+                .iter_mut()
+                .filter_map(|a| a.edit.as_mut())
+                .flat_map(|e| e.changes.iter_mut()),
+        );
     }
 }
 
@@ -2121,11 +2681,21 @@ mod tests {
             }],
             edit: Some(WorkspaceEditDescription {
                 changes: vec![DocumentChanges {
+                    edit_count: 1,
+                    preview_source: None,
+                    supplied_version: None,
+                    analysis_freshness: AnalysisFreshness::Unknown,
+                    preview: EditPreview {
+                        status: PreviewStatus::Complete,
+                        diff: None,
+                        reason: None,
+                        redacted: false,
+                    },
                     uri: format!("file:///{SECRET}.rs"),
-                    edits: vec![TextEdit {
+                    edits: Some(vec![TextEdit {
                         range: range(),
                         new_text: format!("let k = \"{SECRET}\";"),
-                    }],
+                    }]),
                 }],
                 dropped: DroppedEdits::default(),
             }),
@@ -2144,7 +2714,7 @@ mod tests {
         );
         let changes = &action.edit.as_ref().unwrap().changes[0];
         assert!(changes.uri.contains(SECRET));
-        assert!(changes.edits[0].new_text.contains(SECRET));
+        assert!(changes.edits.as_ref().unwrap()[0].new_text.contains(SECRET));
     }
 
     #[test]
@@ -2155,6 +2725,7 @@ mod tests {
             kind: Some(3),
             detail: Some(format!("fn {SECRET}()")),
             documentation: Some(format!("docs {SECRET}")),
+            truncated_fields: vec![],
         };
 
         completion.redact_server_text(&set);

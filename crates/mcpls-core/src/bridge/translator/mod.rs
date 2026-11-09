@@ -31,6 +31,7 @@ use crate::util::lock_std;
 mod addressing;
 mod assist;
 mod availability;
+pub mod call_graph;
 mod call_hierarchy;
 #[cfg(test)]
 mod characterization;
@@ -51,7 +52,10 @@ pub use navigation::MAX_NORMALIZED_LOCATIONS;
 mod positioned;
 #[cfg(test)]
 mod prepare_range_tests;
+mod previews;
 mod pull_support;
+mod references;
+pub use references::{ReferenceMode, ReferenceOptions};
 mod respawn;
 mod restart;
 mod routing;
@@ -59,6 +63,8 @@ mod save_support;
 mod selection_range;
 mod servers;
 mod support;
+mod symbol_context;
+mod symbol_refs;
 mod symbols;
 #[cfg(test)]
 mod testing;
@@ -69,6 +75,7 @@ pub use addressing::{
     ResolvedTarget, SymbolName, SymbolQuery, SymbolTarget,
 };
 pub use availability::{DiagnosticsAnswer, DiagnosticsAvailability, DiagnosticsOrigin};
+pub use call_graph::{CallGraphDirection, CallGraphOptions, CallGraphStart};
 #[cfg(test)]
 pub use diagnostics::MAX_FAILED_PULLS_PER_STATE;
 pub use diagnostics::{
@@ -92,6 +99,15 @@ pub use restart::{
 pub use routing::Capability;
 pub use support::{MemberStatus, MemberSupport, RouteSupport, ToolSupportSnapshot};
 
+/// Authenticated connection snapshot for a dispatcher hierarchy follow-up.
+#[derive(Debug, Clone)]
+pub struct HierarchyOrigin {
+    server: ServerId,
+    client: crate::lsp::LspClient,
+    capabilities: Arc<lsp_types::ServerCapabilities>,
+    encoding: EncodingCtx,
+}
+
 /// Translator handles MCP tool calls by converting them to LSP requests.
 ///
 /// All fields use interior mutability so `Translator` can be shared via a
@@ -109,6 +125,8 @@ pub use support::{MemberStatus, MemberSupport, RouteSupport, ToolSupportSnapshot
 /// `textDocument/didOpen`/`didChange` notify.
 #[derive(Debug)]
 pub struct Translator {
+    /// Identity survives child restart, but not context replacement.
+    symbol_ref_context: String,
     /// Per-server state, one slot per routing identity. Locked only for a
     /// short synchronous section, never across an LSP request, and never
     /// together with `router`.
@@ -131,6 +149,14 @@ pub struct Translator {
     /// Allowed workspace roots for path validation. Read-only after `serve()`
     /// setup, so no lock is needed.
     workspace_roots: WorkspaceRoots,
+    #[cfg(test)]
+    reference_work: Arc<StdMutex<references::ReferenceWork>>,
+    #[cfg(test)]
+    preview_work: Arc<StdMutex<previews::PreviewWork>>,
+    #[cfg(test)]
+    reference_read_hook: Option<fn(&Path, bool)>,
+    #[cfg(test)]
+    reference_io_failure_after: Option<usize>,
     /// File extension and name to language ID mappings. Read-only after
     /// `serve()` setup, so no lock is needed.
     language_map: Arc<LanguageMap>,
@@ -187,6 +213,7 @@ impl Translator {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            symbol_ref_context: crate::dispatcher::opaque(),
             servers: StdMutex::new(Servers::default()),
             phase: StdMutex::new(Phase::default()),
             startup_redactions: Arc::default(),
@@ -197,6 +224,14 @@ impl Translator {
             )),
             resource_limits: ResourceLimits::default(),
             workspace_roots: WorkspaceRoots::default(),
+            #[cfg(test)]
+            reference_work: Arc::new(StdMutex::new(references::ReferenceWork::default())),
+            #[cfg(test)]
+            preview_work: Arc::default(),
+            #[cfg(test)]
+            reference_read_hook: None,
+            #[cfg(test)]
+            reference_io_failure_after: None,
             language_map: Arc::default(),
             file_patterns: Arc::default(),
             router: Arc::new(StdMutex::new(Arc::new(ToolRouter::default()))),
@@ -321,6 +356,68 @@ impl Translator {
         lock_std(&self.servers).failure(id).cloned()
     }
 
+    pub(crate) fn dispatcher_expect(&self, id: ServerId) {
+        lock_std(&self.servers).dispatcher_expect(id);
+        self.rebind_router_to_settled();
+    }
+
+    pub(crate) fn watching_error(&self, id: &ServerId) -> Option<String> {
+        lock_std(&self.servers)
+            .running_servers()
+            .find(|(server_id, _)| *server_id == id)
+            .and_then(|(_, server)| server.watching_error())
+    }
+
+    pub(crate) fn dispatcher_server(&self, id: &ServerId) -> Option<(bool, String)> {
+        let mut slots = lock_std(&self.servers);
+        slots.server_mut(id).map(|server| {
+            (
+                !server.is_dead().unwrap_or(true),
+                server.dispatcher_connection(),
+            )
+        })
+    }
+
+    pub(crate) fn hierarchy_origin(
+        &self,
+        id: &ServerId,
+        incarnation: &str,
+    ) -> Option<HierarchyOrigin> {
+        let mut servers = lock_std(&self.servers);
+        let server = servers.server_mut(id)?;
+        if server.is_dead().unwrap_or(true) || server.dispatcher_connection() != incarnation {
+            return None;
+        }
+        let origin = HierarchyOrigin {
+            server: id.clone(),
+            client: server.client().clone(),
+            capabilities: Arc::new(server.capabilities().clone()),
+            encoding: EncodingCtx::new(
+                PositionEncoding::from_lsp(server.position_encoding().as_str())
+                    .unwrap_or(PositionEncoding::Utf16),
+                self.document_tracker.clone(),
+                self.workspace_roots.clone(),
+            ),
+        };
+        drop(servers);
+        Some(origin)
+    }
+
+    fn require_hierarchy_origin(&self, origin: &HierarchyOrigin) -> crate::error::Result<()> {
+        if self
+            .dispatcher_server(&origin.server)
+            .is_some_and(|(alive, incarnation)| {
+                alive && incarnation == format!("{:?}", origin.client.connection_id())
+            })
+        {
+            Ok(())
+        } else {
+            Err(crate::Error::ServerRestarted {
+                server_id: origin.server.clone(),
+            })
+        }
+    }
+
     /// Every recorded startup failure, ordered by routing identity.
     pub(crate) fn startup_failures(&self) -> Vec<ServerSpawnFailure> {
         lock_std(&self.servers).failures()
@@ -424,8 +521,26 @@ impl Translator {
 
     /// The routing table as of now. The `router` lock is released before it
     /// returns, so callers can then lock `servers` without holding both.
-    pub(super) fn router_snapshot(&self) -> Arc<ToolRouter> {
+    pub(crate) fn router_snapshot(&self) -> Arc<ToolRouter> {
         Arc::clone(&lock_std(&self.router))
+    }
+
+    /// Uses the settled route first; a lost route can still demand its
+    /// applicable configured provider through dispatcher retry/backoff.
+    pub(crate) fn dispatcher_demand_route(
+        &self,
+        language: Option<&LanguageId>,
+        tool: ToolKind,
+    ) -> Option<ServerId> {
+        let resolve = |router: &ToolRouter| {
+            language
+                .map_or_else(
+                    || router.resolve_any(tool).ok(),
+                    |language| router.resolve(language.as_ref(), tool),
+                )
+                .cloned()
+        };
+        resolve(&self.router_snapshot()).or_else(|| resolve(&self.configured_router))
     }
 
     /// Registers the server in one step, then re-derives routes.

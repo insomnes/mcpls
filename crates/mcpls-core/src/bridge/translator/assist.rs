@@ -22,13 +22,6 @@ fn extract_documentation(doc: lsp_types::Documentation) -> String {
     }
 }
 
-/// Most completion items returned per call, for every server.
-///
-/// Servers that leave filtering to the client (tsserver returns every global
-/// at an identifier position) can answer with thousands of items, which would
-/// fill an agent's context.
-pub(super) const MAX_COMPLETION_ITEMS: usize = 100;
-
 /// Most characters of the typed prefix used for ranking, counted back from the
 /// cursor, so a hostile line cannot make ranking cost items times line length.
 const MAX_PREFIX_CHARS: usize = 256;
@@ -93,25 +86,20 @@ fn typed_prefix(line: &str, utf16_column: u32) -> &str {
     &before[start..]
 }
 
-/// Keeps at most [`MAX_COMPLETION_ITEMS`] items, ranking by [`PrefixMatch`]
+/// Ranks every response by [`PrefixMatch`]
 /// against `prefix` and then by `sortText` (else label) before the cut, so a
-/// match for what was typed survives. At or under the cap the server's order
-/// is untouched. The flag is set only when this cut dropped items.
-fn cap_completions(
+/// match for what was typed survives the caller's count and byte limits.
+fn rank_completions(
     mut items: Vec<lsp_types::CompletionItem>,
     prefix: &str,
-) -> (Vec<lsp_types::CompletionItem>, bool) {
-    if items.len() <= MAX_COMPLETION_ITEMS {
-        return (items, false);
-    }
+) -> Vec<lsp_types::CompletionItem> {
     let prefix = fold_prefix(prefix);
     items.sort_by_cached_key(|item| {
         let filter = item.filter_text.as_deref().unwrap_or(&item.label);
         let rank = item.sort_text.as_deref().unwrap_or(&item.label);
         (PrefixMatch::of(&prefix, filter), rank.to_owned())
     });
-    items.truncate(MAX_COMPLETION_ITEMS);
-    (items, true)
+    items
 }
 
 /// Most parameters kept per signature; the rest are dropped (logged).
@@ -205,6 +193,8 @@ impl Translator {
         file_path: ClientPath,
         position: Position,
         trigger: Option<CompletionTrigger>,
+        limit: usize,
+        include_documentation: bool,
     ) -> Result<CompletionsResult> {
         let context = trigger.map(|trigger_char| lsp_types::CompletionContext {
             trigger_kind: CompletionTriggerKind::TriggerCharacter,
@@ -224,29 +214,40 @@ impl Translator {
             )
             .await?;
 
-        let items = match response {
-            Some(lsp_types::CompletionResponse::CompletionItemList(items)) => items,
-            Some(lsp_types::CompletionResponse::CompletionList(list)) => list.items,
-            None => vec![],
+        let (items, provider_is_incomplete) = match response {
+            Some(lsp_types::CompletionResponse::CompletionItemList(items)) => (items, None),
+            Some(lsp_types::CompletionResponse::CompletionList(list)) => {
+                (list.items, Some(list.is_incomplete))
+            }
+            None => (vec![], None),
         };
 
         let prefix = self
             .document_tracker
             .line_text(doc.path(), position.lsp_line())
             .map_or_default(|line| typed_prefix(&line, position.lsp_character()).to_owned());
-        let (items, truncated) = cap_completions(items, &prefix);
+        let items = rank_completions(items, &prefix);
+        let omitted_count = items.len().saturating_sub(limit);
 
         let result = CompletionsResult {
             items: items
                 .into_iter()
+                .take(limit)
                 .map(|item| Completion {
                     label: item.label,
                     kind: item.kind.map(lsp_kind_to_u32),
                     detail: item.detail,
-                    documentation: item.documentation.map(extract_documentation),
+                    documentation: if include_documentation {
+                        item.documentation.map(extract_documentation)
+                    } else {
+                        None
+                    },
+                    truncated_fields: vec![],
                 })
                 .collect(),
-            truncated,
+            provider_is_incomplete,
+            omitted_count,
+            truncated: omitted_count > 0,
             positions_degraded: ctx.positions_degraded(),
         };
 
@@ -423,6 +424,8 @@ mod tests {
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 1),
                 None,
+                20,
+                false,
             )
             .await
             .unwrap_err();
@@ -470,7 +473,7 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_completions(client_path(path), Position::at(1, 1), None)
+                    .handle_completions(client_path(path), Position::at(1, 1), None, 20, false)
                     .await
             })
         };
@@ -663,7 +666,13 @@ mod tests {
             tokio::spawn(async move {
                 if method == "textDocument/completion" {
                     translator
-                        .handle_completions(client_path(path), pos(line, character), None)
+                        .handle_completions(
+                            client_path(path),
+                            pos(line, character),
+                            None,
+                            20,
+                            false,
+                        )
                         .await
                         .map(|r| serde_json::to_value(r).unwrap())
                 } else {
@@ -721,9 +730,8 @@ mod tests {
 
     #[test]
     fn test_cap_keeps_the_typed_prefix_match_that_sorts_last() {
-        let (items, truncated) = cap_completions(flooded_items(), "getEl");
-        assert!(truncated);
-        assert_eq!(items.len(), MAX_COMPLETION_ITEMS);
+        let items = rank_completions(flooded_items(), "getEl");
+        assert_eq!(items.len(), 300);
         assert_eq!(items[0].label, "getElementById");
     }
 
@@ -734,7 +742,7 @@ mod tests {
             .collect();
         items.push(completion_item("gxexteyl"));
         items.push(completion_item("getElement"));
-        let (items, _) = cap_completions(items, "getEl");
+        let items = rank_completions(items, "getEl");
         assert_eq!(&labels(&items)[..2], ["getElement", "gxexteyl"]);
     }
 
@@ -747,8 +755,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let (items, truncated) = cap_completions(items, "");
-        assert!(truncated);
+        let items = rank_completions(items, "");
         assert_eq!(items[0].label, "z149");
         assert_eq!(items[99].label, "z50");
     }
@@ -761,20 +768,20 @@ mod tests {
             filter_text: Some("getElementById".to_owned()),
             ..Default::default()
         };
-        let (items, _) = cap_completions(items, "getEl");
+        let items = rank_completions(items, "getEl");
         assert_eq!(items[0].label, "shown");
     }
 
     #[test]
-    fn test_cap_at_the_limit_keeps_server_order_unflagged() {
-        let items: Vec<_> = (0..MAX_COMPLETION_ITEMS)
+    fn test_ranking_at_the_limit_orders_every_response() {
+        let items: Vec<_> = (0..100)
             .rev()
             .map(|index| completion_item(&format!("m{index:03}")))
             .collect();
-        let before = labels(&items).join(",");
-        let (items, truncated) = cap_completions(items, "zzz");
-        assert!(!truncated);
-        assert_eq!(labels(&items).join(","), before);
+
+        let items = rank_completions(items, "zzz");
+        assert_eq!(items[0].label, "m000");
+        assert_eq!(items[99].label, "m099");
     }
 
     #[test]
@@ -784,9 +791,8 @@ mod tests {
         assert_eq!(folded.chars().count(), MAX_PREFIX_CHARS);
         assert!(folded.chars().all(|character| character == 'a'));
 
-        let (items, truncated) = cap_completions(flooded_items(), &huge);
-        assert!(truncated);
-        assert_eq!(items.len(), MAX_COMPLETION_ITEMS);
+        let items = rank_completions(flooded_items(), &huge);
+        assert_eq!(items.len(), 300);
     }
 
     #[test]
@@ -837,10 +843,7 @@ mod tests {
         )
         .await;
         assert_eq!(wire["truncated"], true);
-        assert_eq!(
-            wire["items"].as_array().unwrap().len(),
-            MAX_COMPLETION_ITEMS
-        );
+        assert_eq!(wire["items"].as_array().unwrap().len(), 20);
         assert_eq!(wire["items"][0]["label"], "getElementById");
     }
 
@@ -868,7 +871,9 @@ mod tests {
         fs::write(&path, "fn main() {}").unwrap();
         let file = || client_path(path.to_string_lossy().into_owned());
 
-        let completions = translator.handle_completions(file(), pos(5, 3), None).await;
+        let completions = translator
+            .handle_completions(file(), pos(5, 3), None, 20, false)
+            .await;
         assert_matches!(completions, Err(Error::PositionBeyondDocument { .. }));
         let signature = translator.handle_signature_help(file(), pos(5, 3)).await;
         assert_matches!(signature, Err(Error::PositionBeyondDocument { .. }));

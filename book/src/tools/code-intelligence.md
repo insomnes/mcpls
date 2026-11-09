@@ -53,24 +53,167 @@ Arguments: the same addressing as `get_hover`, plus optional `context` (see [enc
 
 A symbol with several definitions returns several locations; an unknown symbol returns an empty array.
 
+### Optional navigation source
+
+`get_definition`, `go_to_implementation`, `go_to_type_definition`, and
+`go_to_declaration` accept `include_source` (boolean, default `false`).
+Declaration remains position-only; the other three also accept symbol names.
+
+```json
+{"file_path":"/work/app/src/billing.rs","symbol_name":"process_payment","include_source":true}
+```
+
+Every retained location then has `source.status` equal to `text` or `unavailable`.
+Text includes `text`, `start_line` (1-based), `origin` (`tracked` or `disk`),
+`sha256`, and `shortened`. The lowercase SHA-256 identifies the complete unredacted
+observed file bytes, including bytes outside the excerpt. It does not identify
+an analyzed snapshot or prove current disk freshness. Tracked source takes
+precedence over a contained disk read; duplicate canonical files share one observation.
+
+The preferred window includes the location's starting line and up to two lines
+on each side. Columns and the location's ending line do not select source.
+Original UTF-8 and LF, CRLF, and CR separators remain, except configured secret
+redaction. No final newline is added. Empty source has line 1; a final separator
+permits a trailing empty line. File boundaries alone do not set `shortened`.
+When the window cannot fit, the whole target line is tried with `shortened:true`.
+The excerpt never guarantees a complete definition body.
+
+Limits per request are 100 candidate positions, 16 distinct attempted files,
+1 MiB per complete file, 4 MiB aggregate acquisition/copy allowance including
+charged growth lookahead, 2 KiB per excerpt, 64 KiB total finally redacted text,
+and 2 MiB added compact JSON. Failed reads can reserve allowance conservatively.
+The best-effort two-second deadline stops new acquisition and read chunks;
+an in-flight OS operation can overrun it. These limits do not bound the original
+LSP request or total response time. Final configured secret redaction preserves
+the same text limits, with whole-line fallback or an unavailable outcome.
+
+Unavailable outcomes contain only `status` and `reason`: `candidate_limit`,
+`file_limit`, `source_budget`, `text_budget`, `deadline`, `access_denied`,
+`read_failed`, `file_too_large`, `invalid_utf8`, or `line_unavailable`.
+They respectively mean the candidate cap, file cap, acquisition allowance,
+display allowance, deadline, containment authorization, file I/O, file size,
+UTF-8 decoding, or source line prevented text. Candidate positions beyond 100
+always report `candidate_limit`. Partial successes and failures coexist.
+
+The selected workspace context authorizes source; external paths, non-file URIs,
+and symlink escapes yield `access_denied`. Lexical `out_of_workspace` remains
+advisory. Source failures preserve locations, order, duplicates, ranges,
+`resolved_symbol`, enclosing context, `positions_degraded`, and `truncated`.
+Disabled source omits the field and additional acquisition, copying, and hashing.
+Source alone adds no LSP opens or semantic requests. Observations are read-only
+and have no atomic consistency guarantee with LSP locations or later reads.
+
 ## get_references
 
-Finds every usage of a symbol in the workspace.
+Returns references reported by the language server, in server order, including duplicates.
 
-Arguments: addressing as above, plus `include_declaration` (default `false`) and optional `context`.
+Arguments: addressing as above, `mode` (`"locations"` by default, or `"files"`),
+`include_declaration` (default `false`), optional `context`,
+`limit` (default 10, integer 1 through 10000), optional absolute `path_filter`,
+and `include_source` (default `false`). Relative filters are rejected.
 
 ```json
 {
   "file_path": "/work/app/src/errors.rs",
   "symbol_name": "Timeout",
   "container": "ApiError",
+  "limit": 20,
+  "path_filter": "/work/app/src/handlers",
   "context": "enclosing_symbol"
 }
 ```
 
-Each location has `uri`, `range`, `out_of_workspace` and, with `context`, the `enclosing_symbol`. Searching a very common symbol can be slow, and the list is capped (`truncated: true`).
+The filter selects that exact file or descendants by lexical path components.
+It decodes file URIs and collapses `.` and `..` without resolving symlinks.
+It supports no globs. Non-file URIs do not match a filter.
+In locations mode, filtering scans the complete received response before applying the limit.
+`matched_count` counts matching locations in that response, independently of `limit`.
+`truncated: true` means matching locations were omitted. Neither field guarantees workspace-wide coverage.
+The ordered prefix is not a representative usage audit. Continuation is deferred;
+there is no cursor or offset. Increase `limit` or narrow `path_filter` for follow-up queries.
+Smaller output does not guarantee less work by the LSP backend.
 
-An empty result carries `index_coverage`: `synced_documents` is how many documents are currently synced to the server process (eviction of old documents lowers it), and `server_restarted` is `true` after a restart or respawn and stays `true` for the rest of the session. Some servers index only documents opened in the session, so the empty answer covers only what the server has indexed and is not proof that the symbol is unused. `get_definition` can still resolve such a symbol; touching the files of interest widens the answer.
+
+Use `mode:"files"` to choose the next file to inspect. The default mode is
+`"locations"`; explicit `null` and unknown modes fail. In files mode, `locations`
+is empty and `file_summary.files` contains groups in first-seen provider order.
+Each group has the exact provider `uri`, `count` including duplicates, and the
+first matching `example` with the usual location, warning, context, and optional
+source fields. Different URI spellings remain separate, even for the same file.
+
+`limit` bounds groups in this mode, with the same default 10 and range 1..10000.
+Filtering precedes grouping. Counts include all matching locations in the
+processed prefix, even when their groups are omitted from output. The summary
+reports `received_count`, `processed_count` (including nonmatching locations),
+`file_count`, `omitted_file_count`, `counts_complete`, `output_truncated`,
+`counting_basis:"received_locations_including_duplicates"`, and `limits`.
+
+Processing stops before exceeding 100000 locations, 8388608 aggregate UTF-8 URI
+bytes, or 10000 distinct matching URIs. With `counts_complete:false`, group
+counts, `matched_count`, and `file_count` are lower bounds for the received array.
+These counts never guarantee complete workspace coverage. Group limits alone do
+not make counts incomplete. `output_truncated:true` means known groups were
+omitted by `limit` or the byte budget. Top-level `truncated:true` also covers
+incomplete processing. An empty provider response retains `index_coverage`;
+a nonempty response emptied by filtering does not.
+
+The compact UTF-8 JSON for the entire `file_summary`, including example context
+and source, is limited to 65536 bytes. Output keeps a prefix of whole groups.
+Only selected examples receive normalization and optional enrichment; final byte
+trimming can omit some selected groups. Existing source and context limits apply.
+The `limits` fields are `max_processed_locations`, `max_uri_bytes`, `max_files`,
+and `max_output_bytes`, with the values above. This bounds additional local work
+and output; it does not bound the already received LSP response or backend work.
+
+For a supported file URI, `file_path` is an absolute lexical path. Query files
+first, then pass the chosen `file_path` as `path_filter` with `mode:"locations"`
+to inspect details. For example, use `{"mode":"files","limit":5}` with your
+symbol address, then add `{"path_filter":"/work/app/src/usage.rs"}` to a new
+locations query. URI aliases can map to the same filter path. Unsupported URIs
+remain visible with `file_path:null` and
+`path_filter_unavailable:"unsupported_uri"`. This also applies when the decoded
+path cannot be represented as a UTF-8 JSON string. Requested source failures remain
+explicit. Source and positions do not form an atomic snapshot.
+
+Each location preserves `uri`, `range`, advisory `out_of_workspace`, and optional `enclosing_symbol`.
+With source enabled, `source` has one of these shapes:
+
+```json
+{"status":"text","text":"fn usage() {\n    call();\n}\n","start_line":10,"origin":"disk","shortened":false}
+```
+
+```json
+{"status":"unavailable","reason":"access_denied"}
+```
+
+Text includes the reference's starting line and up to two lines on either side.
+`start_line` is 1-based. Unicode and LF, CRLF, and CR line endings are preserved.
+`origin` is `tracked` for text last synchronized to the server, or `disk` for a contained file read.
+These snapshots are not atomic with the server's locations.
+External paths and symlink escapes disclose no source, regardless of `out_of_workspace`.
+Source enrichment does not open LSP documents or use a persistent cache.
+`include_source: true` opts into source for returned locations only.
+Omitted or false `include_source` omits `source` and source excerpt reads and copies.
+With `context` omitted or `"none"`, enclosing-symbol enrichment is also skipped.
+Necessary document synchronization and position normalization still occur.
+To request the previous defaults explicitly, use `"limit":100,"include_source":true`.
+
+Fixed source limits per request are 100 candidate locations, 16 distinct files,
+1 MiB per file, 4 MiB total read/copy allowance, 2 KiB per excerpt, and 64 KiB total excerpt text.
+Each selected file is read or copied once, including duplicate references.
+Failed reads and lookahead consume the allowance. A two-second best-effort deadline
+stops further enrichment; an uninterruptible OS call can exceed it.
+When a full window exceeds the remaining text allowance, the reference line alone
+is returned with `shortened: true`. An oversized reference line is unavailable.
+Failures and exhausted limits preserve locations with explicit reasons:
+`candidate_limit`, `file_limit`, `source_budget`, `text_budget`, `deadline`,
+`access_denied`, `read_failed`, `file_too_large`, `invalid_utf8`, or `line_unavailable`.
+
+Only an originally empty server response carries `index_coverage`.
+A filter-empty result from a nonempty response does not carry this note.
+`synced_documents` counts documents currently synced to the server process;
+`server_restarted` stays true after a restart or respawn.
+Servers can index only opened documents, so an empty answer is not proof that a symbol is unused.
 
 ## get_document_symbols
 
@@ -121,15 +264,49 @@ Returns the signatures and parameter documentation for the call at a position, w
 
 ## get_completions
 
-Returns completion candidates at a position. Add `trigger` (for example `.`, `:` or `->`) to mimic typing a trigger character.
+Returns API-discovery completion candidates at a position. Add `trigger` (for example `.`, `:` or `->`) to mimic typing a trigger character.
 
 ```json
 { "file_path": "/work/app/src/billing.rs", "line": 57, "character": 18, "trigger": "." }
 ```
 
-Each item has a `label`, a numeric `kind` (2 method, 3 function, 5 field, 6 variable, 7 class, 9 module), a `detail`, optional `documentation` and `insertText`. Completion requests are capped at 10 seconds whatever `request_timeout_seconds` says.
+By default, return the first 20 provider candidates without documentation. Set `limit`
+to an integer from 1 through 100, and set `include_documentation: true` to request
+documentation. Null and invalid values for these options are rejected.
 
-At most 100 items are returned, for every server. When a server returns more, mcpls ranks them by how well they match the identifier typed before the cursor (prefix matches first, then subsequence matches, each group ordered by the server's `sortText`, else by label) before cutting, and sets `truncated: true`; type more of the identifier to narrow the list. A server's own `isIncomplete` flag is not reflected in `truncated`.
+```json
+{ "file_path": "/work/app/src/billing.rs", "line": 57, "character": 18, "limit": 40, "include_documentation": true }
+```
+
+Each item has `label`, numeric `kind` (2 method, 3 function, 5 field, 6 variable,
+7 class, 9 module), `detail`, `documentation`, and `truncated_fields`. Missing
+kind, detail, and documentation are null. Disabled documentation is null; enabled
+empty documentation stays an empty string. Provider order and duplicate labels
+are preserved. Results do not include insertion text, snippets, or completion edits.
+
+After existing display-prose redaction, labels, details, and documentation have
+UTF-8 byte limits of 512, 2048, and 4096. Clipping keeps the longest Unicode-scalar
+prefix without an ellipsis. `truncated_fields` lists clipped fields in that order.
+A clipped label is partial and must not be used as an exact source replacement.
+Labels retain their existing identifier-payload redaction semantics.
+
+The final compact structured-result JSON is at most 65536 UTF-8 bytes, including
+JSON escaping and all metadata. The result retains the longest provider prefix
+that fits. `omitted_count` counts provider candidates excluded by count or byte
+limits. `truncated` is true exactly when candidates were omitted or retained
+fields were clipped. Selecting documentation off does not itself mean truncation.
+The legacy text content encodes the same result.
+
+`provider_is_incomplete` preserves an explicit provider boolean. It is null for
+bare arrays and null responses, including empty responses. Provider incompleteness
+and local truncation are independent. A false provider signal does not establish
+complete workspace or API coverage. `positions_degraded` retains its usual meaning.
+
+These bounds apply to the returned structured result, not the original LSP
+response, provider work, process memory, or the complete MCP envelope. Completion
+requests retain their 10-second cap regardless of `request_timeout_seconds`.
+
+Every provider response is ranked before count and byte limits, including responses with 100 or fewer items. Ranking uses the identifier immediately before the UTF-16 cursor: Unicode alphanumeric characters, underscore, and dollar. The last 256 characters are lowercased. `filterText` (else label) matches by prefix, subsequence, then nonmatch; each tier sorts by case-sensitive `sortText` (else label), with stable equal keys. An empty or unavailable prefix sorts all candidates by `sortText` or label. The default limit is 20; `limit` accepts 1 through 100. Documentation is disabled unless `include_documentation:true`. After redaction, labels, details, and documentation are clipped to 512, 2048, and 4096 UTF-8 bytes. The longest ranked prefix within 65536 compact JSON bytes is retained. `omitted_count`, `truncated`, and `truncated_fields` describe local omissions and clipping. `provider_is_incomplete` retains the provider boolean, or null for bare arrays and null responses. Insertion text, snippets, and edits are omitted. These bounds do not bound the original LSP response or provider work.
 
 ## get_inlay_hints
 
@@ -148,3 +325,40 @@ Use it to see inferred types of `let` bindings without hovering over each one.
 ## What's Next
 
 Continue with [Diagnostics and Formatting](diagnostics.md) to see what the compiler reports.
+
+## get_document_outline
+
+Returns a compact, flat page of navigation entries. Use `get_document_symbols` when you need complete ranges and children.
+
+Arguments: required absolute `file_path`; optional `query`, `kind_filter`, `offset` and `limit`.
+`query` matches a case-sensitive substring of each symbol's own name, up to 1,000 bytes.
+`kind_filter` accepts the existing symbol kind names or numeric LSP kinds.
+`offset` defaults to 0 after filtering. `limit` defaults to 100 and accepts 1 through 200.
+
+```json
+{ "file_path": "/work/app/src/models.rs", "query": "User", "offset": 0, "limit": 100 }
+```
+
+```json
+{
+  "symbols": [{ "name_path": ["models", "User"], "kind": 23, "position": { "line": 10, "character": 8 } }],
+  "fidelity": "hierarchical",
+  "truncated": false,
+  "next_offset": null
+}
+```
+
+Hierarchical responses use depth-first server order, preserve ancestor names, and navigate to the symbol's selection start.
+Flat responses retain server order and the supplied container name as one path segment.
+Their `fidelity` is `flat`, and their range-start navigation positions are approximate.
+Duplicate names remain separate entries. Positions use 1-based lines and UTF-16 characters.
+When `positions_degraded` is present, follow the [position warning](overview.md#reading-results).
+
+Use `next_offset` for the next page when `truncated` is true. Restart pagination after document changes.
+The limit bounds returned entries; it does not bound the language server's original response.
+This tool returns navigation information and does not apply edits.
+
+## Portable symbol targets
+
+Copy an emitted `symbol_target` unchanged into the supported read-only consumers.
+See [portable target inputs, producers, limits, and errors](symbol-context.md#copy-a-portable-target).

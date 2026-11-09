@@ -1196,6 +1196,29 @@ impl Translator {
             .await
     }
 
+    pub(super) async fn prepare_origin_document(
+        &self,
+        path: &WorkspacePath,
+        origin: &super::HierarchyOrigin,
+        gate: IndexingGate,
+    ) -> Result<PreparedDocument> {
+        self.require_hierarchy_origin(origin)?;
+        check_capability(
+            &origin.server,
+            Some(&origin.capabilities),
+            gate.capability(),
+        )?;
+        self.wait_for_indexing_ready(&origin.server).await?;
+        self.require_hierarchy_origin(origin)?;
+        self.open_prepared(
+            origin.server.clone(),
+            origin.client.clone(),
+            path,
+            Access::Use,
+        )
+        .await
+    }
+
     /// Opens `file_path` for a name-resolving tool that discloses indexing
     /// instead of waiting for it, after the capability gate and the line check
     /// of every one of `positions`.
@@ -2489,8 +2512,10 @@ mod tests {
         ];
 
         let config = crate::config::ServerConfig {
+            dispatcher: None,
             mcp: crate::config::McpConfig::default(),
             workspace: WorkspaceConfig {
+                file_watching: crate::config::FileWatchingConfig::default(),
                 roots: vec![crate::config::ConfiguredRoot::new("/tmp/test-workspace").unwrap()],
                 position_encodings: PositionEncodings::DEFAULT,
                 language_extensions: language_extensions.clone(),
@@ -3649,6 +3674,8 @@ mod tests {
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 1),
                 None,
+                20,
+                false,
             )
             .await;
 
@@ -3881,6 +3908,10 @@ mod tests {
             result.is_ok(),
             "fake server answered, expected Ok: {result:?}"
         );
+        let result = serde_json::to_value(result.unwrap()).unwrap();
+        assert_eq!(result["status"], "proposed");
+        assert_eq!(result["preparation"]["status"], "unsupported");
+        assert_eq!(result["changes"], serde_json::json!([]));
     }
 
     /// `forms` are the provider forms that advertise the capability.

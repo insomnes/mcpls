@@ -77,6 +77,9 @@ macro_rules! range_wire {
 /// position or by name, followed by the tool's own fields.
 macro_rules! target_wire {
     ($(#[$meta:meta])* $name:ident { $($extra:tt)* }) => {
+        target_wire!(@wire $(#[$meta])* $name take_target { $($extra)* });
+    };
+    (@wire $(#[$meta:meta])* $name:ident $method:ident { $($extra:tt)* }) => {
         #[derive(Debug, Clone, Deserialize, JsonSchema)]
         #[serde(deny_unknown_fields)]
         $(#[$meta])*
@@ -114,7 +117,7 @@ macro_rules! target_wire {
         impl $name {
             /// Moves the addressing fields out into the target, leaving them
             /// empty; the tool's own fields stay in place.
-            fn take_target(&mut self) -> Result<SymbolTargetParams, TargetAddressError> {
+            fn $method(&mut self) -> Result<SymbolTargetParams, TargetAddressError> {
                 SymbolTargetParams::from_parts(
                     std::mem::take(&mut self.file_path),
                     PositionFields {
@@ -130,9 +133,69 @@ macro_rules! target_wire {
     };
 }
 
+/// Add reference addressing without changing legacy edit and hierarchy wires.
+macro_rules! reusable_target_wire {
+    ($(#[$meta:meta])* $name:ident { $($extra:tt)* }) => {
+        #[derive(Debug, Clone, Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
+        $(#[$meta])*
+        struct $name {
+            /// Copy an emitted target unchanged; omit all legacy addressing fields.
+            symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
+            /// Absolute path, with a legacy selector.
+            file_path: Option<PathBuf>,
+            /// Line number (1-based), with character.
+            line: Option<u32>,
+            /// UTF-16 column (1-based), with line.
+            character: Option<u32>,
+            /// Symbol name, instead of a position or reference.
+            symbol_name: Option<String>,
+            /// Optional kind qualifier for `symbol_name`.
+            symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
+            /// Optional immediate container for `symbol_name`.
+            container: Option<String>,
+            /// Existing opaque reference, with `file_path`.
+            symbol_ref: Option<String>,
+            $($extra)*
+        }
+        impl $name {
+            fn take_target(&mut self) -> Result<SymbolTargetParams, TargetAddressError> {
+                if let Some(envelope) = self.symbol_target.take() {
+                    if self.file_path.is_some() || self.symbol_ref.is_some() || self.line.is_some()
+                        || self.character.is_some() || self.symbol_name.is_some()
+                        || self.symbol_kind.is_some() || self.container.is_some() {
+                        return Err(TargetAddressError::ReferenceOptions(
+                            "symbol_target cannot be combined with legacy addressing fields"
+                        ));
+                    }
+                    return SymbolTargetParams::from_envelope(envelope);
+                }
+                let file_path = self.file_path.take().ok_or(TargetAddressError::ReferenceOptions(
+                    "give symbol_target or file_path with a legacy target"
+                ))?;
+                if let Some(reference) = self.symbol_ref.take() {
+                    if self.line.is_some() || self.character.is_some() || self.symbol_name.is_some()
+                        || self.symbol_kind.is_some() || self.container.is_some() {
+                        return Err(TargetAddressError::ReferenceOptions(
+                            "symbol_ref cannot be combined with position, name, or qualifiers"
+                        ));
+                    }
+                    return Ok(SymbolTargetParams { file_path, target: SymbolTargetInput::Reference(reference) });
+                }
+                SymbolTargetParams::from_parts(file_path, PositionFields {
+                    line: self.line, character: self.character,
+                }, self.symbol_name.take(), self.symbol_kind.take(), self.container.take())
+            }
+        }
+    };
+}
+
 /// Why the addressing fields of a tool call do not name exactly one symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TargetAddressError {
+    /// Invalid reference selection options.
+    #[error("{0}")]
+    ReferenceOptions(&'static str),
     /// `symbol_kind` or `container` was given without `symbol_name`.
     #[error("`symbol_kind` and `container` apply only with `symbol_name`")]
     QualifierWithoutName,
@@ -206,7 +269,7 @@ pub struct RangeParams {
     pub end_character: u32,
 }
 
-target_wire! {
+reusable_target_wire! {
     /// Wire form of [`SymbolTargetParams`]: a file plus either a position or a
     /// symbol name.
     #[schemars(
@@ -237,6 +300,8 @@ pub struct SymbolTargetParams {
 /// tool-result error.
 #[derive(Debug, Clone)]
 pub enum SymbolTargetInput {
+    /// Opaque observed target reference.
+    Reference(String),
     /// A 1-based position, unchecked.
     Position {
         /// Line number (1-based).
@@ -265,6 +330,7 @@ impl SymbolTargetInput {
     /// [`Error::InvalidToolParams`] for a `symbol_kind` that names no kind.
     pub fn into_target(self) -> Result<SymbolTarget, Error> {
         match self {
+            Self::Reference(reference) => Ok(SymbolTarget::Reference(reference)),
             Self::Position { line, character } => Ok(SymbolTarget::Position(
                 Position::from_client(line, character)?,
             )),
@@ -285,6 +351,20 @@ impl SymbolTargetInput {
 }
 
 impl SymbolTargetParams {
+    fn from_envelope(
+        envelope: crate::bridge::SymbolTargetEnvelope,
+    ) -> Result<Self, TargetAddressError> {
+        if !envelope.file_path.is_absolute() {
+            return Err(TargetAddressError::ReferenceOptions(
+                "symbol_target.file_path must be absolute",
+            ));
+        }
+        Ok(Self {
+            file_path: envelope.file_path,
+            target: SymbolTargetInput::Reference(envelope.symbol_ref),
+        })
+    }
+
     /// Builds the target from the addressing fields of a tool call.
     ///
     /// # Errors
@@ -330,7 +410,6 @@ impl TryFrom<SymbolTargetWire> for SymbolTargetParams {
     }
 }
 
-#[cfg(test)]
 impl From<PositionParams> for SymbolTargetParams {
     fn from(position: PositionParams) -> Self {
         Self {
@@ -343,10 +422,22 @@ impl From<PositionParams> for SymbolTargetParams {
     }
 }
 
-target_wire! {
+reusable_target_wire! {
     /// Wire form of [`ReferencesParams`].
     #[schemars(description = "Parameters for finding all references to a symbol.")]
     ReferencesWire {
+        #[schemars(description = "locations (default) or files grouped by exact provider URI; limit bounds groups in files mode.")]
+        #[serde(default)]
+        mode: crate::bridge::ReferenceMode,
+        #[schemars(description = "Maximum returned locations or file groups, 1 through 10000; default 10.", range(min = 1, max = 10000))]
+        #[serde(default = "reference_limit")]
+        limit: usize,
+        #[schemars(description = "Absolute file or directory path. Lexical component matching, no glob or symlink resolution.")]
+        #[serde(default)]
+        path_filter: Option<PathBuf>,
+        #[schemars(description = "Attach bounded source excerpts or explicit unavailable reasons; default false.")]
+        #[serde(default)]
+        include_source: bool,
         #[schemars(description = "Whether to include the declaration in the results.")]
         #[serde(default)]
         include_declaration: bool,
@@ -356,6 +447,10 @@ target_wire! {
     }
 }
 
+const fn reference_limit() -> usize {
+    10
+}
+
 /// Parameters for the `get_references` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(try_from = "ReferencesWire")]
@@ -363,6 +458,8 @@ target_wire! {
 pub struct ReferencesParams {
     /// The symbol to find references to.
     pub target: SymbolTargetParams,
+    /// Selection and source options.
+    pub options: crate::bridge::ReferenceOptions,
     /// Whether to include the declaration in the results.
     pub include_declaration: bool,
     /// Optional extra context for each returned item.
@@ -373,10 +470,78 @@ impl TryFrom<ReferencesWire> for ReferencesParams {
     type Error = TargetAddressError;
 
     fn try_from(mut wire: ReferencesWire) -> Result<Self, Self::Error> {
+        if !(1..=10000).contains(&wire.limit) {
+            return Err(TargetAddressError::ReferenceOptions(
+                "limit must be between 1 and 10000",
+            ));
+        }
+        if let Some(path) = &wire.path_filter {
+            crate::bridge::ClientPath::try_from(path.clone()).map_err(|_| {
+                TargetAddressError::ReferenceOptions(
+                    "path_filter must be an absolute path without NUL bytes",
+                )
+            })?;
+        }
         Ok(Self {
+            options: crate::bridge::ReferenceOptions {
+                mode: wire.mode,
+                limit: wire.limit,
+                path_filter: wire.path_filter.clone(),
+                include_source: wire.include_source,
+            },
             target: wire.take_target()?,
             include_declaration: wire.include_declaration,
             context: wire.context,
+        })
+    }
+}
+
+reusable_target_wire! {
+    /// Wire form of [`DefinitionParams`].
+    #[schemars(description = "Parameters for navigating from a symbol to related locations.")]
+    DefinitionWire {
+        #[schemars(description = CONTEXT_DESCRIPTION)]
+        #[serde(default)]
+        context: ResultContext,
+        #[serde(default)]
+        include_targets: bool,
+        #[schemars(description = "Attach bounded source observations; default false.")]
+        #[serde(default)]
+        include_source: bool,
+    }
+}
+
+/// Definition navigation with optional portable targets on retained locations.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(try_from = "DefinitionWire")]
+#[schemars(with = "DefinitionWire")]
+pub struct DefinitionParams {
+    /// Legacy navigation target and options.
+    pub navigation: NavigationParams,
+    /// Attach portable targets; default false.
+    pub include_targets: bool,
+}
+
+#[cfg(test)]
+impl From<PositionParams> for DefinitionParams {
+    fn from(position: PositionParams) -> Self {
+        Self {
+            navigation: position.into(),
+            include_targets: false,
+        }
+    }
+}
+
+impl TryFrom<DefinitionWire> for DefinitionParams {
+    type Error = TargetAddressError;
+    fn try_from(mut wire: DefinitionWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            navigation: NavigationParams {
+                target: wire.take_target()?,
+                context: wire.context,
+                include_source: wire.include_source,
+            },
+            include_targets: wire.include_targets,
         })
     }
 }
@@ -388,6 +553,9 @@ target_wire! {
         #[schemars(description = CONTEXT_DESCRIPTION)]
         #[serde(default)]
         context: ResultContext,
+        #[schemars(description = "Attach bounded source observations; default false.")]
+        #[serde(default)]
+        include_source: bool,
     }
 }
 
@@ -401,6 +569,8 @@ pub struct NavigationParams {
     pub target: SymbolTargetParams,
     /// Optional extra context for each returned item.
     pub context: ResultContext,
+    /// Attach bounded source observations; default false.
+    pub include_source: bool,
 }
 
 impl TryFrom<NavigationWire> for NavigationParams {
@@ -410,6 +580,7 @@ impl TryFrom<NavigationWire> for NavigationParams {
         Ok(Self {
             target: wire.take_target()?,
             context: wire.context,
+            include_source: wire.include_source,
         })
     }
 }
@@ -420,6 +591,7 @@ impl From<PositionParams> for NavigationParams {
         Self {
             target: position.into(),
             context: ResultContext::None,
+            include_source: false,
         }
     }
 }
@@ -431,6 +603,9 @@ position_wire! {
         #[schemars(description = CONTEXT_DESCRIPTION)]
         #[serde(default)]
         context: ResultContext,
+        #[schemars(description = "Attach bounded source observations; default false.")]
+        #[serde(default)]
+        include_source: bool,
     }
 }
 
@@ -443,6 +618,8 @@ pub struct DeclarationParams {
     pub position: PositionParams,
     /// Optional extra context for each returned item.
     pub context: ResultContext,
+    /// Attach bounded source observations; default false.
+    pub include_source: bool,
 }
 
 impl From<DeclarationWire> for DeclarationParams {
@@ -454,6 +631,7 @@ impl From<DeclarationWire> for DeclarationParams {
                 character: wire.character,
             },
             context: wire.context,
+            include_source: wire.include_source,
         }
     }
 }
@@ -464,6 +642,7 @@ impl From<PositionParams> for DeclarationParams {
         Self {
             position,
             context: ResultContext::None,
+            include_source: false,
         }
     }
 }
@@ -486,6 +665,9 @@ target_wire! {
     /// Wire form of [`RenameParams`].
     #[schemars(description = "Parameters for renaming a symbol across the workspace.")]
     RenameWire {
+        #[schemars(description = "Include exact normalized raw edits as well as bounded previews (default: false).")]
+        #[serde(default)]
+        full: bool,
         #[schemars(description = "New name for the symbol (non-blank, at most 1000 bytes).")]
         #[schemars(with = "String")]
         new_name: NewName,
@@ -497,6 +679,9 @@ target_wire! {
 #[serde(try_from = "RenameWire")]
 #[schemars(with = "RenameWire")]
 pub struct RenameParams {
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
     /// The symbol to rename.
     pub target: SymbolTargetParams,
     /// New name for the symbol.
@@ -508,6 +693,7 @@ impl TryFrom<RenameWire> for RenameParams {
 
     fn try_from(mut wire: RenameWire) -> Result<Self, Self::Error> {
         Ok(Self {
+            full: wire.full,
             target: wire.take_target()?,
             new_name: wire.new_name,
         })
@@ -523,30 +709,51 @@ position_wire! {
         )]
         #[schemars(with = "Option<String>")]
         trigger: Option<CompletionTrigger>,
+        #[schemars(description = "Maximum provider candidates, 1 through 100; default 20.", range(min = 1, max = 100))]
+        #[serde(default = "completion_limit")]
+        limit: usize,
+        #[schemars(description = "Include bounded documentation; default false.")]
+        #[serde(default)]
+        include_documentation: bool,
     }
 }
 
 /// Parameters for the `get_completions` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(from = "CompletionsWire")]
+#[serde(try_from = "CompletionsWire")]
 #[schemars(with = "CompletionsWire")]
 pub struct CompletionsParams {
     /// Position in the file to operate on.
     pub position: PositionParams,
     /// Optional trigger character (e.g., '.', ':', '->').
     pub trigger: Option<CompletionTrigger>,
+    /// Maximum provider candidates, from 1 through 100; default 20.
+    pub limit: usize,
+    /// Include documentation only when true; default false.
+    pub include_documentation: bool,
 }
 
-impl From<CompletionsWire> for CompletionsParams {
-    fn from(wire: CompletionsWire) -> Self {
-        Self {
+const fn completion_limit() -> usize {
+    20
+}
+
+impl TryFrom<CompletionsWire> for CompletionsParams {
+    type Error = &'static str;
+
+    fn try_from(wire: CompletionsWire) -> Result<Self, Self::Error> {
+        if !(1..=100).contains(&wire.limit) {
+            return Err("limit must be between 1 and 100");
+        }
+        Ok(Self {
             position: PositionParams {
                 file_path: wire.file_path,
                 line: wire.line,
                 character: wire.character,
             },
             trigger: wire.trigger,
-        }
+            limit: wire.limit,
+            include_documentation: wire.include_documentation,
+        })
     }
 }
 
@@ -577,11 +784,36 @@ pub struct DocumentSymbolsParams {
     pub file_path: PathBuf,
 }
 
+/// Parameters for compact document navigation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentOutlineParams {
+    /// Attach portable targets to retained entries; default false.
+    #[serde(default)]
+    pub include_targets: bool,
+    /// Absolute file path.
+    pub file_path: PathBuf,
+    /// Case-sensitive substring of the symbol's own name; at most 1,000 bytes.
+    pub query: Option<String>,
+    /// Symbol kind name or numeric LSP kind.
+    pub kind_filter: Option<KindFilterInput<SymbolKindFilter>>,
+    /// Offset after filtering.
+    #[serde(default)]
+    pub offset: usize,
+    /// Page size, 1 through 200 (default 100).
+    #[serde(default = "default_max_results")]
+    #[schemars(range(min = 1, max = 200))]
+    pub limit: u32,
+}
+
 /// Parameters for the `format_document` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(description = "Parameters for formatting a document.")]
 pub struct FormatDocumentParams {
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
     /// Absolute path to the file.
     #[schemars(description = "Absolute path to the file.")]
     pub file_path: PathBuf,
@@ -604,6 +836,9 @@ const fn default_insert_spaces() -> bool {
 #[serde(deny_unknown_fields)]
 #[schemars(description = "Parameters for searching symbols across the workspace.")]
 pub struct WorkspaceSymbolParams {
+    /// Attach portable targets to retained entries; default false.
+    #[serde(default)]
+    pub include_targets: bool,
     /// Search query for symbol names (supports partial matching).
     #[schemars(description = "Search query for symbol names (supports partial matching).")]
     pub query: String,
@@ -637,6 +872,9 @@ range_wire! {
         description = "Parameters for getting available code actions (quick fixes, refactorings) for a range."
     )]
     CodeActionsWire {
+        #[schemars(description = "Include exact normalized raw edits as well as bounded previews (default: false).")]
+        #[serde(default)]
+        full: bool,
         #[schemars(
             description = "Optional filter by action kind, in any case; sent to the server in its canonical spelling."
         )]
@@ -649,6 +887,9 @@ range_wire! {
 #[serde(from = "CodeActionsWire")]
 #[schemars(with = "CodeActionsWire")]
 pub struct CodeActionsParams {
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
     /// Absolute path to the file.
     pub file_path: PathBuf,
     /// Range in the file to operate on.
@@ -661,6 +902,7 @@ impl From<CodeActionsWire> for CodeActionsParams {
     fn from(wire: CodeActionsWire) -> Self {
         let range = wire.range();
         Self {
+            full: wire.full,
             file_path: wire.file_path,
             range,
             kind_filter: wire.kind_filter,
@@ -771,67 +1013,180 @@ impl From<HierarchyItemInput> for HierarchyItem {
 /// Wire form of [`CallHierarchyCallsParams`].
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(
-    description = "Parameters for getting incoming or outgoing calls for a call hierarchy item."
-)]
 struct CallHierarchyCallsWire {
-    #[schemars(
-        description = "The call hierarchy item, exactly as a prepare, incoming or outgoing call result gave it."
-    )]
-    item: HierarchyItemInput,
+    /// Portable target instead of item or legacy addressing.
+    symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
+    /// Reuse an item unchanged, instead of a file target.
+    item: Option<HierarchyItemInput>,
+    /// Absolute path, instead of `item`.
+    file_path: Option<PathBuf>,
+    /// Line number (1-based), with `character`.
+    line: Option<u32>,
+    /// UTF-16 column (1-based), with `line`.
+    character: Option<u32>,
+    /// Symbol name, instead of a position.
+    symbol_name: Option<String>,
+    /// Optional symbol kind, with `symbol_name`.
+    symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
+    /// Optional immediate container, with `symbol_name`.
+    container: Option<String>,
 }
 
-/// Wire form of [`TypeHierarchyWalkParams`].
+/// One bounded breadth-first caller or callee traversal.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(try_from = "CallGraphWire")]
+#[schemars(with = "CallGraphWire")]
+pub struct CallGraphParams {
+    /// Existing hierarchy addressing, validated before traversal.
+    pub target: CallHierarchyCallsParams,
+    /// Follow callers or callees.
+    pub direction: crate::bridge::CallGraphDirection,
+    /// Maximum hop count.
+    pub depth: usize,
+    /// Maximum retained nodes, including the root.
+    pub max_nodes: usize,
+}
+
+/// Closed graph input with the existing hierarchy selectors.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(
-    description = "Parameters for getting the supertypes or subtypes of a type hierarchy item."
-)]
-struct TypeHierarchyWalkWire {
-    #[schemars(
-        description = "The type hierarchy item, exactly as a prepare, supertypes or subtypes result gave it."
-    )]
-    item: HierarchyItemInput,
+struct CallGraphWire {
+    /// Follow callers or callees.
+    direction: crate::bridge::CallGraphDirection,
+    /// Maximum hops.
+    #[serde(default = "graph_default_depth")]
+    #[schemars(range(min = 1, max = 8))]
+    depth: usize,
+    /// Retained nodes, including root.
+    #[serde(default = "graph_default_nodes")]
+    #[schemars(range(min = 1, max = 256))]
+    max_nodes: usize,
+    /// Portable target instead of other selectors.
+    symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
+    /// Unchanged returned hierarchy item.
+    item: Option<HierarchyItemInput>,
+    /// Absolute file path.
+    file_path: Option<PathBuf>,
+    /// One-based line.
+    line: Option<u32>,
+    /// One-based UTF-16 column.
+    character: Option<u32>,
+    /// Symbol name instead of a position.
+    symbol_name: Option<String>,
+    /// Optional kind name or numeric string.
+    symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
+    /// Optional immediate container.
+    container: Option<String>,
+}
+
+const fn graph_default_depth() -> usize {
+    2
+}
+const fn graph_default_nodes() -> usize {
+    30
+}
+
+impl TryFrom<CallGraphWire> for CallGraphParams {
+    type Error = String;
+    fn try_from(w: CallGraphWire) -> Result<Self, Self::Error> {
+        if !(1..=8).contains(&w.depth) || !(1..=256).contains(&w.max_nodes) {
+            return Err("depth must be 1..8 and max_nodes must be 1..256".into());
+        }
+        let target = CallHierarchyCallsWire {
+            symbol_target: w.symbol_target,
+            item: w.item,
+            file_path: w.file_path,
+            line: w.line,
+            character: w.character,
+            symbol_name: w.symbol_name,
+            symbol_kind: w.symbol_kind,
+            container: w.container,
+        }
+        .try_into()?;
+        Ok(Self {
+            target,
+            direction: w.direction,
+            depth: w.depth,
+            max_nodes: w.max_nodes,
+        })
+    }
 }
 
 /// Parameters for the `get_incoming_calls` and `get_outgoing_calls` tools.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(from = "CallHierarchyCallsWire")]
+#[serde(try_from = "CallHierarchyCallsWire")]
 #[schemars(with = "CallHierarchyCallsWire")]
-pub struct CallHierarchyCallsParams {
-    /// The call hierarchy item to get calls for (from prepare response).
-    pub item: HierarchyItem,
+pub enum CallHierarchyCallsParams {
+    /// Traverse an unchanged item from a hierarchy result.
+    Item {
+        /// The reusable hierarchy item.
+        item: HierarchyItem,
+    },
+    /// Resolve and prepare a file target before traversal.
+    Target(SymbolTargetParams),
 }
 
-impl From<CallHierarchyCallsWire> for CallHierarchyCallsParams {
-    fn from(wire: CallHierarchyCallsWire) -> Self {
-        Self {
-            item: wire.item.into(),
+impl TryFrom<CallHierarchyCallsWire> for CallHierarchyCallsParams {
+    type Error = String;
+
+    fn try_from(wire: CallHierarchyCallsWire) -> Result<Self, Self::Error> {
+        if let Some(item) = wire.item {
+            if wire.symbol_target.is_some()
+                || wire.file_path.is_some()
+                || wire.line.is_some()
+                || wire.character.is_some()
+                || wire.symbol_name.is_some()
+                || wire.symbol_kind.is_some()
+                || wire.container.is_some()
+            {
+                return Err("give either `item` or a file target, not both".to_owned());
+            }
+            return Ok(Self::Item { item: item.into() });
         }
+        if let Some(envelope) = wire.symbol_target {
+            if wire.file_path.is_some()
+                || wire.line.is_some()
+                || wire.character.is_some()
+                || wire.symbol_name.is_some()
+                || wire.symbol_kind.is_some()
+                || wire.container.is_some()
+            {
+                return Err(
+                    "symbol_target cannot be combined with legacy addressing fields".into(),
+                );
+            }
+            return SymbolTargetParams::from_envelope(envelope)
+                .map(Self::Target)
+                .map_err(|error| error.to_string());
+        }
+        let file_path = wire
+            .file_path
+            .ok_or("give `item` or an absolute `file_path` with a target")?;
+        SymbolTargetParams::from_parts(
+            file_path,
+            PositionFields {
+                line: wire.line,
+                character: wire.character,
+            },
+            wire.symbol_name,
+            wire.symbol_kind,
+            wire.container,
+        )
+        .map(Self::Target)
+        .map_err(|error| error.to_string())
     }
 }
 
-/// Parameters for the `get_supertypes` and `get_subtypes` tools.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(from = "TypeHierarchyWalkWire")]
-#[schemars(with = "TypeHierarchyWalkWire")]
-pub struct TypeHierarchyWalkParams {
-    /// The type hierarchy item to walk from (from a prepare, supertypes or subtypes response).
-    pub item: HierarchyItem,
-}
-
-impl From<TypeHierarchyWalkWire> for TypeHierarchyWalkParams {
-    fn from(wire: TypeHierarchyWalkWire) -> Self {
-        Self {
-            item: wire.item.into(),
-        }
-    }
-}
+/// Parameters for direct type queries or unchanged item traversal.
+pub type TypeHierarchyWalkParams = CallHierarchyCallsParams;
 
 range_wire! {
     /// Wire form of [`FormatRangeParams`].
     #[schemars(description = "Parameters for formatting a range of a document.")]
     FormatRangeWire {
+        #[schemars(description = "Include exact normalized raw edits as well as bounded previews (default: false).")]
+        #[serde(default)]
+        full: bool,
         #[schemars(description = "Tab size for formatting (1 to 32, default: 4).")]
         #[serde(default)]
         tab_size: TabSize,
@@ -846,6 +1201,9 @@ range_wire! {
 #[serde(from = "FormatRangeWire")]
 #[schemars(with = "FormatRangeWire")]
 pub struct FormatRangeParams {
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
     /// Absolute path to the file.
     pub file_path: PathBuf,
     /// Range in the file to format.
@@ -860,6 +1218,7 @@ impl From<FormatRangeWire> for FormatRangeParams {
     fn from(wire: FormatRangeWire) -> Self {
         let range = wire.range();
         Self {
+            full: wire.full,
             file_path: wire.file_path,
             range,
             tab_size: wire.tab_size,
@@ -1022,6 +1381,28 @@ mod tests {
     use super::*;
     use crate::bridge::{MAX_NEW_NAME_LENGTH, MAX_TRIGGER_CHARACTER_BYTES};
 
+    /// Outline pagination uses integer defaults and rejects invalid JSON number shapes.
+    #[test]
+    fn outline_params_defaults_and_numeric_validation() {
+        let params: DocumentOutlineParams =
+            serde_json::from_value(serde_json::json!({"file_path": "/workspace/main.rs"})).unwrap();
+        assert_eq!(params.offset, 0);
+        assert_eq!(params.limit, 100);
+        assert!(params.query.is_none());
+        assert!(params.kind_filter.is_none());
+        for field in ["offset", "limit"] {
+            for value in [
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!("1"),
+            ] {
+                let mut input = serde_json::json!({"file_path": "/workspace/main.rs"});
+                input[field] = value;
+                assert!(serde_json::from_value::<DocumentOutlineParams>(input).is_err());
+            }
+        }
+    }
+
     #[test]
     fn restart_params_accept_servers_or_all() {
         let one: RestartServerParams =
@@ -1087,6 +1468,8 @@ mod tests {
             }
         );
         assert!(!references.include_declaration);
+        assert_eq!(references.options.limit, 10);
+        assert!(!references.options.include_source);
 
         let json = serde_json::json!({
             "file_path": "/a.rs",
@@ -1103,6 +1486,26 @@ mod tests {
         assert_eq!(query.name.as_str(), "parse");
         assert_eq!(query.kind, Some(lsp_types::SymbolKind::Function));
         assert_eq!(query.container.unwrap().as_str(), "Config");
+    }
+
+    #[test]
+    fn reference_mode_is_opt_in_and_rejects_null_or_unknown_values() {
+        let parse = |mode| {
+            serde_json::from_value::<ReferencesParams>(serde_json::json!({
+                "file_path": "/a.rs", "line": 1, "character": 1, "mode": mode
+            }))
+        };
+        assert_matches!(
+            parse("files").unwrap().options.mode,
+            crate::bridge::ReferenceMode::Files
+        );
+        assert_matches!(
+            parse("locations").unwrap().options.mode,
+            crate::bridge::ReferenceMode::Locations
+        );
+        assert!(parse("unknown").is_err());
+        let null = serde_json::json!({"file_path":"/a.rs","line":1,"character":1,"mode":null});
+        assert!(serde_json::from_value::<ReferencesParams>(null).is_err());
     }
 
     #[test]
@@ -1309,7 +1712,13 @@ mod tests {
 
         let schema = schemars::schema_for!(TypeHierarchyWalkParams);
         let item = &schema.as_object().unwrap()["properties"]["item"];
-        assert!(item.get("$ref").is_some());
+        assert!(
+            item["anyOf"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|schema| schema.get("$ref").is_some())
+        );
     }
 
     /// The generated JSON schema must expose `PositionParams`/`RangeParams`
@@ -1333,6 +1742,8 @@ mod tests {
         assert!(properties.contains_key("symbol_kind"));
         assert!(properties.contains_key("container"));
         assert!(properties.contains_key("include_declaration"));
+        assert_eq!(properties["limit"]["default"], 10);
+        assert_eq!(properties["include_source"]["default"], false);
         assert!(!properties.contains_key("target"));
 
         let schema = schemars::schema_for!(InlayHintsParams);
@@ -1436,5 +1847,76 @@ mod tests {
         let input: HierarchyItemInput = serde_json::from_value(wire.clone()).unwrap();
         let back = serde_json::to_value(HierarchyItem::from(input)).unwrap();
         assert_eq!(back, wire);
+    }
+}
+
+reusable_target_wire! {
+    /// Wire form of a symbol context request.
+    SymbolContextWire {
+        #[serde(default)]
+        resolve: ContextResolve,
+        #[serde(default = "default_context_sections")]
+        #[schemars(extend("minItems" = 1, "uniqueItems" = true, "items" = {"type":"string", "enum":["source","hover","outgoing_calls","diagnostics","inlay_hints","highlights"]}))]
+        sections: Vec<String>,
+    }
+}
+
+fn default_context_sections() -> Vec<String> {
+    vec!["source".into(), "hover".into()]
+}
+
+/// Context selection policy.
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextResolve {
+    /// Collect context at the supplied point.
+    #[default]
+    Direct,
+    /// Follow one reliable definition in the same workspace.
+    Definition,
+}
+
+/// One target and independently requested context sections.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(try_from = "SymbolContextWire")]
+#[schemars(with = "SymbolContextWire")]
+pub struct SymbolContextParams {
+    /// Context selection policy.
+    pub resolve: ContextResolve,
+    /// Validated addressing form.
+    pub target: SymbolTargetParams,
+    /// Unique requested sections.
+    pub sections: Vec<String>,
+}
+
+impl TryFrom<SymbolContextWire> for SymbolContextParams {
+    type Error = String;
+    fn try_from(mut wire: SymbolContextWire) -> Result<Self, Self::Error> {
+        let allowed = [
+            "source",
+            "hover",
+            "outgoing_calls",
+            "diagnostics",
+            "inlay_hints",
+            "highlights",
+        ];
+        if wire.sections.is_empty()
+            || wire.sections.iter().enumerate().any(|(i, section)| {
+                !allowed.contains(&section.as_str())
+                    || wire
+                        .sections
+                        .iter()
+                        .take(i)
+                        .any(|previous| previous == section)
+            })
+        {
+            return Err("sections must be nonempty, unique, and supported".into());
+        }
+        let target = wire.take_target().map_err(|error| error.to_string())?;
+        Ok(Self {
+            target,
+            sections: wire.sections,
+            resolve: wire.resolve,
+        })
     }
 }

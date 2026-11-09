@@ -2,6 +2,8 @@
 
 In this chapter you find every key of `mcpls.toml`, with type, default and rules. For a guided introduction read [Configuration](../guide/configuration.md) first. Unknown keys are rejected at startup.
 
+The default `[mcp].tool_profile = "agent"` exposes 31 tools. Set `tool_profile = "full"` to restore all 34 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+
 ## File structure
 
 ```text
@@ -19,13 +21,14 @@ Where the file is found is described in [Command Line and Environment](cli.md#--
 
 ## `[mcp]`
 
-Overrides the text mcpls reports about itself. Every field is optional; omitting one keeps the built-in text. `serverInfo.name`, `version` and `website_url` are not configurable.
+Controls the tool catalog and the text mcpls reports about itself. Every field is optional. `serverInfo.name`, `version` and `website_url` are not configurable.
 
 | Key | Overrides | Default | Maximum |
 |-----|-----------|---------|---------|
 | `title` | `serverInfo.title` | `MCPLS - MCP to LSP Bridge` | 128 bytes |
 | `description` | `serverInfo.description` | The crate description | 1024 bytes |
 | `instructions` | `ServerInfo.instructions` | Built-in capability text | 4096 bytes |
+| `tool_profile` | Static tool catalog (`agent` or `full`) | `agent` (31 tools) | — |
 | `tool_prefix` | Every tool name, as `{tool_prefix}_{tool}` | No prefix | 32 bytes |
 
 Limits are in UTF-8 bytes. A whitespace-only value is rejected as empty; omit the key instead. `instructions` replaces the built-in text rather than appending to it. `tool_prefix` may contain only ASCII letters, digits, `_` and `-`, and must start and end with a letter or digit.
@@ -37,6 +40,32 @@ Limits are in UTF-8 bytes. A whitespace-only value is rejected as empty; omit th
 Array of strings. Default `[]`, meaning the process working directory.
 
 Directories the servers analyze. Each must exist and is canonicalized before any server starts. An empty string is rejected. A relative root resolves against the directory of the config file when the file was named explicitly (`--config`, `MCPLS_CONFIG`, or a trusted project-local file), and against the process working directory when the file came from the user config directory. A file path is also accepted under a root-level system symlink spelling of a root (for example `/tmp/proj` for a root at `/private/tmp/proj` on macOS); links deeper in the tree are not admitted.
+
+### `[workspace.file_watching]`
+
+Client file watching is disabled by default. Enable the Linux Watchman backend in each workspace profile:
+
+```toml
+[workspace.file_watching]
+backend = "watchman" # "disabled" or "watchman"
+command = "watchman" # executable name or absolute path; never shell text
+```
+
+Install Watchman separately and use a stable executable path. Unknown backends and empty commands are rejected. Existing workspace trust rules apply to executable selection. Disabled mode starts no backend and preserves server-managed watching and request-time document synchronization.
+
+Manage exclusions in each authorized root's `.watchmanconfig`:
+
+```json
+{"ignore_dirs":[".agnt-tsks"]}
+```
+
+`ignore_dirs` uses Watchman's root-relative directory semantics. On Linux local filesystems, excluded trees consume no parent-owned native watches. mcpls never modifies this file. An independently authorized child worktree can use its own root and exclusions. `WATCHMAN_CONFIG_FILE` selects global settings and cannot replace root exclusions.
+
+Each workspace runtime owns a private, ephemeral Watchman daemon shared by its language servers and HTTP sessions. mcpls supports standard string glob registrations and WatchKind masks. RelativePattern objects are unsupported. Native watching does not follow directory symlinks outside authorized roots.
+
+Enabled startup fails explicitly if Watchman is missing, its root configuration is malformed, or the platform is unsupported. Backend disconnect, cancellation, overflow, or a fresh instance after baseline makes affected LSP requests unavailable. Other workspace runtimes remain independent. No polling or native fallback is used. Restart the workspace runtime or mcpls service after restoring the backend. Restart also applies configuration and exclusion changes. To roll back, set `backend = "disabled"` and restart.
+
+Filesystem notifications describe delivered changes, not completed language-server analysis. Indexing can finish later. Request-time `didOpen` and `didChange` synchronization remains active.
 
 ### `position_encodings`
 
@@ -212,7 +241,7 @@ Restricts a server to exactly the listed routing values; unset means catch-all, 
 | `implementation` | `go_to_implementation` |
 | `references` | `get_references` |
 | `diagnostics` | `get_diagnostics` and `get_cached_diagnostics` |
-| `rename` | `rename_symbol`, `prepare_rename` |
+| `rename` | `rename_symbol` |
 | `completions` | `get_completions` |
 | `signature_help` | `get_signature_help` |
 | `document_symbols` | `get_document_symbols` |
@@ -220,7 +249,7 @@ Restricts a server to exactly the listed routing values; unset means catch-all, 
 | `format_document` | `format_document` |
 | `format_range` | `format_range` |
 | `code_actions` | `get_code_actions` |
-| `call_hierarchy` | `prepare_call_hierarchy`, `get_incoming_calls`, `get_outgoing_calls` |
+| `call_hierarchy` | `get_incoming_calls`, `get_outgoing_calls`, `get_call_graph` |
 | `type_hierarchy` | `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
 | `document_highlights` | `get_document_highlights` |
 | `inlay_hints` | `get_inlay_hints` |
@@ -325,3 +354,13 @@ checkOnSave.command = "clippy"
 ## What's Next
 
 If a configuration does not behave as you expect, see [Troubleshooting](../guide/troubleshooting.md).
+
+## Worktree dispatcher
+
+`[dispatcher]` mode uses approved Git repositories, non-Git roots, or automatic parent policies and service-selected profiles. See [Shared Worktree Service](../advanced/worktree-service.md) for configuration, path interpretation, lifecycle limits, and reload behavior. Enabled dispatcher mode rejects top-level `[workspace]` and `[[lsp_servers]]`.
+
+Optional `[[dispatcher.auto_workspaces]]` entries contain absolute `path` and `profile` fields. The default list is empty. Each `path` must be an existing parent directory; overlapping parents use the most specific policy. Automatic profiles must omit `workspace.roots` or set it to `["."]` and cannot set Rust `initialization_options.linkedProjects`. Explicit approvals take priority. Incoming canonical file paths select temporary roots by nearest ancestor project marker, Git root inside the parent, or containing directory. Markers do not suppress language demand for automatic contexts. These contexts use the existing limits above, including the default 600-second idle timeout, and disappear after cleanup. For automatic contexts in untrusted mode, executable/helper paths inside any automatic parent remain untrusted, even outside the selected root; `--allow-server` does not waive executable restrictions. In untrusted mode, all service profiles must resolve outside every automatic parent. Policy changes require restart. See [Automatic temporary workspaces](../advanced/worktree-service.md#automatic-temporary-workspaces) for access boundaries and root selection.
+
+### Rust API compatibility
+
+This fork keeps `LspServerConfig.initialization_options` as `Option<serde_json::Value>` and preserves the settings field type. Configuration adapters reject TOML datetimes, including nested array and object values. Valid initialization options and settings reach the language server unchanged. Parent configuration and settings Debug output redact their values.

@@ -208,6 +208,7 @@ impl RestartFailure {
             | Error::StdioCapture(_)
             | Error::Timeout(_)
             | Error::LspServerError(..)
+            | Error::FileWatchingUnavailable
             | Error::LspProtocolError(_)
             | Error::ShutdownTimeout
             | Error::Io(_)
@@ -253,7 +254,8 @@ impl RestartFailure {
             | Error::NotARegularFile(_)
             | Error::AllServersFailedToInit { .. }
             | Error::CapabilityNotSupported { .. }
-            | Error::WorkspaceIndexing { .. } => Self::InitializeFailed { message },
+            | Error::WorkspaceIndexing { .. }
+            | Error::CallGraphRequestLimit => Self::InitializeFailed { message },
         }
     }
 }
@@ -274,7 +276,7 @@ impl RestartFailure {
 pub enum RestartOutcome {
     /// The server runs a freshly initialized process.
     Restarted {
-        /// Another restart of this server finished while the request waited, so none was repeated.
+        /// Another restart of this server finished during the wait, so none was repeated.
         coalesced: bool,
         /// Indexing readiness of the new process.
         indexing_state: IndexingState,

@@ -31,11 +31,12 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::bridge::WorkspaceRoots;
 use crate::config::{
-    BuiltinServer, CommandStem, HostOs, InitializationOptions, LaunchCommand, LspServerConfig,
-    ServerArgs, ServerCommand, ServerId,
+    BuiltinServer, CommandStem, HostOs, LaunchCommand, LspServerConfig, ServerArgs, ServerCommand,
+    ServerId,
 };
 use crate::error::{InitFailureHint, UntrustedRefusal};
 use crate::lsp::command_path::resolve_named;
@@ -879,9 +880,9 @@ pub enum UserTsserverPath {
 impl UserTsserverPath {
     /// Reads `tsserver.path` out of `options`.
     #[must_use]
-    pub fn of(options: Option<&InitializationOptions>) -> Self {
+    pub fn of(options: Option<&Value>) -> Self {
         options
-            .and_then(|options| options.as_value().pointer(TSSERVER_PATH_POINTER))
+            .and_then(|options| options.pointer(TSSERVER_PATH_POINTER))
             .map_or(Self::Absent, |value| {
                 value
                     .as_str()
@@ -901,7 +902,7 @@ impl UserTsserverPath {
 
 /// The `tsserver.path` configured in `options`, if any.
 #[must_use]
-pub fn configured_tsserver_path(options: Option<&InitializationOptions>) -> Option<PathBuf> {
+pub fn configured_tsserver_path(options: Option<&Value>) -> Option<PathBuf> {
     UserTsserverPath::of(options).path().map(Path::to_path_buf)
 }
 
@@ -1048,7 +1049,7 @@ impl TypescriptPlan {
         .inspect_err(|err| tracing::warn!(%err, "tsserver pin could not be serialized"))
         .ok();
         let pinned = options.is_some().then_some(tsserver);
-        config.initialization_options = options.map(InitializationOptions::from);
+        config.initialization_options = options;
         (config, pinned)
     }
 }
@@ -1093,7 +1094,6 @@ fn pinned_initialization_options(
         .apply(roots)
         .0
         .initialization_options
-        .map(InitializationOptions::into_value)
 }
 
 /// The default TypeScript entry started through `command`, auto-selected only
@@ -1880,7 +1880,7 @@ mod tests {
         drop(guard);
 
         assert_eq!(
-            configured_tsserver_path(options.map(InitializationOptions::from).as_ref()),
+            configured_tsserver_path(options.as_ref()),
             Some(layout.tsserver)
         );
         assert!(
@@ -1903,7 +1903,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            configured_tsserver_path(Some(&InitializationOptions::from(options))),
+            configured_tsserver_path(Some(&options)),
             Some(layout.tsserver)
         );
     }
@@ -2504,9 +2504,7 @@ mod tests {
 
     #[test]
     fn test_user_tsserver_path_distinguishes_absent_path_and_invalid() {
-        let of = |value: serde_json::Value| {
-            UserTsserverPath::of(Some(&InitializationOptions::from(value)))
-        };
+        let of = |value: serde_json::Value| UserTsserverPath::of(Some(&value));
 
         assert_eq!(UserTsserverPath::of(None), UserTsserverPath::Absent);
         assert_eq!(of(serde_json::json!({})), UserTsserverPath::Absent);
@@ -2543,11 +2541,7 @@ mod tests {
                 TsserverKept::UserTsserverPath
             ))
         );
-        assert_eq!(
-            pinned,
-            auto.initialization_options
-                .map(InitializationOptions::into_value)
-        );
+        assert_eq!(pinned, auto.initialization_options);
     }
 
     #[test]

@@ -1,0 +1,320 @@
+# Symbol Context
+
+`get_symbol_context` collects source and selected semantic information for one
+primary-file target. It is available in both `agent` and `full` profiles.
+
+```json
+{
+  "file_path": "/work/app/main.rs",
+  "symbol_name": "process",
+  "sections": ["source", "hover", "outgoing_calls"]
+}
+```
+
+Address the target with either `line` and `character`, or `symbol_name` with
+optional `symbol_kind` and `container`. Positions are 1-based UTF-16 coordinates.
+Names use the existing qualification and ambiguity rules. Unknown fields,
+incomplete or mixed addressing, empty sections, duplicate sections and unknown
+sections are rejected. There are no budget overrides.
+
+The default sections are `source` and `hover`. Optional sections are
+`outgoing_calls`, `diagnostics`, `inlay_hints` and `highlights`. Only requested
+sections appear. Each section reports its own outcome:
+
+| Status | Meaning |
+|---|---|
+| `ok` | Available data fit, with no known section limitation. Analysis can still be incomplete. |
+| `empty` | The provider returned no matching information within the known scope. |
+| `partial` | Usable data remain, with an explicit limitation or omission. |
+| `unsupported` | A required provider capability is absent. |
+| `unavailable` | Current state, range fidelity or a limit prevents a reliable result. |
+| `error` | The section failed; other sections can remain useful. |
+
+Every limited or failed section has a nonempty `reason`. Limit reasons include
+`response_budget`, `item_budget`, `file_budget`, `source_budget` and `text_budget`.
+A bounded provider response retains `provider_truncated`. Outer `truncated`
+identifies omitted data caused by limits; uncertainty alone does not set it.
+
+The result includes `target.file_path`, `target.position` and
+`target.range_fidelity`. A reliable hierarchical declaration range gives
+`range_fidelity: "symbol"` and `target.range`. The declaration's selection range
+must contain the target point. Flat, malformed, conflicting or degraded symbols
+and body-only positions give `range_fidelity: "unknown"`. Name addressing also
+retains `target.resolved_symbol`. Direct mode does not follow definitions to guess a range.
+
+## Resolve a definition
+
+Omit `resolve`, or use `"resolve": "direct"`, to preserve direct behavior.
+Use `"resolve": "definition"` to follow one definition before collecting context.
+Explicit null and other values are invalid. All existing position, name,
+`symbol_ref`, and `symbol_target` addressing forms work with either mode.
+
+```json
+{
+  "file_path": "/work/app/main.rs",
+  "line": 12,
+  "character": 8,
+  "resolve": "definition",
+  "sections": ["source", "hover"]
+}
+```
+
+Definition results add `query`, which identifies the normalized original use site,
+and `resolution`, which contains provider-order `candidates` and
+`provider_truncated`. Name addressing retains `query.resolved_symbol`.
+The selected `target` identifies the definition's normalized range start;
+`LocationLink` uses `targetSelectionRange`. A definition location alone does not
+prove a declaration body. The existing hierarchical symbol check qualifies it.
+
+| Resolution status | Reason or meaning |
+|---|---|
+| `resolved` | One complete, reliable file candidate is authorized in the query workspace. |
+| `selection_required` | `definition_incomplete`, `positions_degraded`, or `multiple_definitions`. |
+| `no_definition` | `no_definition`: a complete reliable response has no candidates. |
+| `unavailable` | `target_unavailable`: the sole candidate has no usable file position or fails authorization. `response_budget`: its required descriptor cannot fit the result cap. |
+| `unsupported` | `capability_not_supported`: definition capability is absent. |
+| `error` | `provider_error`: definition lookup failed after existing handling. |
+
+Incompleteness takes precedence over degradation, then multiplicity. Degradation
+warnings remain in `resolution.positions_degraded`. Duplicates remain ambiguous.
+Unresolved results have null `target`, except a unique file candidate denied by
+authorization retains its descriptor when the mandatory response fits. If the
+selected descriptor alone exceeds the complete result cap after candidate and
+optional-data removal, resolution becomes `unavailable/response_budget`, target is
+null, and outer `truncated` is true before any target-context work. Candidate
+evidence retains only a fitting prefix; provider truncation remains independent.
+Every requested section then reports
+`unavailable` with `resolution_not_resolved`. There is no context fanout or source
+acquisition for ambiguity candidates. Select a retained file candidate through
+ordinary absolute-file position addressing; selection is never automatic.
+
+Targets must pass canonical containment in the query's selected workspace before
+context requests or source access. A separately approved workspace is not selected
+automatically. External candidates remain navigation evidence. Once resolved,
+source or section failures preserve the target and resolution. In dispatcher mode,
+a different language backend may remain unstarted; its semantic sections can fail
+until a normal direct request starts it. Source can remain available independently.
+References, when
+issued, identify the selected definition only. Definition metadata is absent in
+direct responses. There is no recursion or whole-body guarantee from navigation.
+
+## Source observation
+
+The sole source fragment contains `file_path`, `text`, `start_line`, `origin`,
+`sha256`, `completeness` and `redacted`. The fragment preserves original whole
+lines, UTF-8, line separators and final-newline state, except configured secret
+redaction. Source never contains inserted hints or highlight markers.
+
+A reliable range permits `completeness: "complete_symbol"`. Boundary lines can
+include adjacent text. An end at column 1 excludes that final line. A text limit
+retains a whole-line prefix only when it includes the target line. Otherwise,
+source is unavailable. Without a reliable range, source uses the existing
+up-to-five-line window and reports `partial` with `range_unavailable`.
+
+`origin` is `tracked` or `disk`; tracked observations take precedence. `sha256`
+identifies the complete unredacted observed file, rather than the excerpt.
+`redacted: true` means displayed text differs through secret redaction;
+completeness still describes coverage. `source_acquisition_bytes` reports the
+existing bounded acquisition charge, including failed-read reservations. Requested
+source sections retain completed query-reference validation charges even when
+definition resolution is unresolved or its selected descriptor exceeds the cap.
+Workspace containment applies to source access, including symlink targets.
+
+## Semantic scope and uncertainty
+
+Hover retains provider contents and ranges. A null hover is `empty`. Outgoing
+calls retain direct callees, call-site ranges and advisory external-location
+flags; callee source is never acquired. Traversal requires one complete,
+nondegraded preparation item. No item is empty; multiple or incomplete items
+remain unavailable with `selection_required` or `preparation_incomplete`.
+
+Diagnostics and highlights use intersection with the reliable half-open symbol
+range. Zero-length diagnostics belong when their point is inside it. Hint
+positions must be inside the range. These sections are unavailable with
+`range_unavailable` when scope is unknown. Hints query only that range.
+Highlights query the primary position once. Missing highlight kinds remain
+`text`, never inferred `read` or `write`.
+
+Diagnostics preserve origin, availability and indexing signals. Pending or
+evicted diagnostics are unavailable. Cache results after a failed pull remain
+partial with `pull_failed`, including empty lists. Position-degradation and
+provider indexing signals remain visible.
+
+Every bundle reports `analysis_freshness: "unknown"` and `atomic_snapshot: false`.
+Source and semantic sections can describe different revisions during concurrent
+edits. A source hash proves observation identity only. Request position
+degradation means the provider may have queried a different symbol; it cannot
+produce an unqualified `ok` section.
+
+## Fixed per-call limits
+
+| Quantity | Limit |
+|---|---|
+| Compact UTF-8 MCP CallToolResult JSON, including text and structured representations | 131072 bytes |
+| Displayed source text after redaction | 16384 bytes |
+| Returned items across resolution candidates and all sections | 256 |
+| Distinct participating paths or URIs, including query, target and candidates | 16 |
+| Source paths for source/reference work | Direct: one primary; definition: query and selected primary (at most two) |
+| Complete observed source file | 1048576 bytes |
+| Source acquisition/copy accounting, including lookahead and failed reads | 4194304 bytes |
+| Foreground logical semantic operations | Direct: 8; definition: 9 |
+| Foreground semantic wire attempts, including existing retries | Direct: 32; definition: 36 |
+
+Each source fragment, hover object, outgoing call, call-site range, preparation
+item, diagnostic, hint and highlight counts once. Metadata does not count.
+File identities are lexically normalized; non-file URIs also count.
+
+Resolution candidates have first admission priority. Remaining priority is
+source, hover, outgoing calls, diagnostics, hints, then
+highlights, regardless of request order. Lists retain provider-order prefixes.
+Locally trimmed candidate suffixes set outer `truncated`, independently of
+`provider_truncated`, and cannot make an ambiguous result resolved.
+Limits can remove data, but preserve query/target identity, requested status records and
+uncertainty. Oversized files report `file_too_large` without discarding
+independent sections.
+
+At most two document-symbol operations, one hover, one call preparation, one
+outgoing query, one diagnostics pull, one hints query and one highlights query
+participate. Definition mode adds one definition operation. The tool adds no retry loop. These limits exclude initialization,
+protocol replies, document synchronization, normal background diagnostics and
+existing coordinate-conversion acquisition. Bounded reference validation and
+issuance reads retain their separate limits and charges; this is not a total
+filesystem-I/O bound. They do not bound server computation
+or the complete upstream response before existing normalization. Existing finite
+document tracking and conversion limits still apply. There is no latency or
+atomic-snapshot guarantee.
+
+## Copy a portable target
+
+`workspace_symbol_search`, `get_document_outline`, and `get_definition` accept
+`include_targets: true`. It defaults to false. Each retained entry then contains
+`symbol_target` or `symbol_target_unavailable.reason`. Workspace symbols and
+outline entries put these fields in `symbols[]`; definitions use `locations[]`.
+`get_symbol_context` always adds the same envelope when it issues a trustworthy
+reference. Its descriptive `target` remains. Top-level `symbol_ref` and
+`symbol_ref_unavailable` are no longer emitted.
+
+Copy the complete object into any of `get_symbol_context`, `get_hover`,
+`get_definition`, `get_references`, `get_incoming_calls`, or `get_outgoing_calls`:
+
+```json
+{
+  "symbol_target": {
+    "file_path": "/work/app/main.rs",
+    "symbol_ref": "<unchanged emitted reference>"
+  }
+}
+```
+
+The envelope has exactly two required strings: absolute `file_path` and
+`symbol_ref`. Unknown envelope members fail. Omit top-level `file_path`,
+`symbol_ref`, `line`, `character`, `symbol_name`, `symbol_kind`, `container`, and
+hierarchy `item`. Mixing any non-null legacy selector with an envelope fails,
+even when they agree. With a valid `symbol_target`, optional null selectors count
+as absent. Non-address
+options, including `sections`, `limit`, `include_source`, and
+`include_declaration`, retain their meaning. Edit tools, standalone hierarchy
+preparation, type hierarchy, implementation and type-definition tools do not
+accept envelopes. Unchanged hierarchy items remain valid continuation inputs.
+
+A target binds the returned exact UTF-16 point and observed complete file bytes.
+Outline targets use hierarchical selection starts. Workspace symbols and
+definitions use their location starts, including destinations in another file.
+The envelope does not certify analyzer freshness or an identifier-token boundary.
+Equal names never cause reselection. If reuse fails, perform discovery again.
+
+List enrichment adds no source acquisition or semantic operations when disabled.
+When enabled, it considers retained entries in result order after existing
+filtering and pagination. It attempts at most 16 entries and 16 distinct files.
+It acquires at most 4194304 bytes, including lookahead and failed-read reservations,
+with at most 1048576 complete source bytes per file. Files share one bounded
+observation per call. A two-second best-effort acquisition deadline also applies.
+There is no caller budget override. The existing 8192-byte reference limit applies.
+Target enrichment adds no semantic lookup. Existing coordinate conversion and
+separately requested source or enclosing context work have independent costs.
+Enrichment never removes or reorders ordinary results.
+
+List unavailability reasons are:
+
+| Reason | Meaning |
+|---|---|
+| `budget_exhausted` | The entry or acquisition allowance is exhausted. |
+| `approximate_position` | A flat outline lacks an exact selection start. |
+| `positions_degraded` | Position conversion cannot establish exact coordinates. |
+| `non_file_uri` | The location has no usable local file URI. |
+| `source_unverifiable` | Source is inaccessible, outside authorized roots, invalid UTF-8, oversized, changed during acquisition, or unavailable before the acquisition deadline. |
+| `position_unverifiable` | The point is outside source or splits a UTF-16 character. |
+| `reference_encoding` | The existing reference cannot be encoded. |
+| `reference_too_large` | The encoded reference exceeds 8192 UTF-8 bytes. |
+
+Context envelopes mirror the existing reference's unavailability reason, including
+`source_not_requested`, `source_unavailable`, `source_changed`, and the shared
+position, acquisition, and encoding reasons. They require no additional reads
+beyond existing reference issuance. All consumers retain the reference validation,
+typed errors, runtime lifecycle, and concurrency limits described below.
+
+## Reuse an observed target
+
+When source is requested, a trustworthy observation adds `symbol_target`.
+Keep the complete envelope unchanged and pass it to any supported consumer.
+`get_symbol_context`, `get_hover`, `get_definition`, and `get_references` also
+accept the envelope's opaque `symbol_ref` with legacy `file_path` addressing:
+
+```json
+{
+  "file_path": "/work/app/main.rs",
+  "symbol_ref": "<symbol_target.symbol_ref from a discovery result>"
+}
+```
+
+Use the reference instead of position or name addressing. Do not combine it
+with `line`, `character`, `symbol_name`, `symbol_kind`, `container`, or a cursor.
+Other supported options keep their meanings. Edit tools do not accept references.
+Both tool profiles expose the supported reference consumers.
+
+The reference binds an exact 1-based UTF-16 position, the authorized file and
+runtime context, and SHA-256 of the complete unredacted observed source. It
+contains no source text. New references use a compact version 2 JSON tuple with
+SHA-256 digests for runtime/file binding and source bytes. Consumers also accept
+version 1 references. Both versions are stateless and have the same lifecycle;
+there is no reference registry or expiry. Treat their encoding as opaque.
+Display redaction does not change content identity.
+An unknown declaration range does not prevent issuance at an exact valid point.
+Invalid UTF-16 boundaries, degraded positions, unavailable source, or a fresh
+source observation that disagrees with the displayed observation prevent issuance.
+The result then contains `symbol_target_unavailable.reason`. When source was omitted,
+the reason is `source_not_requested`; other sections retain independent outcomes.
+
+Each consumer reads complete current source before its semantic request. It
+checks content independently of file size, timestamps, and tracked-text caches.
+Typed JSON-RPC errors have `data.kind` and an explanatory message:
+
+| `data.kind` | Meaning |
+|---|---|
+| `stale_target` | Current source bytes differ from the observation. |
+| `invalid_symbol_ref` | The string is malformed, structurally invalid, unsupported, empty, or longer than 8192 UTF-8 bytes. |
+| `symbol_ref_context_mismatch` | The file or runtime context differs. |
+| `unverifiable_target` | Complete current UTF-8 source or exact coordinates cannot be established. |
+
+Existing authorization errors still apply. Resolve the target afresh after
+rejection. Consumers do not relocate or rebase the reference automatically.
+
+References have no clock expiry or per-reference eviction. They remain valid
+while their runtime context and exact source bytes remain available. Restoring
+the original bytes permits reuse. Restarting an LSP child preserves references;
+replacing or evicting its workspace backend context, or restarting mcpls,
+invalidates them. References grant no path access and are not portable between
+mcpls processes.
+
+Each complete source observation is bounded to 1 MiB. Issuance performs an
+additional fresh contained disk observation to confirm the source section's
+identity. A source section's `source_acquisition_bytes` also includes reference
+validation and issuance reads. Existing source accounting and response limits
+still apply. Read,
+encoding, size, or detected acquisition-race failures prevent trustworthy reuse.
+
+Content identity does not prove analyzer freshness. Validation observes bytes
+before semantic dispatch; a change after that observation can produce a result
+or a typed failure. Collection is not atomic with filesystem writes or LSP
+analysis. No guarantee covers undetectable concurrent rewrites or other files.
+Existing freshness and position-degradation signals remain authoritative.

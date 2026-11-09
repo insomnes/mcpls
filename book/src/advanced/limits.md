@@ -38,13 +38,15 @@ In this chapter you find every boundary mcpls enforces or cannot cross, in one p
 | Concurrent `subscriptions/listen` streams | 100 |
 | Enclosing-symbol enrichment | 16 files (or `max_documents / 4` when `max_documents` is below 64), 30 s |
 | Per-response disk read for position conversion | 4 times `max_file_size`, at most 256 MiB |
+| Reference selection | Default 100; `limit` 1 through 10000; absolute lexical `path_filter` |
+| Reference source context | 100 candidates; 16 files; 1 MiB/file; 4 MiB read/copy; 2 KiB/excerpt; 64 KiB excerpt text; 2 s best-effort deadline |
 | Result lists | Capped per tool; `truncated: true` marks a cut |
 | Stdio line | 4 MiB; see [Message size limit](transports.md#message-size-limit) |
 | LSP frame from a server | Up to 10 MiB is read; 10 to 256 MiB is skipped; above 256 MiB the connection closes |
 
 ## Behavioral constraints
 
-- **mcpls does not write your files.** Edits are returned for the client to apply.
+- **Source edits are proposals.** Refactoring and formatting tools return edits for the client to apply. `feedback_add` writes explicit reports to a private local JSONL file.
 - **Routing is by extension.** `file_patterns` cannot confine a server to a directory, and two servers that claim the same extension both receive every file with it unless `handles` separates them.
 - **`file_patterns` forms.** Only `*.EXT` (with an optional `**/` prefix) and bare extensionless names such as `Makefile` are accepted. Brace expansion, character classes, `?`, dotfiles, dotted names, single files and multi-part extensions such as `*.tar.gz` are rejected at startup.
 - **`workspace_symbol_search` has no document.** It asks every server that claims `workspace_symbols` or is a catch-all, and reports what each one did (see [Code Intelligence](../tools/code-intelligence.md#workspace_symbol_search)). It fails only if no server answers.

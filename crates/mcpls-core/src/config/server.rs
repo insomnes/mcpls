@@ -486,7 +486,7 @@ impl PartialEq<&str> for LaunchCommand {
 /// invalid `file_patterns`, `env` or `args` entry with the id of the server
 /// that holds it and builds the [`LaunchCommand`] from the `command` and
 /// `selection` keys.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(try_from = "RawLspServerConfig", into = "RawLspServerConfig")]
 pub struct LspServerConfig {
     /// Language identifier (e.g., "rust", "python", "typescript").
@@ -515,7 +515,7 @@ pub struct LspServerConfig {
     /// only that installed the server fails to initialize, and the error says
     /// so. A native `tsc --lsp --stdio` command gets no pin and no generated
     /// options. See `SECURITY.md` for the trust model.
-    pub initialization_options: Option<InitializationOptions>,
+    pub initialization_options: Option<serde_json::Value>,
 
     /// Per-server settings pushed after `initialized` via
     /// `workspace/didChangeConfiguration` and served on
@@ -570,6 +570,32 @@ pub struct LspServerConfig {
     /// Set to `"disabled"` for a server whose signal shape doesn't fit this
     /// tracker's assumptions -- see [`IndexingPolicy::Disabled`].
     pub indexing: IndexingPolicy,
+}
+
+impl std::fmt::Debug for LspServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LspServerConfig")
+            .field("language_id", &self.language_id)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &self.env)
+            .field("file_patterns", &self.file_patterns)
+            .field("settings", &self.settings)
+            .field("timeout_seconds", &self.timeout_seconds)
+            .field("request_timeout_seconds", &self.request_timeout_seconds)
+            .field("heuristics", &self.heuristics)
+            .field("name", &self.name)
+            .field("handles", &self.handles)
+            .field("indexing", &self.indexing)
+            .field(
+                "initialization_options",
+                &self
+                    .initialization_options
+                    .as_ref()
+                    .map(crate::redaction::JsonShape),
+            )
+            .finish()
+    }
 }
 
 /// The deserialized form of [`LspServerConfig`], before the entry-level checks.
@@ -632,7 +658,7 @@ impl From<LspServerConfig> for RawLspServerConfig {
             args: args.into(),
             env: env.into(),
             file_patterns: file_patterns.into_iter().map(String::from).collect(),
-            initialization_options,
+            initialization_options: initialization_options.map(InitializationOptions::from),
             settings,
             timeout_seconds,
             request_timeout_seconds,
@@ -711,7 +737,7 @@ impl TryFrom<RawLspServerConfig> for LspServerConfig {
             args,
             env,
             file_patterns,
-            initialization_options,
+            initialization_options: initialization_options.map(InitializationOptions::into_value),
             settings,
             timeout_seconds,
             request_timeout_seconds,

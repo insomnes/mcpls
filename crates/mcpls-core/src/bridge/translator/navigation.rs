@@ -330,7 +330,7 @@ async fn goto_response_to_locations<R: GotoResponse>(
 /// (and `marked_string_to_string`) carry a narrow, scoped allow rather than
 /// rewriting to `MarkupContent`-only.
 #[allow(deprecated, reason = "LSP servers still send this deprecated field")]
-fn extract_hover_contents(contents: lsp_types::Contents) -> String {
+pub(super) fn extract_hover_contents(contents: lsp_types::Contents) -> String {
     match contents {
         lsp_types::Contents::MarkedString(marked_string) => marked_string_to_string(marked_string),
         lsp_types::Contents::MarkedStringList(marked_strings) => marked_strings
@@ -562,6 +562,107 @@ impl Translator {
         Ok(self.contextualize_into(normalized, context).await)
     }
 
+    /// Navigate with optional bounded source, without changing native defaults.
+    ///
+    /// # Errors
+    /// Returns the existing navigation error if semantic navigation fails.
+    pub async fn handle_definition_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<super::dto::NavigationResult> {
+        let result = self.handle_definition(file_path, position, context).await?;
+        Ok(self.navigation_sources(result, include_source).await)
+    }
+
+    /// Navigate with optional bounded source, without changing native defaults.
+    ///
+    /// # Errors
+    /// Returns the existing navigation error if semantic navigation fails.
+    pub async fn handle_implementation_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<super::dto::NavigationResult> {
+        let result = self
+            .handle_implementation(file_path, position, context)
+            .await?;
+        Ok(self.navigation_sources(result, include_source).await)
+    }
+
+    /// Navigate with optional bounded source, without changing native defaults.
+    ///
+    /// # Errors
+    /// Returns the existing navigation error if semantic navigation fails.
+    pub async fn handle_type_definition_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<super::dto::NavigationResult> {
+        let result = self
+            .handle_type_definition(file_path, position, context)
+            .await?;
+        Ok(self.navigation_sources(result, include_source).await)
+    }
+
+    /// Navigate with optional bounded source, without changing native defaults.
+    ///
+    /// # Errors
+    /// Returns the existing navigation error if semantic navigation fails.
+    pub async fn handle_declaration_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<super::dto::NavigationResult> {
+        let result = self
+            .handle_declaration(file_path, position, context)
+            .await?;
+        Ok(self.navigation_sources(result, include_source).await)
+    }
+
+    async fn navigation_sources(
+        &self,
+        result: LocationsResult,
+        include_source: bool,
+    ) -> super::dto::NavigationResult {
+        let mut result = super::dto::NavigationResult::from(result);
+        if !include_source {
+            return result;
+        }
+        let mut locations: Vec<_> = result
+            .locations
+            .into_iter()
+            .map(|item| super::dto::ReferenceLocation {
+                location: item.location,
+                source: None,
+            })
+            .collect();
+        let hashes = self.source_excerpts(&mut locations, true).await;
+        result.locations = locations
+            .into_iter()
+            .map(|item| {
+                let hash = hashes.get(&item.uri).cloned().unwrap_or_default();
+                super::dto::NavigationLocation {
+                    symbol_target: None,
+                    symbol_target_unavailable: None,
+                    location: item.location,
+                    source: item
+                        .source
+                        .map(|source| super::dto::NavigationSource::from_excerpt(source, hash)),
+                }
+            })
+            .collect();
+        result
+    }
+
     /// Handle references request.
     ///
     /// # Errors
@@ -577,6 +678,29 @@ impl Translator {
         include_declaration: bool,
         context: ResultContext,
     ) -> Result<ReferencesResult> {
+        self.handle_references_with_options(
+            file_path,
+            position,
+            include_declaration,
+            context,
+            super::ReferenceOptions::default(),
+        )
+        .await
+    }
+
+    /// Find references with bounded selection and optional source excerpts.
+    ///
+    /// # Errors
+    /// Returns an error for invalid options or when reference dispatch fails.
+    pub async fn handle_references_with_options(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        include_declaration: bool,
+        context: ResultContext,
+        mut options: super::ReferenceOptions,
+    ) -> Result<ReferencesResult> {
+        options.validate()?;
         let Positioned {
             result: response,
             ctx,
@@ -592,15 +716,83 @@ impl Translator {
             )
             .await?;
 
-        let normalized = lsp_locations_to_mcp(response.unwrap_or_default(), &ctx).await;
-        let result = self.contextualize_into(normalized, context).await;
-        let index_coverage = result
-            .locations
+        let mut response = response.unwrap_or_default();
+        let index_coverage = response
             .is_empty()
             .then(|| self.index_coverage(doc.server_id()));
+        let files_mode = matches!(options.mode, super::ReferenceMode::Files);
+        let mut selection = if files_mode {
+            Some(super::references::ReferenceFileSelection::new(
+                std::mem::take(&mut response),
+                &options,
+            ))
+        } else {
+            None
+        };
+        let (retained, matched_count) = if let Some(selection) = &mut selection {
+            (
+                std::mem::take(&mut selection.retained),
+                selection.matched_count,
+            )
+        } else {
+            let mut retained = Vec::with_capacity(options.limit.min(response.len()));
+            let mut matched_count: usize = 0;
+            for location in response {
+                if options.matches(&location.uri) {
+                    matched_count = matched_count.saturating_add(1);
+                    if retained.len() < options.limit {
+                        retained.push(location);
+                    }
+                }
+            }
+            (retained, matched_count)
+        };
+        let mut locations = Vec::with_capacity(retained.len());
+        for location in retained {
+            let range = ctx.normalize_range(&location.uri, location.range).await;
+            #[cfg(test)]
+            {
+                crate::util::lock_std(&self.reference_work).normalized += 1;
+            }
+            locations.push(Location {
+                out_of_workspace: ctx.is_out_of_workspace(&location.uri),
+                uri: location.uri.to_string(),
+                range,
+            });
+        }
+        let normalized = NormalizedLocations {
+            locations,
+            truncated: false,
+            positions_degraded: ctx.positions_degraded(),
+        };
+        let result = self.contextualize_into(normalized, context).await;
+        let mut locations: Vec<_> = result
+            .locations
+            .into_iter()
+            .map(|location| super::dto::ReferenceLocation {
+                location,
+                source: None,
+            })
+            .collect();
+        if options.include_source {
+            self.reference_sources(&mut locations).await;
+        }
+        let file_summary =
+            selection.map(|selection| selection.finish(std::mem::take(&mut locations)));
         Ok(ReferencesResult {
-            result,
+            result: super::dto::ReferenceLocationsResult {
+                truncated: file_summary
+                    .as_ref()
+                    .map_or(matched_count > locations.len(), |summary| {
+                        summary.output_truncated || !summary.counts_complete
+                    }),
+                locations,
+                positions_degraded: result.positions_degraded,
+                enrichment: result.enrichment,
+            },
+            matched_count,
             index_coverage,
+            file_summary,
         })
     }
 
@@ -1629,11 +1821,8 @@ mod tests {
         );
     }
 
-    /// Regression for #474/M4: `get_references`' tool description no longer
-    /// promises "all" references, since a response past
-    /// `MAX_NORMALIZED_LOCATIONS` is capped -- the client must be able to
-    /// detect that via `LocationsResult::truncated` rather than silently
-    /// receiving a partial result that looks complete.
+    /// A large provider response retains the default prefix and explicitly
+    /// reports omitted references instead of implying complete coverage.
     #[tokio::test]
     async fn test_handle_references_sets_truncated_flag_past_cap() {
         let dir = TempDir::new().unwrap();
@@ -1690,7 +1879,7 @@ mod tests {
             .unwrap()
             .result;
 
-        assert_eq!(result.locations.len(), MAX_NORMALIZED_LOCATIONS);
+        assert_eq!(result.locations.len(), 10);
         assert!(
             result.truncated,
             "a references response past MAX_NORMALIZED_LOCATIONS must set truncated: true"

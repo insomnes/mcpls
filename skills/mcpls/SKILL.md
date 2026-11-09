@@ -23,8 +23,7 @@ metadata:
 mcpls is a single Rust binary that bridges the Model Context Protocol (MCP) to the
 Language Server Protocol (LSP). It spawns and speaks LSP to real language servers
 (rust-analyzer, pyright, gopls, clangd, …) and exposes their capabilities to an AI
-agent as 31 MCP tools — hover, go-to-definition, references, diagnostics, rename (with
-`prepare_rename`), completions, symbols, formatting (document and range), call and type
+agent as 30 default MCP tools (33 with the full profile) — hover, go-to-definition, references, diagnostics, rename with internal preparation, completions, symbols, formatting (document and range), call and type
 hierarchy, document highlights, a `get_tool_support` report of which tools work for which
 languages, and more.
 
@@ -34,10 +33,166 @@ identifiers and command arguments are returned unmodified.
 
 This skill covers operating the **binary**: installing it, choosing CLI flags and
 environment variables, registering it with an MCP client, and writing `mcpls.toml`.
-It does not enumerate the 31 MCP tools themselves or their parameters — for that, see
+It does not enumerate the MCP tools themselves or their parameters — for that, see
 [Tools Reference](https://bug-ops.github.io/mcpls/tools/overview.html).
 If the bridge is configured with `mcp.tool_prefix`, every tool name listed there gains
 that prefix (`{tool_prefix}_{tool}`).
+
+The default `[mcp].tool_profile = "agent"` exposes 31 tools. Set `tool_profile = "full"` to restore all 34 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+
+`rename_symbol` resolves a name or position and prepares on the rename server when supported.
+Its `proposed` result includes the queried `position`, `preparation`, and `changes`.
+A `not_renameable` result has no edits. The standalone MCP `prepare_rename` tool was removed.
+Request a proposal, inspect it, then apply complete edits through the client.
+
+Edit tools (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) default to bounded readable previews.
+Set `full: true` to include exact normalized raw `edits`; previews never change raw replacement text.
+Each edit document has `uri`, `edit_count`, `preview`, optional `preview_source` and `supplied_version`, and `analysis_freshness: "unknown"`.
+Formatting returns one document in `changes`, including empty successful edit sets. Command-only actions have no preview and require execution outside this MCP interface; mcpls provides no command execution API.
+`preview.status` is `complete`, `truncated`, or `unavailable`; inspect `reason` when output is limited.
+Diffs have three context lines. Configured secret redaction sets `redacted: true` when it changes displayed text.
+`preview_source.origin` is `tracked` or `disk`; `sha256` hashes the exact unredacted observed bytes.
+The observation does not prove the server's analyzed baseline. `supplied_version.version` retains an integer or explicit null only when supplied by the selected text-document edit; absent and map versions are omitted.
+One response shares 32 files, 8 MiB source plus constructed text, a two-second best-effort acquisition deadline, 100 ms off-executor diff work, and 64 KiB of displayed diff text after redaction.
+An OS read already in progress can overrun the deadline. Unreliable positions, invalid ranges, and overlaps suppress diffs without dropping otherwise retained edits.
+Previews never write files, execute commands, or add language-server opens solely for referenced source.
+
+Do not apply proposals with non-empty `dropped` or unreliable positions.
+
+`get_diagnostics` accepts exactly one of `file_path` or `file_paths` (1 through 32 absolute paths in one authorized workspace). Null selectors and conflicts fail. Batch paths are limited to 4096 UTF-8 bytes each and 16384 compact JSON string bytes in total. Preflight checks all inputs before analysis starts. Missing or unsupported files produce item errors.
+
+Batch `results` preserve input order and duplicates. Each item has `input_index`, original `file_path`, `status`, and `truncated`; success adds `report` and exact `omitted_diagnostics`, while failure adds `error` with `code`, `message`, and `retryable`. Reports retain the single-file provenance and degradation fields. At most four reads, including optional `context: "enclosing_symbol"`, run concurrently. Cancellation stops queued work; invalidation rejects the whole batch.
+
+Batch output retains at most 100 diagnostics per file, 256 overall, 8192 compact JSON UTF-8 bytes per complete diagnostic, and 131072 bytes per structured result. Budgets allocate in input order and omit whole diagnostics. Error objects use at most 1024 bytes; shortening sets item `truncated`. Outer `truncated` means at least one item was shortened. An empty published report means clean only when untruncated; pending, evicted, failed, or truncated outcomes do not establish cleanliness. One batch call does not guarantee less backend work or stronger freshness. Existing single-file output stays compatible.
+
+`get_completions` returns API-discovery candidates ranked by typed-prefix match and sortText, without insertion text or snippet edits. `limit` accepts integers 1 through 100 (default 20); `include_documentation` defaults to false. Null or invalid option values fail. Disabled or absent documentation is null; enabled empty documentation remains empty.
+
+Completion labels, details, and documentation are clipped at 512, 2048, and 4096 UTF-8 bytes after existing display redaction. Labels retain identifier-payload redaction semantics. Clipping keeps a Unicode-scalar prefix without an ellipsis; a clipped label is partial, not an exact source replacement. Each item lists clipped fields in `truncated_fields`, in label/detail/documentation order.
+
+The compact structured JSON is at most 65536 bytes, including escaping and metadata; the legacy text encodes the same result. The longest fitting provider prefix is returned. `omitted_count` counts excluded candidates. `truncated` means candidates were omitted or retained fields clipped; disabled documentation alone does not set it. `provider_is_incomplete` is the provider's explicit boolean, or null for bare arrays/null responses. Empty responses preserve this distinction. Provider incompleteness and local truncation are independent; false does not prove complete API coverage. Existing `positions_degraded` behavior is unchanged. Output bounds do not bound the original LSP response, provider work, process memory, or whole MCP envelope. The existing completion timeout remains 10 seconds.
+
+### Small reference queries
+
+`get_references` defaults to 10 locations and `include_source:false`. It preserves
+provider order and duplicates. Set `limit` (integer 1 through 10000) for a larger
+answer, and `include_source:true` for bounded source excerpts on returned locations.
+Use `"limit":100,"include_source":true` to request the previous default behavior.
+
+An absolute `path_filter` selects one file or a directory subtree by lexical path
+components before the limit. Relative filters fail; globs and symlink resolution
+are not supported. `matched_count` counts matching locations in the received
+provider array; `truncated` means matching locations were omitted. Only an
+originally empty provider array carries `index_coverage`. These results do not
+prove workspace coverage or provide a representative usage audit. Continuation
+is deferred; use a larger limit or narrower filter for follow-up queries.
+Smaller output does not guarantee less LSP backend work.
+
+With `context` omitted or `"none"`, default requests skip optional excerpt reads,
+copies, and enclosing-symbol enrichment. Required synchronization and position
+normalization still occur. Set `context:"enclosing_symbol"` for enclosing context.
+Source outcomes have status `text` or `unavailable`; text includes `start_line`
+(1-based), `origin` (`tracked` or `disk`), and `shortened`. Source snapshots and
+LSP locations are not atomic. External paths and symlink escapes disclose no source.
+
+Explicit source requests retain fixed limits: 100 candidate locations, 16 files,
+1 MiB per file, 4 MiB aggregate source read/copy allowance, 2 KiB per excerpt,
+64 KiB total excerpt text, and a two-second best-effort deadline. Exhausted limits
+preserve locations with unavailable reasons or shortened context. An in-flight
+OS call can exceed the deadline. See the book's `get_references` reference for details.
+
+
+Use `mode:"files"` to choose the next file to inspect. The default mode is
+`"locations"`; explicit `null` and unknown modes fail. In files mode, `locations`
+is empty and `file_summary.files` contains groups in first-seen provider order.
+Each group has the exact provider `uri`, `count` including duplicates, and the
+first matching `example` with the usual location, warning, context, and optional
+source fields. Different URI spellings remain separate, even for the same file.
+
+`limit` bounds groups in this mode, with the same default 10 and range 1..10000.
+Filtering precedes grouping. Counts include all matching locations in the
+processed prefix, even when their groups are omitted from output. The summary
+reports `received_count`, `processed_count` (including nonmatching locations),
+`file_count`, `omitted_file_count`, `counts_complete`, `output_truncated`,
+`counting_basis:"received_locations_including_duplicates"`, and `limits`.
+
+Processing stops before exceeding 100000 locations, 8388608 aggregate UTF-8 URI
+bytes, or 10000 distinct matching URIs. With `counts_complete:false`, group
+counts, `matched_count`, and `file_count` are lower bounds for the received array.
+These counts never guarantee complete workspace coverage. Group limits alone do
+not make counts incomplete. `output_truncated:true` means known groups were
+omitted by `limit` or the byte budget. Top-level `truncated:true` also covers
+incomplete processing. An empty provider response retains `index_coverage`;
+a nonempty response emptied by filtering does not.
+
+The compact UTF-8 JSON for the entire `file_summary`, including example context
+and source, is limited to 65536 bytes. Output keeps a prefix of whole groups.
+Only selected examples receive normalization and optional enrichment; final byte
+trimming can omit some selected groups. Existing source and context limits apply.
+The `limits` fields are `max_processed_locations`, `max_uri_bytes`, `max_files`,
+and `max_output_bytes`, with the values above. This bounds additional local work
+and output; it does not bound the already received LSP response or backend work.
+
+For a supported file URI, `file_path` is an absolute lexical path. Query files
+first, then pass the chosen `file_path` as `path_filter` with `mode:"locations"`
+to inspect details. For example, use `{"mode":"files","limit":5}` with your
+symbol address, then add `{"path_filter":"/work/app/src/usage.rs"}` to a new
+locations query. URI aliases can map to the same filter path. Unsupported URIs
+remain visible with `file_path:null` and
+`path_filter_unavailable:"unsupported_uri"`. This also applies when the decoded
+path cannot be represented as a UTF-8 JSON string. Requested source failures remain
+explicit. Source and positions do not form an atomic snapshot.
+
+### Optional navigation source
+
+`get_definition`, `go_to_implementation`, `go_to_type_definition`, and
+`go_to_declaration` accept `include_source` (boolean, default `false`).
+Declaration remains position-only; the other three also accept symbol names.
+
+```json
+{"file_path":"/work/app/src/billing.rs","symbol_name":"process_payment","include_source":true}
+```
+
+Every retained location then has `source.status` equal to `text` or `unavailable`.
+Text includes `text`, `start_line` (1-based), `origin` (`tracked` or `disk`),
+`sha256`, and `shortened`. The lowercase SHA-256 identifies the complete unredacted
+observed file bytes, including bytes outside the excerpt. It does not identify
+an analyzed snapshot or prove current disk freshness. Tracked source takes
+precedence over a contained disk read; duplicate canonical files share one observation.
+
+The preferred window includes the location's starting line and up to two lines
+on each side. Columns and the location's ending line do not select source.
+Original UTF-8 and LF, CRLF, and CR separators remain, except configured secret
+redaction. No final newline is added. Empty source has line 1; a final separator
+permits a trailing empty line. File boundaries alone do not set `shortened`.
+When the window cannot fit, the whole target line is tried with `shortened:true`.
+The excerpt never guarantees a complete definition body.
+
+Limits per request are 100 candidate positions, 16 distinct attempted files,
+1 MiB per complete file, 4 MiB aggregate acquisition/copy allowance including
+charged growth lookahead, 2 KiB per excerpt, 64 KiB total finally redacted text,
+and 2 MiB added compact JSON. Failed reads can reserve allowance conservatively.
+The best-effort two-second deadline stops new acquisition and read chunks;
+an in-flight OS operation can overrun it. These limits do not bound the original
+LSP request or total response time. Final configured secret redaction preserves
+the same text limits, with whole-line fallback or an unavailable outcome.
+
+Unavailable outcomes contain only `status` and `reason`: `candidate_limit`,
+`file_limit`, `source_budget`, `text_budget`, `deadline`, `access_denied`,
+`read_failed`, `file_too_large`, `invalid_utf8`, or `line_unavailable`.
+They respectively mean the candidate cap, file cap, acquisition allowance,
+display allowance, deadline, containment authorization, file I/O, file size,
+UTF-8 decoding, or source line prevented text. Candidate positions beyond 100
+always report `candidate_limit`. Partial successes and failures coexist.
+
+The selected workspace context authorizes source; external paths, non-file URIs,
+and symlink escapes yield `access_denied`. Lexical `out_of_workspace` remains
+advisory. Source failures preserve locations, order, duplicates, ranges,
+`resolved_symbol`, enclosing context, `positions_degraded`, and `truncated`.
+Disabled source omits the field and additional acquisition, copying, and hashing.
+Source alone adds no LSP opens or semantic requests. Observations are read-only
+and have no atomic consistency guarantee with LSP locations or later reads.
+
+`get_tool_support` is an optional diagnostic aid.
 
 ## Prerequisites
 

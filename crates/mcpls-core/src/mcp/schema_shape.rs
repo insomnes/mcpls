@@ -7,7 +7,10 @@
 //! text: rustdoc sections and code fences are cut, a description keeps its
 //! first paragraph up to a byte cap (whole sentences, or nothing), and a
 //! definition that several tools carry keeps only a one-line form. It changes `description` annotations only, so
-//! property names, types, `required` lists and `$ref`s are untouched.
+//! property names and validation constraints are preserved. Explicit compatibility
+//! shaping also repeats shared object fields in the affected union branches.
+//! Completion, reference, hierarchy and edit tools omit output descriptions to keep source outcomes
+//! and previews within the tool-size budget; tool descriptions explain the fields.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -188,9 +191,421 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
     let usage = DefinitionUsage::count(&tools);
     for tool in &mut tools {
         shape_schema(Arc::make_mut(&mut tool.input_schema), &usage);
-        if let Some(output) = tool.output_schema.as_mut() {
-            shape_schema(Arc::make_mut(output), &usage);
+        if matches!(
+            tool.name.as_ref(),
+            "get_symbol_context"
+                | "get_references"
+                | "get_incoming_calls"
+                | "get_outgoing_calls"
+                | "get_supertypes"
+                | "get_subtypes"
+                | "get_completions"
+                | "workspace_symbol_search"
+                | "get_definition"
+                | "go_to_implementation"
+                | "go_to_type_definition"
+                | "go_to_declaration"
+        ) {
+            // The tool description explains addressing and completion options.
+            // Retain the structural schema.
+            let conventions = tool.input_schema.get("properties").cloned();
+            let mut schema = Schema::from(std::mem::take(Arc::make_mut(&mut tool.input_schema)));
+            RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
+                .transform(&mut schema);
+            if let Value::Object(mut shaped) = Value::from(schema) {
+                if matches!(
+                    tool.name.as_ref(),
+                    "get_definition"
+                        | "get_incoming_calls"
+                        | "get_outgoing_calls"
+                        | "go_to_implementation"
+                        | "go_to_type_definition"
+                        | "go_to_declaration"
+                ) {
+                    // Keep absolute-path and coordinate conventions at the input boundary.
+                    let fields: &[&str] = if matches!(
+                        tool.name.as_ref(),
+                        "get_incoming_calls" | "get_outgoing_calls"
+                    ) {
+                        &["file_path", "line", "character", "item", "symbol_target"]
+                    } else {
+                        &["file_path", "line", "character"]
+                    };
+                    for field in fields {
+                        if let Some(description) = conventions
+                            .as_ref()
+                            .and_then(|p| p.get(*field))
+                            .and_then(|p| p.get("description"))
+                            .cloned()
+                            && let Some(Value::Object(property)) =
+                                shaped.get_mut("properties").and_then(|p| p.get_mut(*field))
+                        {
+                            property.insert("description".into(), description);
+                        }
+                    }
+                }
+                *Arc::make_mut(&mut tool.input_schema) = shaped;
+            }
         }
+
+        shape_output_schema(tool, &usage);
+        shape_client_contract(tool);
+    }
+}
+
+/// Compact output annotations while retaining the workspace containment warning.
+fn shape_output_schema(tool: &mut Tool, usage: &DefinitionUsage) {
+    if let Some(output) = tool.output_schema.as_mut() {
+        shape_schema(Arc::make_mut(output), usage);
+        if matches!(
+            tool.name.as_ref(),
+            "get_symbol_context"
+                | "get_hover"
+                | "workspace_symbol_search"
+                | "get_document_symbols"
+                | "get_document_outline"
+                | "get_document_highlights"
+                | "get_definition"
+                | "go_to_implementation"
+                | "go_to_type_definition"
+                | "go_to_declaration"
+                | "get_references"
+                | "get_incoming_calls"
+                | "get_outgoing_calls"
+                | "get_supertypes"
+                | "get_subtypes"
+                | "rename_symbol"
+                | "format_document"
+                | "format_range"
+                | "get_code_actions"
+                | "get_completions"
+                | "get_cached_diagnostics"
+                | "get_diagnostics"
+        ) {
+            // Bounded results add metadata whose descriptions repeat the tool guidance.
+            // Keep its structural contract; field meanings are in the tool description.
+            let containment = output
+                .get("$defs")
+                .and_then(|defs| defs.pointer("/Location/properties/out_of_workspace/description"))
+                .cloned();
+            let mut schema = Schema::from(std::mem::take(Arc::make_mut(output)));
+            RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
+                .transform(&mut schema);
+            if let Value::Object(mut shaped) = Value::from(schema) {
+                if tool.name == "workspace_symbol_search"
+                    && let Some(description) = containment
+                    && let Some(property) = shaped
+                        .get_mut("$defs")
+                        .and_then(|defs| defs.pointer_mut("/Location/properties/out_of_workspace"))
+                        .and_then(Value::as_object_mut)
+                {
+                    property.insert("description".into(), description);
+                }
+                *Arc::make_mut(output) = shaped;
+            }
+        }
+    }
+}
+
+/// Keep each affected union alternative self-contained for clients that render
+/// composition branches without their sibling object fields. These are the
+/// concrete flattened DTOs in the public tool contract, not a general rewrite.
+fn shape_client_contract(tool: &mut Tool) {
+    if tool.name == "get_diagnostics" {
+        let input = Arc::make_mut(&mut tool.input_schema);
+        let properties = input.get("properties").cloned();
+        distribute_object_fields(input);
+        if let Some(properties) = properties {
+            input.insert("properties".into(), properties);
+        }
+    }
+    let Some(output) = tool.output_schema.as_mut() else {
+        return;
+    };
+    let output = Arc::make_mut(output);
+    if matches!(tool.name.as_ref(), "get_tool_support" | "restart_server") {
+        // Tool descriptions explain these bounded result fields. Keep the
+        // restart coalescing fact, which is specific to the individual entry.
+        let coalesced = output
+            .get("$defs")
+            .and_then(|v| v.pointer("/ServerRestartEntry/oneOf/0/properties/coalesced/description"))
+            .cloned();
+        let refusal = output
+            .get("$defs")
+            .and_then(|v| v.pointer("/RestartFailure/oneOf/0/description"))
+            .cloned();
+        let mut schema = Schema::from(std::mem::take(output));
+        RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0))).transform(&mut schema);
+        if let Value::Object(shaped) = Value::from(schema) {
+            *output = shaped;
+        }
+        for (description, pointer) in [
+            (
+                coalesced,
+                "/ServerRestartEntry/oneOf/0/properties/coalesced",
+            ),
+            (refusal, "/RestartFailure/oneOf/0"),
+        ] {
+            if let Some(description) = description
+                && let Some(object) = output
+                    .get_mut("$defs")
+                    .and_then(|definitions| definitions.pointer_mut(pointer))
+                    .and_then(Value::as_object_mut)
+            {
+                object.insert("description".into(), description);
+            }
+        }
+    }
+
+    let path: &[&str] = match tool.name.as_ref() {
+        "get_incoming_calls" | "get_outgoing_calls" => &["$defs", "Indexed"],
+        "get_tool_support" => &["$defs", "RouteShape"],
+        "workspace_symbol_search" => &["$defs", "ServerOutcome"],
+        "restart_server" => &["$defs", "ServerRestartEntry"],
+        "rename_symbol" => &[],
+        "get_diagnostics" => &["anyOf", "1", "properties", "results", "items"],
+        _ => return,
+    };
+    let mut value = Value::Object(std::mem::take(output));
+    let pointer = path.iter().fold(String::new(), |mut path, part| {
+        path.push('/');
+        path.push_str(part);
+        path
+    });
+    if let Some(object) = value.pointer_mut(&pointer).and_then(Value::as_object_mut) {
+        distribute_object_fields(object);
+    }
+    if matches!(
+        tool.name.as_ref(),
+        "get_incoming_calls" | "get_outgoing_calls"
+    ) {
+        // Inline only the preparation branch's finite leaves. Expanding every
+        // reference would duplicate unrelated call results and exceed the budget.
+        let definitions = value.get("$defs").cloned().unwrap_or_default();
+        if let Some(preparation) = value.pointer_mut("/$defs/Indexed/anyOf/1") {
+            for name in ["PreparationStatus", "PositionDegradation", "HierarchyItem"] {
+                if let Some(definition) = definitions.get(name) {
+                    inline_leaf_reference(preparation, &format!("#/$defs/{name}"), definition);
+                }
+            }
+            if let Some(selection) =
+                preparation.pointer_mut("/properties/items/items/properties/selectionRange")
+                && let (Some(range), Some(position)) =
+                    (definitions.get("Range"), definitions.get("Position2D"))
+            {
+                *selection = range.clone();
+                inline_leaf_reference(selection, "#/$defs/Position2D", position);
+            }
+        }
+    }
+    repair_finite_client_leaves(&mut value, tool.name.as_ref());
+    if let Value::Object(shaped) = value {
+        *output = shaped;
+    }
+}
+
+/// Repair only the finite leaves demonstrated to lose types in client readback.
+fn repair_finite_client_leaves(value: &mut Value, tool: &str) {
+    let enum_paths: &[&str] = if tool == "get_diagnostics" {
+        for (name, owner) in [
+            (
+                "DiagnosticSeverity",
+                "/$defs/ContextualDiagnostic/properties/severity",
+            ),
+            (
+                "EnrichmentSummary",
+                "/$defs/DiagnosticsReport/properties/enrichment",
+            ),
+            (
+                "DiagnosticsOrigin",
+                "/$defs/DiagnosticsReport/properties/origin",
+            ),
+            (
+                "PositionDegradation",
+                "/$defs/DiagnosticsReport/properties/positions_degraded",
+            ),
+        ] {
+            let definition = value.pointer(&format!("/$defs/{name}")).cloned();
+            if let Some(definition) = definition
+                && let Some(property) = value.pointer_mut(owner)
+                && property.as_object().is_some_and(|object| object.len() == 1)
+                && property.get("$ref").and_then(Value::as_str)
+                    == Some(format!("#/$defs/{name}").as_str())
+            {
+                *property = definition;
+                if let Some(definitions) = value.get_mut("$defs").and_then(Value::as_object_mut) {
+                    definitions.remove(name);
+                }
+            }
+        }
+        for (branch, forbidden) in [(0, "error"), (1, "report")] {
+            if let Some(properties) = value
+                .pointer_mut(&format!(
+                    "/anyOf/1/properties/results/items/oneOf/{branch}/properties"
+                ))
+                .and_then(Value::as_object_mut)
+            {
+                // The retained `not: {required: ...}` constraint forbids this
+                // property; listing it would add an impossible union member.
+                properties.remove(forbidden);
+            }
+        }
+        &[
+            "/$defs/ContextualDiagnostic/properties/severity",
+            "/$defs/DiagnosticsAvailability",
+            "/$defs/DiagnosticsReport/properties/origin",
+            "/$defs/DiagnosticsReport/properties/positions_degraded",
+            "/$defs/NotComputedReason",
+            "/$defs/SymbolFidelity",
+            "/$defs/UnavailableReason",
+        ]
+    } else if matches!(tool, "get_incoming_calls" | "get_outgoing_calls") {
+        let position = value.pointer("/$defs/Position2D").cloned();
+        let source = value.pointer("/$defs/PositionSource").cloned();
+        let resolved = value.pointer("/$defs/ResolvedSymbol").cloned();
+        if let Some(position) = position
+            && let Some(source) = source
+            && let Some(mut resolved) = resolved
+        {
+            if let Some(start) = value.pointer_mut("/$defs/Range/properties/start") {
+                *start = position.clone();
+            }
+            if let Some(field) = resolved.pointer_mut("/properties/position") {
+                *field = position;
+            }
+            if let Some(field) = resolved.pointer_mut("/properties/position_source") {
+                *field = source;
+            }
+            if let Some(field) =
+                value.pointer_mut("/$defs/Indexed/anyOf/1/properties/resolved_symbol/anyOf/0")
+            {
+                *field = resolved;
+            }
+        }
+        &[
+            "/$defs/Indexed/anyOf/1/properties/positions_degraded/anyOf/0",
+            "/$defs/Indexed/anyOf/1/properties/resolved_symbol/anyOf/0/properties/position_source",
+            "/$defs/Indexed/anyOf/1/properties/status",
+            "/$defs/PositionDegradation",
+            "/$defs/PositionSource",
+            "/$defs/PreparationStatus",
+        ]
+    } else {
+        return;
+    };
+    compact_known_string_enums(value, enum_paths);
+}
+
+fn compact_known_string_enums(value: &mut Value, enum_paths: &[&str]) {
+    for path in enum_paths {
+        let Some(object) = value.pointer_mut(path).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let Some(branches) = object.get("oneOf").and_then(Value::as_array) else {
+            continue;
+        };
+        // Distinct string constants make oneOf and enum equivalent. Do not
+        // rewrite annotated or constrained branches, or a different root type.
+        if branches.is_empty() || object.get("type").is_some_and(|kind| kind != "string") {
+            continue;
+        }
+        let literals: Option<Vec<Value>> = branches
+            .iter()
+            .map(|branch| {
+                let branch = branch.as_object()?;
+                if branch.len() != 2 || branch.get("type")?.as_str()? != "string" {
+                    return None;
+                }
+                Some(Value::String(branch.get("const")?.as_str()?.to_owned()))
+            })
+            .collect();
+        let Some(literals) = literals else { continue };
+        let unique: BTreeSet<&str> = literals.iter().filter_map(Value::as_str).collect();
+        if unique.len() != literals.len() {
+            continue;
+        }
+        object.remove("oneOf");
+        object.insert("type".into(), Value::String("string".into()));
+        object.insert("enum".into(), Value::Array(literals));
+    }
+}
+
+fn distribute_object_fields(object: &mut JsonObject) {
+    let key = if object.contains_key("oneOf") {
+        "oneOf"
+    } else {
+        "anyOf"
+    };
+    let Some(Value::Array(mut branches)) = object.remove(key) else {
+        return;
+    };
+    let properties = object
+        .remove("properties")
+        .and_then(|p| p.as_object().cloned())
+        .unwrap_or_default();
+    let required = object
+        .remove("required")
+        .and_then(|r| r.as_array().cloned())
+        .unwrap_or_default();
+    for branch in &mut branches {
+        let Some(branch) = branch.as_object_mut() else {
+            continue;
+        };
+        branch.insert("type".into(), Value::String("object".into()));
+        if let Some(additional) = object.get("additionalProperties") {
+            branch.insert("additionalProperties".into(), additional.clone());
+        }
+        let Some(fields) = branch
+            .entry("properties")
+            .or_insert_with(|| Value::Object(JsonObject::new()))
+            .as_object_mut()
+        else {
+            continue;
+        };
+        for (name, schema) in &properties {
+            // status already has a narrower const in diagnostic outcome branches.
+            fields.entry(name.clone()).or_insert_with(|| schema.clone());
+        }
+        if !required.is_empty() {
+            let Some(fields) = branch
+                .entry("required")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+            else {
+                continue;
+            };
+            for field in &required {
+                if !fields.contains(field) {
+                    fields.push(field.clone());
+                }
+            }
+        }
+    }
+    object.insert(key.into(), Value::Array(branches));
+}
+
+fn inline_leaf_reference(value: &mut Value, reference: &str, definition: &Value) {
+    match value {
+        Value::Object(object) => {
+            if object.get("$ref").and_then(Value::as_str) == Some(reference) {
+                object.remove("$ref");
+                if let Some(fields) = definition.as_object() {
+                    for (key, field) in fields {
+                        object.entry(key.clone()).or_insert_with(|| field.clone());
+                    }
+                }
+            } else {
+                for child in object.values_mut() {
+                    inline_leaf_reference(child, reference, definition);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                inline_leaf_reference(child, reference, definition);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -389,8 +804,9 @@ mod tests {
 
     use super::super::server::McplsServer;
 
-    /// Total serialized `tools` array budget (compact bytes).
-    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 139_000;
+    /// Total serialized `tools` array budget, including local feedback.
+    // One added tool gets the existing 9,000-byte per-tool allowance.
+    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 160_000;
     /// Largest serialized single `Tool` (compact bytes).
     const TOOL_BUDGET_BYTES: usize = 9_000;
     /// Sum of all schema `description` bytes.
@@ -625,18 +1041,67 @@ mod tests {
     #[test]
     fn test_no_output_schema_is_closed() {
         let mut violations = Vec::new();
+        let mut target_records = 0;
         for tool in shaped_tools() {
             let Some(output) = tool.output_schema.as_deref() else {
                 continue;
             };
+            // Delta's reusable input records and exact outcome variants remain closed.
+            // Its output root follows the catalog's additive evolution convention.
+            if tool.name == "diagnostics_delta" {
+                assert_ne!(
+                    output.get("additionalProperties"),
+                    Some(&Value::Bool(false))
+                );
+                continue;
+            }
             let mut found = Vec::new();
             object_schemas_with_openness(&Value::Object(output.clone()), "", false, &mut found);
+            let target_path = match tool.name.as_ref() {
+                "get_definition" | "get_document_outline" | "workspace_symbol_search" => {
+                    Some("/$defs/SymbolTargetEnvelope")
+                }
+                "get_symbol_context" => Some("/properties/symbol_target"),
+                _ => None,
+            };
+            if let Some(path) = target_path {
+                let schema = Value::Object(output.clone());
+                let target = schema
+                    .pointer(path)
+                    .expect("producer declares its reusable target");
+                assert_eq!(target["type"], "object");
+                assert_eq!(target["additionalProperties"], false);
+                let properties = target["properties"].as_object().unwrap();
+                assert_eq!(
+                    properties
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from(["file_path", "symbol_ref"])
+                );
+                for field in ["file_path", "symbol_ref"] {
+                    assert_eq!(properties[field]["type"], "string");
+                }
+                let required = target["required"].as_array().unwrap();
+                assert_eq!(required.len(), 2);
+                assert_eq!(
+                    required
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from(["file_path", "symbol_ref"])
+                );
+                assert!(found.iter().any(|closed| closed == path));
+                found.retain(|closed| closed != path);
+                target_records += 1;
+            }
             violations.extend(
                 found
                     .into_iter()
                     .map(|path| format!("{}: {path}", tool.name)),
             );
         }
+        assert_eq!(target_records, 4);
         assert!(
             violations.is_empty(),
             "output schema objects closed to additional properties:\n{}",
@@ -661,14 +1126,62 @@ mod tests {
         }
     }
 
+    /// Public discovery must expose complete alternatives without weakening
+    /// the diagnostics selector or outcome constraints.
     #[test]
-    fn test_shaping_changes_only_description_annotations() {
+    fn test_discovered_diagnostics_alternatives_expose_named_fields() {
+        let tools = shaped_tools();
+        let tool = tools.iter().find(|t| t.name == "get_diagnostics").unwrap();
+        let input = serde_json::to_value(&tool.input_schema).unwrap();
+        for branch in input["oneOf"].as_array().unwrap() {
+            for field in ["file_path", "file_paths", "context"] {
+                assert!(branch["properties"].get(field).is_some(), "{field}");
+            }
+        }
+        let output = serde_json::to_value(&tool.output_schema).unwrap();
+        for branch in output["anyOf"][1]["properties"]["results"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+        {
+            let outcome = branch["properties"]["status"]["const"].as_str().unwrap();
+            let (present, forbidden) = if outcome == "ok" {
+                ("report", "error")
+            } else {
+                ("error", "report")
+            };
+            assert!(branch["properties"].get(present).is_some());
+            assert!(branch["properties"].get(forbidden).is_none());
+            for field in [
+                "input_index",
+                "file_path",
+                "status",
+                "truncated",
+                "omitted_diagnostics",
+            ] {
+                assert!(branch["properties"].get(field).is_some(), "{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_unaffected_schemas_change_only_description_annotations() {
         let unshaped = McplsServer::unshaped_tool_router().list_all();
         let shaped = shaped_tools();
         assert_eq!(unshaped.len(), shaped.len());
         for (before, after) in unshaped.iter().zip(&shaped) {
             assert_eq!(before.name, after.name);
             assert_eq!(before.description, after.description, "{}", before.name);
+            if matches!(
+                before.name.as_ref(),
+                "get_diagnostics"
+                    | "get_incoming_calls"
+                    | "get_outgoing_calls"
+                    | "get_tool_support"
+                    | "rename_symbol"
+                    | "restart_server"
+            ) {
+                continue;
+            }
             for (old, new) in schemas_of(before).zip(schemas_of(after)) {
                 assert_eq!(
                     without_annotations(&Value::Object(old.clone())),
@@ -719,7 +1232,51 @@ mod tests {
         };
         let mut lost = Vec::new();
         for (before, after) in unshaped.iter().zip(&shaped) {
-            for (old, new) in schemas_of(before).zip(schemas_of(after)) {
+            for (schema_index, (old, new)) in schemas_of(before).zip(schemas_of(after)).enumerate()
+            {
+                // These rich output schemas use explicit dropping, not truncation.
+                if matches!(
+                    before.name.as_ref(),
+                    "get_supertypes"
+                        | "get_incoming_calls"
+                        | "get_outgoing_calls"
+                        | "get_subtypes"
+                        | "get_completions"
+                        | "get_definition"
+                        | "go_to_implementation"
+                        | "go_to_type_definition"
+                        | "go_to_declaration"
+                ) || schema_index == 0
+                    && matches!(
+                        before.name.as_ref(),
+                        "get_symbol_context" | "get_references"
+                    )
+                    || schema_index == 1
+                        && matches!(
+                            before.name.as_ref(),
+                            "get_document_symbols"
+                                | "get_hover"
+                                | "workspace_symbol_search"
+                                | "get_document_outline"
+                                | "get_document_highlights"
+                                | "get_definition"
+                                | "go_to_implementation"
+                                | "go_to_type_definition"
+                                | "go_to_declaration"
+                                | "get_references"
+                                | "get_incoming_calls"
+                                | "get_outgoing_calls"
+                                | "rename_symbol"
+                                | "format_document"
+                                | "format_range"
+                                | "get_code_actions"
+                                | "get_diagnostics"
+                                | "get_tool_support"
+                                | "restart_server"
+                        )
+                {
+                    continue;
+                }
                 let mut kept = BTreeSet::new();
                 for_each_description(&Value::Object(new.clone()), "", &mut |path, _| {
                     kept.insert(path.to_owned());

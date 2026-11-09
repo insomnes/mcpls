@@ -324,7 +324,7 @@ fn home_overrides(
 /// The server learns the workspace from `workspaceFolders`, not from its working
 /// directory; starting in the checkout would let a name lookup or a relative
 /// path resolve into it.
-fn untrusted_working_dir(
+pub fn untrusted_working_dir(
     boundary: &WorkspaceRoots,
     login_home: Option<&Path>,
 ) -> Result<ChildWorkingDir, UntrustedRefusal> {
@@ -380,7 +380,43 @@ pub fn plan_server_starts(
     roots: &WorkspaceRoots,
     redactions: &Arc<Redactions>,
 ) -> StartPlan {
-    let mode = PlanMode::of(config, roots);
+    plan_in_mode(config, roots, redactions, &PlanMode::of(config, roots))
+}
+
+pub fn plan_server_starts_scoped(
+    config: &ServerConfig,
+    roots: &WorkspaceRoots,
+    redactions: &Arc<Redactions>,
+    boundary: Option<&[PathBuf]>,
+) -> crate::error::Result<StartPlan> {
+    let mut mode = PlanMode::of(config, roots);
+    if let (
+        PlanMode::Untrusted {
+            boundary: trust_boundary,
+            ..
+        },
+        Some(boundary),
+    ) = (&mut mode, boundary)
+    {
+        let configured = boundary
+            .iter()
+            .cloned()
+            .map(crate::config::ConfiguredRoot::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| {
+                crate::error::ConfigError::Dispatcher("invalid execution boundary".into())
+            })?;
+        *trust_boundary = WorkspaceRoots::from_configured(&configured)?;
+    }
+    Ok(plan_in_mode(config, roots, redactions, &mode))
+}
+
+fn plan_in_mode(
+    config: &ServerConfig,
+    roots: &WorkspaceRoots,
+    redactions: &Arc<Redactions>,
+    mode: &PlanMode,
+) -> StartPlan {
     let markers = MarkerScan::collect(
         roots.canonical(),
         &config.lsp_servers,
@@ -396,7 +432,7 @@ pub fn plan_server_starts(
             continue;
         }
 
-        let admitted = admit(config, lsp_config, roots, &mode, redactions);
+        let admitted = admit(config, lsp_config, roots, mode, redactions);
         match admitted {
             Ok(init) => plan.admitted.push(init),
             Err((command, refusal)) => plan.refused.push(refused(lsp_config, command, refusal)),
@@ -533,6 +569,7 @@ mod plan_tests {
 
     fn config_with(servers: Vec<LspServerConfig>, trust: WorkspaceTrust) -> ServerConfig {
         ServerConfig {
+            dispatcher: None,
             lsp_servers: servers,
             workspace_trust: trust,
             ..ServerConfig::default()
@@ -2565,6 +2602,7 @@ mod refusal_spawn_tests {
             outside,
             marker,
             config: ServerConfig {
+                dispatcher: None,
                 lsp_servers: vec![server],
                 workspace_trust: trust,
                 ..ServerConfig::default()
@@ -2769,6 +2807,7 @@ mod windows_spawn_tests {
             .unwrap()
             .into();
         let config = ServerConfig {
+            dispatcher: None,
             lsp_servers: vec![server],
             workspace_trust: WorkspaceTrust::untrusted([ServerId::from_static("rust")]),
             ..ServerConfig::default()

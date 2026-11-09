@@ -235,7 +235,7 @@ jobs:
   publish-registry:
     name: Publish to MCP Registry
     needs: [publish-crates]
-    if: ${{ !contains(github.ref_name, '-') }}
+    if: false # Fork registry publication is disabled.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

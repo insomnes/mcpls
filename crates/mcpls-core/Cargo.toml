@@ -16,15 +16,20 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }
 futures = { workspace = true }
+globset = { workspace = true }
 http-body = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, optional = true, features = ["service", "tokio"] }
 ignore = { workspace = true }
 lsp-types = { workspace = true }
+regex = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
 schemars = { workspace = true, features = ["chrono04"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+similar = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["codec", "rt"] }
@@ -51,6 +56,7 @@ winapi-util = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 proptest = { workspace = true }
+regex = { workspace = true }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 rstest = { workspace = true }
 tempfile = { workspace = true }

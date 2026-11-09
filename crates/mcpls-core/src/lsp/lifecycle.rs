@@ -25,8 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::bridge::{WorkspaceRoots, try_path_to_uri};
 use crate::config::{
-    InitializationOptions, LspServerConfig, LspSettings, PositionEncodings, ServerCommand,
-    launch_defaults,
+    LspServerConfig, LspSettings, PositionEncodings, ServerCommand, launch_defaults,
 };
 use crate::error::{
     BackgroundTask, Error, InitFailureHint, InitPhase, Result, ServerSpawnFailure, StartupFailure,
@@ -325,6 +324,7 @@ impl std::ops::Deref for VettedInitConfig {
 /// [`LspServerConfig`] this was built from.
 #[derive(Debug, Clone)]
 pub struct ServerInitConfig {
+    pub(crate) watching: Option<Arc<super::watching::Backend>>,
     server_config: LspServerConfig,
     workspace_roots: WorkspaceRoots,
     position_encodings: PositionEncodings,
@@ -334,6 +334,9 @@ pub struct ServerInitConfig {
     /// a respawn can tell a pin that went stale (the install moved) from the
     /// user's own `tsserver.path`, which is never second-guessed.
     auto_pin: Option<PathBuf>,
+    start_limits: Vec<Arc<tokio::sync::Semaphore>>,
+    dispatcher_attempt: Option<Arc<tokio::sync::Mutex<Option<Instant>>>>,
+    dispatcher_pid: Option<Arc<std::sync::atomic::AtomicU32>>,
     trust: SpawnTrust,
 }
 
@@ -380,11 +383,15 @@ impl ServerInitConfig {
     ) -> Self {
         Self {
             server_config,
+            watching: None,
             workspace_roots,
             position_encodings,
             redactions,
             child_working_dir: ChildWorkingDir::Inherit,
             auto_pin: None,
+            start_limits: Vec::new(),
+            dispatcher_attempt: None,
+            dispatcher_pid: None,
             trust: SpawnTrust::Trusted,
         }
     }
@@ -478,6 +485,17 @@ impl ServerInitConfig {
     #[must_use]
     pub fn with_child_working_dir(mut self, dir: ChildWorkingDir) -> Self {
         self.child_working_dir = dir;
+        self
+    }
+
+    pub(crate) fn with_dispatcher_limits(
+        mut self,
+        limits: Vec<Arc<tokio::sync::Semaphore>>,
+        pid: Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
+        self.start_limits = limits;
+        self.dispatcher_attempt = Some(Arc::new(tokio::sync::Mutex::new(None)));
+        self.dispatcher_pid = Some(pid);
         self
     }
 
@@ -679,6 +697,18 @@ pub fn child_env_var(
 }
 
 impl LspServer {
+    pub(crate) fn watching_error(&self) -> Option<String> {
+        self.init_config
+            .watching
+            .as_ref()
+            .and_then(|backend| backend.check().err())
+            .map(|error| error.to_string())
+    }
+
+    pub(crate) fn dispatcher_connection(&self) -> String {
+        format!("{:?}", self.client.connection_id())
+    }
+
     /// The config this server was spawned from.
     pub(crate) const fn init_config(&self) -> &ServerInitConfig {
         &self.init_config
@@ -711,6 +741,35 @@ impl LspServer {
     /// - The `initialized` or `workspace/didChangeConfiguration` notification
     ///   cannot be written ([`Error::LspInitFailed`])
     pub async fn spawn(config: ServerInitConfig) -> Result<SpawnedServer> {
+        if let Some(attempt) = &config.dispatcher_attempt {
+            let mut last = attempt.lock().await;
+            if let Some(at) = *last
+                && let Some(delay) = Duration::from_secs(5).checked_sub(at.elapsed())
+            {
+                tokio::time::sleep(delay).await;
+            }
+            *last = Some(Instant::now());
+        }
+        let mut permits = Vec::with_capacity(config.start_limits.len());
+        for limit in &config.start_limits {
+            permits.push(
+                limit
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| Error::ServerTerminated)?,
+            );
+        }
+        let result = Box::pin(Self::spawn_admitted(config)).await;
+        drop(permits);
+        result
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "spawn retains child ownership through all initialization error paths"
+    )]
+    async fn spawn_admitted(config: ServerInitConfig) -> Result<SpawnedServer> {
         // Repeated on purpose: a workspace file can become executable between plan and spawn (#736).
         config.vet_arguments_off_runtime().await?;
         let own = Redactions::for_server(config.server_config(), current_environment());
@@ -750,6 +809,10 @@ impl LspServer {
         let mut child = ServerProcess::spawn(command)
             .map_err(|e| spawn_error(config.server_config.command.server_command().clone(), e))?;
 
+        if let Some(pid) = &config.dispatcher_pid {
+            child.observe_pid(pid.clone());
+        }
+
         let stdin = child
             .take_stdin()
             .ok_or(Error::StdioCapture(StdioStream::Stdin))?;
@@ -762,7 +825,11 @@ impl LspServer {
             .ok_or(Error::StdioCapture(StdioStream::Stderr))?;
         let stderr_capture = StderrCapture::start(stderr);
 
-        let transport = LspTransport::with_redactions(stdin, stdout, Arc::clone(&redactions));
+        let mut transport = LspTransport::with_redactions(stdin, stdout, Arc::clone(&redactions));
+        if let Some(backend) = &config.watching {
+            backend.check()?;
+            transport.0.watching = Some(super::watching::Registrations::new(backend.clone()));
+        }
         let (notification_tx, notification_rx) = mpsc::channel(NOTIFICATION_CHANNEL_CAPACITY);
         let (notification_sink, publish_rx) = NotificationSink::new(notification_tx);
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(LIFECYCLE_CHANNEL_CAPACITY);
@@ -1102,6 +1169,21 @@ impl LspServer {
         }
     }
 
+    fn configured_capabilities(config: &ServerInitConfig) -> Result<ClientCapabilities> {
+        let mut capabilities = Self::client_capabilities(
+            &config.position_encodings,
+            config.server_config.settings.as_ref(),
+        );
+        if config.watching.is_some()
+            && let Some(workspace) = capabilities.workspace.as_mut()
+        {
+            workspace.did_change_watched_files = Some(serde_json::from_value(
+                serde_json::json!({"dynamicRegistration":true,"relativePatternSupport":false}),
+            )?);
+        }
+        Ok(capabilities)
+    }
+
     /// Perform LSP initialization handshake.
     ///
     /// Sends initialize request and waits for response, then sends the
@@ -1156,16 +1238,13 @@ impl LspServer {
                 deprecated,
                 reason = "`root_uri` is deprecated but the struct literal must still set it"
             )]
-            root_uri: None,
-            initialization_options: config
-                .server_config()
-                .initialization_options
-                .clone()
-                .map(InitializationOptions::into_value),
-            capabilities: Self::client_capabilities(
-                &config.position_encodings,
-                config.server_config.settings.as_ref(),
-            ),
+            root_uri: if config.dispatcher_attempt.is_some() {
+                workspace_folders.first().map(|folder| folder.uri.clone())
+            } else {
+                None
+            },
+            initialization_options: config.server_config().initialization_options.clone(),
+            capabilities: Self::configured_capabilities(config)?,
             client_info: Some(ClientInfo {
                 name: "mcpls".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),

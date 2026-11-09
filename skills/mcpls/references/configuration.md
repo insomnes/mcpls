@@ -16,6 +16,7 @@ independent, defaulting to mcpls's built-in text when omitted. `serverInfo.name`
 | `title` | string | `"MCPLS - MCP to LSP Bridge"` | 128 bytes | Overrides `serverInfo.title`. |
 | `description` | string | crate's `Cargo.toml` description | 1024 bytes | Overrides `serverInfo.description`. |
 | `instructions` | string | built-in capability blurb | 4096 bytes | **Replaces** `ServerInfo.instructions` entirely — does not append to the built-in text. Read it at connection time instead of assuming the built-in blurb; see the note below. |
+| `tool_profile` | `"agent"` or `"full"` | `"agent"` | — | Static catalog: 31 default tools; `full` restores folding, selection ranges and standalone type preparation (34 tools). |
 | `tool_prefix` | string | unprefixed tool names | 32 bytes | Prefixes every tool name with `{tool_prefix}_`, so a client running multiple mcpls bridges can tell their tools apart. Charset `[A-Za-z0-9_-]`, must start/end with a letter or digit. |
 
 Limits are UTF-8 bytes, not characters, and apply to the raw configured string,
@@ -66,7 +67,7 @@ a few map many-to-one:
 | `implementation` | `go_to_implementation` |
 | `references` | `get_references` |
 | `diagnostics` | `get_diagnostics` (pull) **and** `get_cached_diagnostics` (same route serves both) |
-| `rename` | `rename_symbol`, `prepare_rename` |
+| `rename` | `rename_symbol` |
 | `completions` | `get_completions` |
 | `signature_help` | `get_signature_help` |
 | `document_symbols` | `get_document_symbols` |
@@ -76,7 +77,7 @@ a few map many-to-one:
 | `selection_range` | `get_selection_ranges` |
 | `folding_range` | `get_folding_ranges` |
 | `code_actions` | `get_code_actions` |
-| `call_hierarchy` | `prepare_call_hierarchy`, `get_incoming_calls`, `get_outgoing_calls`, sharing one route: an incoming/outgoing-calls lookup only makes sense against the server that produced the originating call-hierarchy item |
+| `call_hierarchy` | `get_incoming_calls`, `get_outgoing_calls`, sharing one route: direct caller/callee queries prepare internally; selected candidates and returned call items must be followed on the server that produced them |
 | `inlay_hints` | `get_inlay_hints` |
 | `type_hierarchy` | `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes`, sharing one route like call hierarchy |
 | `document_highlights` | `get_document_highlights` |

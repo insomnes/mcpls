@@ -30,8 +30,8 @@ use tracing::{debug, warn};
 
 use crate::bridge::WorkspaceRoots;
 use crate::bridge::resources::{
-    DiagnosticsResourceUri, MAX_LISTEN_STREAMS, MAX_SUBSCRIPTIONS, ResourceSubscriptions,
-    SubscriptionError, parse_uri,
+    DiagnosticsResourceUri, MAX_LISTEN_STREAMS, MAX_SUBSCRIPTIONS, ResolvedResource,
+    ResourceSubscriptions, SubscriptionError, parse_uri,
 };
 use crate::util::lock_std;
 
@@ -335,6 +335,7 @@ async fn run_delivery(
     pending: Arc<StdMutex<HashSet<DiagnosticsResourceUri>>>,
     doorbell: mpsc::Receiver<()>,
     state: Weak<SessionState>,
+    registry: SubscriptionRegistry,
 ) {
     let mut gate = Gate {
         pacer: target.is_paced().then(ListenPacer::new),
@@ -349,7 +350,7 @@ async fn run_delivery(
             let Some(uri) = take_one(&pending) else {
                 continue;
             };
-            if target.send(&uri, &mut gate).await.is_err() {
+            if !registry.is_valid().await || target.send(&uri, &mut gate).await.is_err() {
                 return;
             }
         }
@@ -369,6 +370,7 @@ fn take_one(pending: &StdMutex<HashSet<DiagnosticsResourceUri>>) -> Option<Diagn
 /// Subscription set and delivery channel of one MCP session.
 #[derive(Debug, Default)]
 pub struct SessionState {
+    subscription_mutations: Arc<tokio::sync::Mutex<()>>,
     subs: ResourceSubscriptions,
     delivery: OnceLock<Delivery>,
 }
@@ -439,6 +441,7 @@ impl SessionState {
         }
     }
 
+    #[cfg(test)]
     async fn subscribe(
         &self,
         canonical: DiagnosticsResourceUri,
@@ -513,15 +516,21 @@ impl ListenUris {
     ///
     /// Touches the filesystem; call from a blocking context.
     pub(crate) fn resolve(accepted: &[String], roots: &WorkspaceRoots) -> Self {
+        let resolved = accepted.iter().filter_map(|raw| {
+            DiagnosticsResourceUri::resolve(raw, roots)
+                .ok()
+                .map(|resolved| (raw.clone(), resolved))
+        });
+        Self::from_resolved(resolved)
+    }
+
+    /// Groups already approved canonical sources while retaining each caller URI.
+    pub(crate) fn from_resolved(
+        resolved: impl IntoIterator<Item = (String, ResolvedResource)>,
+    ) -> Self {
         let mut map: HashMap<DiagnosticsResourceUri, ListenEntry> = HashMap::new();
-        let mut dropped = 0_usize;
-        for raw in accepted {
-            let resolved = DiagnosticsResourceUri::resolve(raw, roots).ok();
-            let Some((resolved, lsp_uri)) = resolved.and_then(|resolved| {
-                let lsp_uri = crate::bridge::try_path_to_uri(&resolved.path)?;
-                Some((resolved, lsp_uri))
-            }) else {
-                dropped = dropped.saturating_add(1);
+        for (raw, resolved) in resolved {
+            let Some(lsp_uri) = crate::bridge::try_path_to_uri(&resolved.path) else {
                 continue;
             };
             map.entry(resolved.uri)
@@ -530,10 +539,7 @@ impl ListenUris {
                     lsp_uri,
                 })
                 .raw
-                .insert(raw.clone());
-        }
-        if dropped > 0 {
-            debug!("subscriptions/listen dropped {dropped} URIs that no longer resolve");
+                .insert(raw);
         }
         Self(map)
     }
@@ -559,6 +565,7 @@ impl ListenUris {
 
 #[derive(Debug)]
 struct RegistryInner {
+    validity: OnceLock<Arc<dyn ResourceValidity>>,
     sessions: StdMutex<Vec<Weak<SessionState>>>,
     listen_permits: Arc<Semaphore>,
 }
@@ -609,11 +616,37 @@ impl Default for SubscriptionRegistry {
     }
 }
 
+pub trait ResourceValidity: Send + Sync + std::fmt::Debug {
+    fn check(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>;
+}
+
 impl SubscriptionRegistry {
+    pub(crate) fn set_validity(&self, guard: Arc<dyn ResourceValidity>) {
+        let _ = self.0.validity.set(guard);
+    }
+    pub(crate) async fn is_valid(&self) -> bool {
+        match self.0.validity.get() {
+            Some(guard) => guard.check().await,
+            None => true,
+        }
+    }
+    pub(crate) async fn subscription_count(&self) -> usize {
+        let mut count: usize = 0;
+        for session in self.live_sessions() {
+            count = count.saturating_add(session.subs.len().await);
+        }
+        count
+    }
+    pub(crate) async fn invalidate(&self) {
+        for session in self.live_sessions() {
+            session.subs.clear().await;
+        }
+    }
     /// Create an empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self(Arc::new(RegistryInner {
+            validity: OnceLock::new(),
             sessions: StdMutex::new(Vec::new()),
             listen_permits: Arc::new(Semaphore::new(MAX_LISTEN_STREAMS)),
         }))
@@ -671,6 +704,9 @@ impl SubscriptionRegistry {
         &self,
         pred: impl Fn(&DiagnosticsResourceUri) -> bool + Sync,
     ) {
+        if !self.is_valid().await {
+            return;
+        }
         for session in self.live_sessions() {
             session.publish_matching(&pred).await;
         }
@@ -721,6 +757,7 @@ impl ListenPermit {
         target: impl FnOnce(Arc<ListenUris>) -> Target,
     ) -> ListenRegistration {
         let state = Arc::new(SessionState {
+            subscription_mutations: Arc::default(),
             subs: ResourceSubscriptions::from_canonical(
                 uris.canonical().map(|(uri, _)| uri.clone()),
             ),
@@ -763,6 +800,7 @@ fn bind_delivery(
             Arc::clone(&pending),
             rx,
             Arc::downgrade(state),
+            registry.clone(),
         ));
         registry.register(state);
         Delivery {
@@ -866,19 +904,68 @@ pub struct StatefulSession<'a> {
     peer: Peer<RoleServer>,
 }
 
+pub struct SubscriptionRollback {
+    state: Arc<SessionState>,
+    uri: DiagnosticsResourceUri,
+    raw: String,
+    armed: bool,
+    mutation: Option<tokio::sync::OwnedMutexGuard<()>>,
+    lease: Option<crate::dispatcher::Lease>,
+}
+impl SubscriptionRollback {
+    pub(crate) const fn newly_created(&self) -> bool {
+        self.armed
+    }
+    pub(crate) const fn commit(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for SubscriptionRollback {
+    fn drop(&mut self) {
+        if self.armed {
+            let state = self.state.clone();
+            let uri = self.uri.clone();
+            let raw = self.raw.clone();
+            let mutation = self.mutation.take();
+            let lease = self.lease.take();
+            tokio::spawn(async move {
+                state.unsubscribe(Some(&uri), &raw).await;
+                drop(mutation);
+                drop(lease);
+            });
+        }
+    }
+}
+
 impl StatefulSession<'_> {
-    /// Records a subscription to `canonical` (reachable from the client as
-    /// `raw`), binding delivery and registering the session first.
-    ///
-    /// Returns whether the URI was newly subscribed.
-    pub(crate) async fn subscribe(
+    /// Serialize registration and its commit/rollback within this session.
+    /// Admission and LSP startup happen before acquiring this local permit.
+    pub(crate) async fn begin_subscribe(
         &self,
         canonical: DiagnosticsResourceUri,
         raw: String,
-    ) -> Result<bool, SubscriptionError> {
+        lease: Option<crate::dispatcher::Lease>,
+    ) -> Result<SubscriptionRollback, SubscriptionError> {
+        let mutation = self
+            .handle
+            .state
+            .subscription_mutations
+            .clone()
+            .lock_owned()
+            .await;
+        let mut rollback = SubscriptionRollback {
+            state: self.handle.state.clone(),
+            uri: canonical.clone(),
+            raw: raw.clone(),
+            armed: false,
+            mutation: Some(mutation),
+            lease,
+        };
         self.handle
             .ensure_delivery(|| Target::Peer(self.peer.clone()));
-        self.handle.state.subscribe(canonical, raw).await
+        rollback.armed = self.handle.state.subs.subscribe(canonical.clone()).await?;
+        self.handle.state.subs.record_alias(raw, &canonical).await;
+        Ok(rollback)
     }
 
     /// Removes the subscription `canonical` or the recorded alias `raw`
@@ -894,6 +981,7 @@ impl StatefulSession<'_> {
         canonical: Option<&DiagnosticsResourceUri>,
         raw: &str,
     ) -> bool {
+        let _mutation = self.handle.state.subscription_mutations.lock().await;
         self.handle.state.unsubscribe(canonical, raw).await
     }
 }

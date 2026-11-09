@@ -323,6 +323,22 @@ impl Servers {
         failures
     }
 
+    pub(super) fn dispatcher_expect(&mut self, id: ServerId) {
+        let slot = self.0.entry(id).or_insert_with(|| {
+            ServerSlot::new(ServerStatus::Expected {
+                prior_failure: None,
+            })
+        });
+        if matches!(
+            slot.status,
+            ServerStatus::Expected { .. } | ServerStatus::Failed(_)
+        ) {
+            slot.status = ServerStatus::Expected {
+                prior_failure: None,
+            };
+        }
+    }
+
     /// Marks exactly the servers of `set` as expected: absent and failed ones
     /// become expected (a failed one remembers its failure), a running one is
     /// unchanged, and an expected one outside `set` stops being expected.
