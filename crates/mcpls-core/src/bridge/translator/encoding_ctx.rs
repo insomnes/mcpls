@@ -124,12 +124,10 @@ fn new_line_cache(budget: u64) -> LineCache {
 /// position/range in that response between MCP's 1-based UTF-16 columns and
 /// the server's own 0-based columns.
 ///
-/// A single MCP tool call is always answered by exactly one LSP server, so
-/// one context covers every location in its response -- even when
-/// individual locations point into other files (e.g. `references` results
-/// spanning multiple documents): each conversion resolves the *referenced*
-/// file's line text independently rather than assuming it matches the
-/// originally queried document.
+/// Each producer uses its negotiated encoding. Contexts for producers in one
+/// merged response share the line cache and disk-read allowance. Every conversion
+/// resolves the referenced file's line text, including locations in other files,
+/// rather than assuming it matches the originally queried document.
 #[derive(Debug, Clone)]
 pub(super) struct EncodingCtx {
     pub(super) encoding: PositionEncoding,
@@ -143,11 +141,10 @@ pub(super) struct EncodingCtx {
     /// filtering is deliberately not done here.
     pub(super) workspace_roots: WorkspaceRoots,
     /// Memoizes [`read_line_text`]'s result (both the tracker hit and the
-    /// disk-read fallback) per `(path, line)` for the lifetime of this
-    /// context, and tracks the shared disk-read byte budget -- one
-    /// `EncodingCtx` is built per MCP response (see
-    /// [`Translator::encoding_ctx`](super::Translator::encoding_ctx)), so
-    /// this bounds a response that reconverts the same file/line many times
+    /// disk-read fallback) per `(path, line)` for the response lifetime, and
+    /// tracks its shared disk-read byte budget. Producer contexts in a merged
+    /// response share this cache and allowance, which bounds a response that
+    /// reconverts the same file/line many times
     /// (e.g. `references` results clustered in one file) to a single lookup
     /// per distinct line, and caps the response's total disk-read I/O
     /// regardless of how many distinct lines it touches (see #474).

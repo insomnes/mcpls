@@ -19,3 +19,5 @@ This fork is version `0.9.1+insomnes.1`. Its upstream release is [v0.9.1](https:
 - Shared HTTP workspaces, workspace isolation, Watchman, call graphs, bounded navigation and edit previews, private local feedback, and both tool profiles are retained. The agent profile exposes 31 tools; the full profile exposes 34. Tool-schema budgets remain 160000 compact bytes total, 9000 per tool, and 35000 description bytes.
 
 Release and registry publication are disabled for this fork. Existing workflow files remain available. The package version identifies the adopted release and fork revision; installation receipts use the full commit SHA and binary digest for exact provenance.
+
+Subsequent accepted fork releases increment `insomnes.N`. The upstream base version changes only after deliberate adoption of a complete upstream release.

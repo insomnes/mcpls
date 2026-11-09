@@ -5,7 +5,7 @@
 
 **Give your AI agent a compiler's eye.**
 
-The mcpls command-line tool bridges the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project and exposes their type information, references, diagnostics and refactoring to an AI client as 30 default MCP tools (33 with the full profile). One binary, any language, no runtime dependencies.
+The mcpls command-line tool bridges the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project and exposes their type information, references, diagnostics and refactoring to an AI client as 31 default MCP tools (34 with the full profile). One binary, any language, no runtime dependencies.
 
 Documentation: <https://bug-ops.github.io/mcpls/>
 

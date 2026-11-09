@@ -453,13 +453,17 @@ impl Translator {
         let effective_limit = effective_limit(limit);
         let mut merged = MergedSymbols::new(effective_limit.saturating_add(1));
         let mut outcomes = Vec::with_capacity(rest.len().saturating_add(1));
+        let response_ctx = self.encoding_ctx(&first.0);
         let mut record = |(id, answer): (ServerId, Answer)| match answer {
             Ok(Indexed {
                 result: response,
                 indexing,
             }) => {
                 let producer = Arc::new(Producer {
-                    ctx: self.encoding_ctx(&id),
+                    ctx: EncodingCtx {
+                        encoding: self.position_encoding_for(&id),
+                        ..response_ctx.clone()
+                    },
                     id: id.clone(),
                 });
                 let raw = raw_workspace_symbols(response, &producer.ctx);
@@ -2230,6 +2234,78 @@ mod fan_out_tests {
 
         assert!(elapsed < Duration::from_millis(400), "{elapsed:?}");
         assert_eq!(result.servers.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn normalization_budget_is_shared_without_changing_producer_encodings() {
+        for second_is_utf8 in [true, false] {
+            let mut p = Polyglot::new(&[
+                ("a", Member::LiveUtf8),
+                (
+                    "b",
+                    if second_is_utf8 {
+                        Member::LiveUtf8
+                    } else {
+                        Member::Live { capable: true }
+                    },
+                ),
+            ]);
+            p.translator = Arc::new(
+                Arc::try_unwrap(p.translator)
+                    .expect("the fixture context is not shared")
+                    .with_resource_limits(crate::bridge::ResourceLimits {
+                        max_file_size: crate::config::SizeLimit::from_static(1024),
+                        ..Default::default()
+                    }),
+            );
+            let mut replies = Vec::new();
+            for owner in ["a", "b"] {
+                let mut symbols = Vec::new();
+                for index in 0..3 {
+                    let file = format!("{owner}{index}.rs");
+                    let source = format!("{}\néz\n", "x".repeat(1019));
+                    assert_eq!(source.len(), 1024);
+                    std::fs::write(p.dir.path().join(&file), source).unwrap();
+                    let mut symbol = p.symbol(&file, &file, 1);
+                    let start = if owner == "a" || second_is_utf8 { 2 } else { 1 };
+                    symbol["location"]["range"] = json!({
+                        "start": {"line": 1, "character": start},
+                        "end": {"line": 1, "character": start + 1},
+                    });
+                    symbols.push(symbol);
+                }
+                replies.push(answer(p.take(owner), Duration::ZERO, json!(symbols)));
+            }
+            let result = p.search(None, 100).await.unwrap();
+            for reply in replies {
+                reply.await.unwrap();
+            }
+            let columns: Vec<_> = result
+                .symbols
+                .iter()
+                .map(|symbol| symbol.location.range.start.character)
+                .collect();
+            if second_is_utf8 {
+                // Four complete 1024-byte scans exhaust the response's 4096-byte budget.
+                assert_eq!(columns, [2, 2, 2, 2, 3, 3]);
+                assert_eq!(
+                    result.positions_degraded,
+                    Some(super::super::dto::PositionDegradation::Response)
+                );
+            } else {
+                // The UTF-16 producer needs no disk conversion and keeps its own encoding.
+                assert_eq!(columns, [2, 2, 2, 2, 2, 2]);
+                assert!(result.positions_degraded.is_none());
+            }
+            assert!(!result.truncated);
+            assert_eq!(
+                names(&result)
+                    .iter()
+                    .map(|(_, owner)| *owner)
+                    .collect::<Vec<_>>(),
+                ["a", "a", "a", "b", "b", "b"]
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

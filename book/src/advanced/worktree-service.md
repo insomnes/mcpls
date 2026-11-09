@@ -98,7 +98,7 @@ File tools keep their absolute `file_path` parameter. These fileless tools requi
 
 No operation selects a workspace from the daemon's current directory, the previous request, or MCP roots. MCP roots are optional hints and grant no approval. A returned external dependency location remains marked according to the normal `out_of_workspace` behavior. That result does not authorize a later standalone source request outside approved roots.
 
-The catalog is fixed by daemon mode, tool profile, and prefix. Dispatcher mode adds `get_workspace_status`: 31 agent tools or 34 full tools. Static mode exposes 30 agent tools or 33 full tools. Discovery and eviction do not alter these catalogs.
+The catalog is fixed by daemon mode, tool profile, and prefix. Dispatcher mode adds `get_workspace_status`: 32 agent tools or 35 full tools. Static mode exposes 31 agent tools or 34 full tools. Discovery and eviction do not alter these catalogs.
 
 ## Status and lifecycle
 
