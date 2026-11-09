@@ -14,14 +14,14 @@ The mechanism differs by platform.
 
 ## Unix
 
-Each server has its own lifeline: a small anchor process leads the server's process group, and a watchdog sits outside the group. After binding, when mcpls exits or the server is shut down or restarted, the watchdog freezes the tree, finds descendants that left the group with `setsid()` or `setpgid()` (for example the `cargo check` that rust-analyzer's flycheck runs), and kills everything. A crashed server's leftovers are killed when the crash is noticed.
+Each server has its own lifeline: a small anchor process leads the server's process group, and a watchdog sits outside the group. After binding, when mcpls exits or the server is shut down or restarted, the watchdog freezes the tree, finds descendants that left the group with `setsid()` or `setpgid()` (for example the `cargo check` that rust-analyzer's flycheck runs), and kills attributable or already-recorded targets. A crashed server's attributable leftovers are killed when the crash is noticed.
 
 Configured commands launch natively. Accepted environment entries and values, command paths (including `=`), argv, working directory and stdio retain their original behavior. Missing commands, nonexecutable commands and missing shebang interpreters keep native startup error classifications and restart reason `spawn_failed`. Failed initial startup remains unavailable and does not retry automatically.
 
 Caveats:
 
 - The sweep needs `ps` and `awk`. Without `ps`, mcpls logs a warning and escaped descendants survive.
-- Descendants whose parent exited before the sweep (reparented to init) cannot be attributed and may survive. A `pkill -9` that matches `lsp-lifeline-watchdog` kills the watchdog and prevents the sweep.
+- Ancestry must remain attributable when the watchdog discovers a descendant, or the target must already be recorded. Binding alone does not preserve ancestry. An orphaned-process-group transition can deliver kernel SIGHUP/SIGCONT; if SIGHUP kills the native leader before the first snapshot, a `setsid` helper can be reparented before discovery and survive. An independent leader exit can cause the same limit. This risk remains; native server signal handling is unchanged. A `pkill -9` that matches `lsp-lifeline-watchdog` kills the watchdog and prevents the sweep.
 - Servers that exit only on stdin EOF wait out the 3 second shutdown grace and are then killed. A bound watchdog is indicated by `processId: null` in the LSP `initialize` request. The server need not answer initialization for binding to be established.
 - Servers run in their own process group, so Ctrl-C in the terminal no longer reaches them directly. A descendant that reads `/dev/tty`, such as an ssh or git credential prompt, may be stopped by `SIGTTIN` when mcpls runs in an interactive terminal.
 - If the anchor cannot be started, the server runs unbound in its own process group. If only the watchdog fails, the group is killed during Rust teardown but escaped descendants are not swept. Abrupt parent death is not protected by either fallback. Ctrl-C does not reach servers in either case.

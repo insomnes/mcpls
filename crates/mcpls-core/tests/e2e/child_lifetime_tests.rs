@@ -5,7 +5,8 @@
 //! the original design fail: it exits on stdin EOF, streams valid
 //! `window/logMessage` frames to stdout and text to stderr every millisecond,
 //! and leaves a `setsid` grandchild behind (the shape of rust-analyzer's
-//! flycheck `cargo check`).
+//! flycheck `cargo check`). The fixture ignores SIGHUP before forking so
+//! ancestry remains attributable at discovery; stdin EOF still exits the leader.
 
 #![cfg(unix)]
 
@@ -26,6 +27,8 @@ use strict;
 use warnings;
 use POSIX ();
 use JSON::PP;
+
+$SIG{HUP} = 'IGNORE';
 
 my ($dir, $mode) = @ARGV;
 

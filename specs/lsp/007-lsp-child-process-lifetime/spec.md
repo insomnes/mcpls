@@ -74,7 +74,7 @@ watchdog has frozen the tree: writes block instead of failing. `initialize` addi
 `processId: null` while a watchdog is bound (LSP allows it), so a server that watches its parent pid
 cannot race the freeze either.
 
-Configured commands launch natively, preserving every accepted environment key/value, command path (including `=`), argv, cwd and stdio. Missing commands, nonexecutable commands and missing shebang interpreters retain native startup errors and restart reason `spawn_failed`. Abrupt parent death before watchdog binding can leave a server or descendants alive; no cleanup guarantee applies to that startup window. Receipt of LSP `initialize` with an explicit `processId: null` establishes binding even when the server has not answered initialization.
+Configured commands launch natively, preserving every accepted environment key/value, command path (including `=`), argv, cwd and stdio. Missing commands, nonexecutable commands and missing shebang interpreters retain native startup errors and restart reason `spawn_failed`. Abrupt parent death before watchdog binding can leave a server or descendants alive; no cleanup guarantee applies to that startup window. Receipt of LSP `initialize` with an explicit `processId: null` establishes binding even when the server has not answered initialization. Ancestry must remain attributable when a descendant is discovered, or that target must already be recorded. Binding alone does not preserve ancestry if the leader exits independently before capture.
 
 The watchdog reads line commands from the socket. On **EOF** (the kernel closes mcpls's end on *any*
 exit: clean, panic, `exit(1)`, `SIGKILL`, OOM; mcpls also half-closes it on purpose to start a sweep) it
@@ -142,7 +142,7 @@ sweep; the leader is reaped by Rust and its pid reused before `forget-leader` is
 ## 2. User Stories
 
 - **US-001**: As a user whose MCP client force-kills mcpls, I want no `rust-analyzer` (multi-GB)
-  or its children left running afterwards, including the `cargo check` run by rust-analyzer's flycheck, which runs in its own session. On Unix, after watchdog binding, this holds for every descendant whose ancestry is still attributable at sweep time (see Edge Cases); on Windows the whole tree is killed.
+  or its children left running afterwards, including the `cargo check` run by rust-analyzer's flycheck, which runs in its own session. On Unix, after watchdog binding, this holds for already-recorded descendants and those whose ancestry remains attributable at discovery (see Edge Cases); on Windows the whole tree is killed.
 - **US-002**: As a library embedder calling `mcpls_core::serve`, I want the same guarantee without
   shipping an extra binary, and I want `serve()` to return only once the trees are gone.
 - **US-003**: As a user whose language server crashes, I want the helpers it left behind killed when mcpls notices, not when mcpls exits.
@@ -151,7 +151,7 @@ sweep; the leader is reaped by Rust and its pid reused before `forget-leader` is
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| FR-001 | WHEN the mcpls process exits by any means on Unix after watchdog binding THE SYSTEM SHALL SIGKILL that LSP server process and every descendant, including descendants that left the server's process group through `setsid`/`setpgid` while their ancestry was still attributable | must |
+| FR-001 | WHEN the mcpls process exits by any means on Unix after watchdog binding THE SYSTEM SHALL SIGKILL that LSP server process and every descendant whose ancestry remains attributable at discovery or that is already recorded, including descendants that left the server's process group through `setsid`/`setpgid` | must |
 | FR-002 | WHEN mcpls exits by any means on Windows THE SYSTEM SHALL terminate every process in each LSP server's job object | must |
 | FR-003 | WHEN an individual LSP server is shut down, restarted (`restart_server`) or respawned THE SYSTEM SHALL terminate that server's whole process tree (Windows: its job; Unix: its lifeline sweep) | must |
 | FR-004 | WHEN the anchor cannot be started THE SYSTEM SHALL log one warning and spawn the server unbound in a fresh separate process group (`process_group(0)`, so Ctrl-C does not reach it; killed on drop), never failing the spawn because of the binding. WHEN only the watchdog cannot be started THE SYSTEM SHALL keep the server in the anchor's group, log one warning, and kill that group (and the leader) from Rust when the server is dropped; `processId` then carries the real pid | must |
@@ -199,6 +199,7 @@ sweep; the leader is reaped by Rust and its pid reused before `forget-leader` is
 | Worst-case shutdown time per server | `SHUTDOWN_TIMEOUT` (10 s, including `mark`) plus the sweep allowance, which is the time left before that deadline clamped to 3 s..`LIFELINE_SWEEP_BUDGET` (8 s); after the allowance the tree is killed from Rust. So at most ~13 s plus reaping, with servers shut down in parallel. |
 | A server that exits only on stdin EOF and ignores `exit` | The watchdog holds the stdin write end, so on graceful shutdown the server waits out `CHILD_EXIT_GRACE` and is SIGKILLed by the sweep instead of exiting on its own. |
 | `ps` is missing or unusable (slim container images without procps, busybox without `-A`/`-o`) | Attribution is lost: the watchdog prints `scan-failed`, mcpls logs one warning, and the sweep still kills `G` and the leader. Escaped descendants survive. |
+| Orphaned-group transition before the first ancestry snapshot | Kernel SIGHUP/SIGCONT can kill the native leader before capture. A `setsid` helper can then be reparented and become unknown to the sweep. An independent leader exit before discovery has the same attribution limit. This remains unprotected; native signal behavior is unchanged. |
 | A stopped `setpgid` escapee group in the server's session when the leader exits after `mark` | POSIX orphaned-process-group rule: the kernel sends it SIGHUP and SIGCONT, so it may run again until the sweep, which still kills every recorded target. `setsid` escapees (rust-analyzer's flycheck) are unaffected. Not fixable without a kernel-level hold. |
 | An escapee created by an in-group survivor between `mark` and the sweep | The sweep always scans again after `STOP`ping `G`, so it is attributed. |
 | `pkill -9 -f mcpls` (or any pattern matching the helper command lines) | Helper argv0 is `lsp-lifeline-watchdog`, so a plain `mcpls` pattern spares the watchdog; a pattern matching it kills the watchdog and no sweep runs for that server. |
@@ -223,7 +224,7 @@ sweep; the leader is reaped by Rust and its pid reused before `forget-leader` is
 
 | ID | Criterion |
 |----|-----------|
-| SC-001 | Unix e2e (`#[cfg(unix)]`, `#[ignore = "Requires mcpls binary built"]` so the CI e2e job runs it): a perl "server" that exits on stdin EOF, streams `window/logMessage` frames to stdout and text to stderr every millisecond, never answers `initialize` and leaves a `setsid` grandchild. The test records receipt of `initialize` with an explicit `processId: null` before publishing PID readiness and killing mcpls, so binding is established while initialization is pending. After `SIGKILL` of the mcpls binary, both pids are gone within the 5 s polling ceiling. |
+| SC-001 | Unix e2e (`#[cfg(unix)]`, `#[ignore = "Requires mcpls binary built"]` so the CI e2e job runs it): a perl "server" that ignores SIGHUP before forking to preserve the ancestry-at-discovery precondition, exits on stdin EOF, streams `window/logMessage` frames to stdout and text to stderr every millisecond, never answers `initialize` and leaves a `setsid` grandchild. The test records receipt of `initialize` with an explicit `processId: null` before publishing PID readiness and killing mcpls, so binding is established while initialization is pending. After `SIGKILL` of the mcpls binary, both pids are gone within the 5 s polling ceiling. |
 | SC-002 | Unix unit tests: dropping a `ServerProcess` and `terminate` kill an EOF-exiting server's `setsid` child; a leader that itself called `setsid` is killed on drop; `terminate` returns inside `LIFELINE_SWEEP_BUDGET` |
 | SC-003 | Unix unit tests: a spawn into a vanished group retries per FR-007; a watchdog or anchor start failure follows FR-004 and `Drop` still kills the group |
 | SC-004 | Windows unit test: a server started via PowerShell `Start-Process -PassThru` writes its grandchild's pid to a file; after `ServerProcess` is dropped, `tasklist /FI "PID eq <pid>"` no longer lists it |
