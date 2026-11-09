@@ -867,6 +867,7 @@
       "type": "object"
     },
     "annotations": {
+      "title": "List Feedback",
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true
@@ -881,7 +882,7 @@
       "additionalProperties": false,
       "properties": {
         "feedback_id": {
-          "description": "Exact opaque ID copied from feedback_list; maximum 256 UTF-8 bytes.",
+          "description": "Exact opaque ID copied from `feedback_list`; maximum 256 UTF-8 bytes.",
           "type": "string"
         }
       },
@@ -900,7 +901,7 @@
           "type": "string"
         },
         "Resolution": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "note_id": {
               "type": [
@@ -931,7 +932,7 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "feedback_id": {
           "type": "string"
@@ -958,6 +959,7 @@
       "type": "object"
     },
     "annotations": {
+      "title": "Reopen Feedback",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false
@@ -972,7 +974,7 @@
       "additionalProperties": false,
       "properties": {
         "feedback_id": {
-          "description": "Exact opaque ID copied from feedback_list; maximum 256 UTF-8 bytes.",
+          "description": "Exact opaque ID copied from `feedback_list`; maximum 256 UTF-8 bytes.",
           "type": "string"
         },
         "note_id": {
@@ -1006,7 +1008,7 @@
           "type": "string"
         },
         "Resolution": {
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
             "note_id": {
               "type": [
@@ -1037,7 +1039,7 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "feedback_id": {
           "type": "string"
@@ -1064,6 +1066,7 @@
       "type": "object"
     },
     "annotations": {
+      "title": "Resolve Feedback",
       "readOnlyHint": false,
       "destructiveHint": false,
       "idempotentHint": false

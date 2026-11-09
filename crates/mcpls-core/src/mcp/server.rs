@@ -2119,6 +2119,7 @@ impl McplsServer {
         description = "List private local feedback, newest original append first. Defaults to open reports; state may be open/resolved/all. Copy opaque feedback_id values exactly for resolve/reopen. limit defaults to20 (1..100); offset defaults to0. No workspace or language server is needed.",
         title = "List Feedback",
         annotations(
+            title = "List Feedback",
             read_only_hint = true,
             destructive_hint = false,
             idempotent_hint = true
@@ -2136,6 +2137,7 @@ impl McplsServer {
         description = "Resolve one open feedback report using an exact feedback_id from feedback_list. Preserve explicit resolution and optional literal task_id/note_id; references cause no lookup or task/note changes and confer no authority. Already resolved reports conflict. After an ambiguous failure, list current state before retrying.",
         title = "Resolve Feedback",
         annotations(
+            title = "Resolve Feedback",
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false
@@ -2153,6 +2155,7 @@ impl McplsServer {
         description = "Reopen one resolved feedback report using an exact feedback_id from feedback_list. Clear its active resolution and task/note references. Already open reports conflict. After an ambiguous failure, list current state before retrying.",
         title = "Reopen Feedback",
         annotations(
+            title = "Reopen Feedback",
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = false

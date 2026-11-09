@@ -346,3 +346,53 @@ fn feedback_rejected_targets_and_malformed_stores_have_no_effects() {
     }
     assert_eq!(std::fs::read(&path).unwrap(), b"{\"operation\":");
 }
+
+#[test]
+fn malformed_legacy_report_fields_fail_without_modifying_storage() {
+    let root = TempDir::new().unwrap();
+    let mut client = Client::new(root.path(), "[workspace]\nroots = []\n");
+    success(&client.feedback(
+        "feedback_add",
+        &json!({"operation":"valid", "observation":"report"}),
+    ));
+    let listed = client.feedback("feedback_list", &json!({}));
+    let id = &content(&listed)["items"][0]["feedback_id"];
+    let path = root.path().join("state/mcpls/feedback.jsonl");
+    let valid: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for (field, value) in [
+        ("timestamp", json!("not-a-timestamp")),
+        ("operation", json!(" ")),
+        ("operation", json!("é".repeat(65))),
+        ("observation", json!("\n")),
+        ("observation", json!("é".repeat(1025))),
+        ("workaround", json!(" ")),
+        ("workaround", json!("x".repeat(2049))),
+        ("extra", json!(true)),
+    ] {
+        let mut invalid = valid.clone();
+        invalid[field] = value;
+        let bytes = format!("{invalid}\n").into_bytes();
+        std::fs::write(&path, &bytes).unwrap();
+        for (tool, arguments) in [
+            ("feedback_list", json!({})),
+            (
+                "feedback_resolve",
+                json!({"feedback_id":id,"resolution":"fixed"}),
+            ),
+            ("feedback_reopen", json!({"feedback_id":id})),
+        ] {
+            let result = client.feedback(tool, &arguments);
+            assert_eq!(
+                result["error"]["data"]["code"], "feedback_storage_failed",
+                "{field}: {result}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert!(
+                !root
+                    .path()
+                    .join("state/mcpls/feedback-state.jsonl")
+                    .exists()
+            );
+        }
+    }
+}

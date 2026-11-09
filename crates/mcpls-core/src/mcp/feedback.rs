@@ -228,6 +228,7 @@ pub(super) struct ReopenInput {
 
 #[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("additionalProperties" = true))]
 struct Resolution {
     text: String,
     resolved_at: String,
@@ -237,6 +238,7 @@ struct Resolution {
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("additionalProperties" = true))]
 pub(super) struct Transition {
     feedback_id: String,
     state: FeedbackState,
@@ -503,7 +505,37 @@ fn load() -> Result<Option<Store>, McpError> {
         result => result.map_err(storage_error)?,
     };
     file.lock().map_err(storage_error)?;
-    let records: Vec<Record> = read_lines(&mut file).map_err(storage_error)?;
+    let raw_records: Vec<serde_json::Value> = read_lines(&mut file).map_err(storage_error)?;
+    let mut records = Vec::with_capacity(raw_records.len());
+    for raw in raw_records {
+        let object = raw
+            .as_object()
+            .ok_or_else(|| storage_error("feedback report must be an object"))?;
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "timestamp" | "version" | "operation" | "observation" | "category" | "workaround"
+            )
+        }) {
+            return Err(storage_error("feedback report contains an unknown field"));
+        }
+        let record: Record = serde_json::from_value(raw).map_err(storage_error)?;
+        if chrono::DateTime::parse_from_rfc3339(&record.timestamp).is_err()
+            || record.version.trim().is_empty()
+        {
+            return Err(storage_error("invalid feedback timestamp or version"));
+        }
+        for (field, text, maximum) in [
+            ("operation", Some(record.input.operation.as_str()), 128),
+            ("observation", Some(record.input.observation.as_str()), 2048),
+            ("workaround", record.input.workaround.as_deref(), 2048),
+        ] {
+            if let Some(text) = text {
+                validate_text(field, text, maximum).map_err(storage_error)?;
+            }
+        }
+        records.push(record);
+    }
     let mut items: Vec<_> = records
         .into_iter()
         .enumerate()

@@ -848,7 +848,7 @@ mod tests {
 
     /// Total serialized `tools` array budget, including local feedback.
     // One added tool gets the existing 9,000-byte per-tool allowance.
-    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 160_000;
+    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 165_000;
     /// Largest serialized single `Tool` (compact bytes).
     const TOOL_BUDGET_BYTES: usize = 9_000;
     /// Sum of all schema `description` bytes.

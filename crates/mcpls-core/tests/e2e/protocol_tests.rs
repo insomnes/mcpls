@@ -187,7 +187,7 @@ fn test_e2e_get_tool_support_reports_every_tool() -> Result<()> {
 #[test]
 #[ignore = "Requires mcpls binary built"]
 fn test_e2e_tool_profiles() -> Result<()> {
-    for (profile, count) in [("", 31), ("agent", 31), ("full", 34)] {
+    for (profile, count) in [("", 34), ("agent", 34), ("full", 37)] {
         let temp = TempDir::new()?;
         let config = temp.path().join("profile.toml");
         let mcp = if profile.is_empty() {
