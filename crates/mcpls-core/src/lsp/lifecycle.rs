@@ -2038,7 +2038,7 @@ mod tests {
         let config = ServerInitConfig::new(
             {
                 let mut c = LspServerConfig::rust_analyzer();
-                c.initialization_options = Some(serde_json::json!({"key": "value"}).into());
+                c.initialization_options = Some(serde_json::json!({"key": "value"}));
                 c
             },
             WorkspaceRoots::for_test(vec![PathBuf::from("/tmp/workspace")], vec![]),
@@ -2092,7 +2092,7 @@ mod tests {
                 args: crate::config::ServerArgs::try_from(vec!["--stdio".to_string()]).unwrap(),
                 env,
                 file_patterns: vec![FilePattern::from_static("**/*.py")],
-                initialization_options: Some(init_opts.into()),
+                initialization_options: Some(init_opts),
                 settings: None,
                 timeout_seconds: TimeoutSecs::new(10).unwrap(),
                 request_timeout_seconds: TimeoutSecs::new(10).unwrap(),
@@ -3323,7 +3323,7 @@ settings = { "tool.apiToken" = "SETTINGSSECRET123" }
     async fn test_for_respawn_keeps_the_config_and_pinned_tsserver() {
         let mut server_config = LspServerConfig::typescript();
         server_config.initialization_options =
-            Some(serde_json::json!({"tsserver": {"path": "/pin/tsserver.js"}}).into());
+            Some(serde_json::json!({"tsserver": {"path": "/pin/tsserver.js"}}));
         let config = ServerInitConfig::new(
             server_config,
             WorkspaceRoots::default(),
@@ -3349,7 +3349,7 @@ settings = { "tool.apiToken" = "SETTINGSSECRET123" }
     async fn test_for_respawn_replans_an_auto_pinned_server_off_the_runtime() {
         let mut server_config = LspServerConfig::typescript();
         server_config.initialization_options =
-            Some(serde_json::json!({"tsserver": {"path": "/mcpls-test/stale/tsserver.js"}}).into());
+            Some(serde_json::json!({"tsserver": {"path": "/mcpls-test/stale/tsserver.js"}}));
         let config = ServerInitConfig::new(
             server_config,
             WorkspaceRoots::default(),

@@ -1123,14 +1123,11 @@ settings = { "tool.apiToken" = "SETTINGSSECRET123", "yaml.schemas" = { "https://
     #[test]
     fn test_for_server_takes_string_leaves_under_secret_json_keys() {
         let mut config = server_config();
-        config.initialization_options = Some(
-            serde_json::json!({
-                "server": {"name": "long-server-name", "apiToken": "init-token-value"},
-                "credentials": ["first-credential", {"inner": "second-credential"}],
-                "retries": 3
-            })
-            .into(),
-        );
+        config.initialization_options = Some(serde_json::json!({
+            "server": {"name": "long-server-name", "apiToken": "init-token-value"},
+            "credentials": ["first-credential", {"inner": "second-credential"}],
+            "retries": 3
+        }));
 
         let set = Redactions::for_server(&config, []);
 

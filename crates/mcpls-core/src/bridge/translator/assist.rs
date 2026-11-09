@@ -847,6 +847,28 @@ mod tests {
         assert_eq!(wire["items"][0]["label"], "getElementById");
     }
 
+    #[tokio::test]
+    async fn test_handle_completions_ranks_small_responses_before_the_default_limit() {
+        for count in [2, 20, 21, 100] {
+            let items = (0..count - 1)
+                .map(|index| serde_json::json!({"label": format!("A{index:03}")}))
+                .chain([serde_json::json!({"label": "getElementById"})])
+                .collect();
+            let wire = utf8_degradation(
+                "doc.getEl",
+                1,
+                10,
+                "textDocument/completion",
+                serde_json::Value::Array(items),
+            )
+            .await;
+            assert_eq!(wire["items"][0]["label"], "getElementById");
+            assert_eq!(wire["items"].as_array().unwrap().len(), count.min(20));
+            assert_eq!(wire["omitted_count"], count.saturating_sub(20));
+            assert_eq!(wire["provider_is_incomplete"], serde_json::Value::Null);
+        }
+    }
+
     /// #641: a line past the end is rejected before any request, so it can no
     /// longer reach the request-degradation path.
     #[tokio::test]

@@ -1184,7 +1184,7 @@ mod tests {
             args: crate::config::ServerArgs::try_from(vec!["--flag".to_string()]).unwrap(),
             env: env.clone(),
             file_patterns: vec![FilePattern::from_static("**/*.custom")],
-            initialization_options: Some(serde_json::json!({"key": "value"}).into()),
+            initialization_options: Some(serde_json::json!({"key": "value"})),
             settings: None,
             timeout_seconds: TimeoutSecs::new(60).unwrap(),
             request_timeout_seconds: TimeoutSecs::new(45).unwrap(),
@@ -1365,7 +1365,7 @@ mod tests {
     fn test_debug_of_config_hides_initialization_option_values() {
         let mut config = LspServerConfig::rust_analyzer();
         config.initialization_options =
-            Some(serde_json::json!({"apiToken": "INITSECRET123", "nested": {"k": "v"}}).into());
+            Some(serde_json::json!({"apiToken": "INITSECRET123", "nested": {"k": "v"}}));
 
         let debug = format!("{config:?}");
 
