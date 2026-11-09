@@ -92,7 +92,21 @@ Inspect origin and degradation fields for each report separately.
 
 Returns what mcpls already holds for a file, with no new analysis: the diagnostics the server pushed plus the last full report a `get_diagnostics` call stored. It is fast and takes only `file_path`.
 
-While the file's server is still starting it returns the retryable `ServerInitializing` error, and if the server failed to start it returns that failure, instead of an empty list. An empty list therefore always means "no diagnostics". The same cache backs the `lsp-diagnostics://` resource; see [Diagnostics and Resources](../advanced/diagnostics.md).
+While the file's server is still starting it returns the retryable `ServerInitializing` error, and if the server failed to start it returns that failure, instead of an empty list.
+
+Read `availability` before interpreting an empty list. `published` means the server
+reported on the file; an empty list then means no diagnostics in that report.
+`pending` means no report has arrived, and `evicted` means diagnostic data was lost.
+Neither establishes a clean file. Also check `indexing_in_progress` and
+`push_notifications_degraded`; a cached report does not prove the current source
+has been fully analyzed.
+
+Some push-only servers, including LuaLS, suppress the initial empty report.
+An initially clean file can therefore remain `pending` after indexing ends.
+Silence does not establish a clean report.
+
+The same cache backs the `lsp-diagnostics://` resource; see
+[Diagnostics and Resources](../advanced/diagnostics.md).
 
 ## format_document
 
