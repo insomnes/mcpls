@@ -2143,7 +2143,7 @@ impl McplsServer {
 
     /// Report which tools are usable for which languages.
     #[tool(
-        description = "Report tool support by language. file_path restricts the report to one language; workspace_path selects a workspace. Both must select the same workspace. In dispatcher mode, no selector returns basis:configured without starting a backend; a selector returns basis:runtime with workspace_path and runtime_generation. coverage is all, some, none, unknown, or always. unknown means initialization; always needs no LSP. Routes identify supported, push_only, capability_not_advertised, initializing, unavailable, or no_server. Workspace-symbol fanout lists one route per admitted server. Advertised support does not guarantee successful indexing, diagnostics, or requests.",
+        description = "Report tool support by language, with runtime_provenance for the running service. file_path restricts the report to one language; workspace_path selects a workspace. Both must select the same workspace. In dispatcher mode, no selector returns basis:configured without starting a backend; a selector returns basis:runtime with workspace_path and runtime_generation. coverage is all, some, none, unknown, or always. unknown means initialization; always needs no LSP. Routes identify supported, push_only, capability_not_advertised, initializing, unavailable, or no_server. Workspace-symbol fanout lists one route per admitted server. Advertised support does not guarantee successful indexing, diagnostics, or requests.",
         title = "Tool Support"
     )]
     async fn get_tool_support(

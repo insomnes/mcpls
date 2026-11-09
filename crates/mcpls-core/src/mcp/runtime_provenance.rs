@@ -44,9 +44,10 @@ pub(super) fn current() -> &'static RuntimeProvenance {
 impl RuntimeProvenance {
     #[cfg(target_os = "linux")]
     fn measure(&mut self) {
-        use sha2::{Digest, Sha256};
         use std::fs::{File, read, read_link};
         use std::io::Read;
+
+        use sha2::{Digest, Sha256};
 
         let Ok(mut executable) = File::open("/proc/self/exe") else {
             return;
