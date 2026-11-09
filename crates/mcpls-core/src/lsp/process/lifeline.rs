@@ -479,13 +479,37 @@ pub(super) struct Lifeline {
 /// Starts `command` bound to a fresh lifeline, or unbound if no anchor can be
 /// started (the server then lives in its own process group and is killed only
 /// by in-process paths).
-pub(super) fn spawn(mut command: Command, options: &Options) -> io::Result<Spawned> {
+pub(super) fn spawn(command: Command, options: &Options) -> io::Result<Spawned> {
+    spawn_with_gate(command, None, options)
+}
+
+pub(super) fn spawn_configured(
+    command: Command,
+    gated: Command,
+    options: &Options,
+) -> io::Result<Spawned> {
+    spawn_with_gate(command, Some(gated), options)
+}
+
+fn spawn_with_gate(
+    mut command: Command,
+    mut gated: Option<Command>,
+    options: &Options,
+) -> io::Result<Spawned> {
     let guard = SPAWN_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let (stderr_rx, stderr_tx) = std::io::pipe()?;
+    if let Some(gated) = &mut gated {
+        gated.stderr(Stdio::from(stderr_tx.try_clone()?));
+    }
     command.stderr(Stdio::from(stderr_tx));
 
     let mut anchor = start_anchor(&stderr_rx);
-    let child = match spawn_leader(&mut command, &mut anchor, &stderr_rx) {
+    let mut fallback = if anchor.is_some() {
+        gated.map(|gated| std::mem::replace(&mut command, gated))
+    } else {
+        None
+    };
+    let child = match spawn_leader(&mut command, &mut anchor, &stderr_rx, &mut fallback) {
         Ok(child) => child,
         Err(e) => {
             if let Some(anchor) = anchor {
@@ -495,7 +519,21 @@ pub(super) fn spawn(mut command: Command, options: &Options) -> io::Result<Spawn
         }
     };
     let lifeline = anchor.map(|anchor| bind(anchor, &child, options));
+    // Before this point only the gate can run. If mcpls dies before bind,
+    // its sole stdin writer closes and the gate exits without executing LSP.
+    // bind gives the watchdog its descriptor holds before this private byte
+    // is written. No transport exists yet, so no LSP bytes can be consumed.
+    if fallback.is_some()
+        && let Err(e) = release_gate(&child)
+    {
+        match lifeline {
+            Some(lifeline) => lifeline.release(Some(child)),
+            None => drop(child),
+        }
+        return Err(e);
+    }
     drop(command);
+    drop(fallback);
     drop(guard);
 
     match Receiver::from_owned_fd(OwnedFd::from(stderr_rx)) {
@@ -542,6 +580,7 @@ fn spawn_leader(
     command: &mut Command,
     anchor: &mut Option<Anchor>,
     stderr_hold: &PipeReader,
+    fallback: &mut Option<Command>,
 ) -> io::Result<Child> {
     apply_group(command, anchor.as_ref());
     match command.spawn() {
@@ -554,10 +593,30 @@ fn spawn_leader(
                 discard(dead);
             }
             *anchor = start_anchor(stderr_hold);
+            if anchor.is_none()
+                && let Some(original) = fallback.take()
+            {
+                *command = original;
+            }
             apply_group(command, anchor.as_ref());
             command.spawn()
         }
         other => other,
+    }
+}
+
+fn release_gate(child: &Child) -> io::Result<()> {
+    let stdin = child
+        .stdin
+        .as_ref()
+        .ok_or_else(|| io::Error::other("configured LSP gate has no stdin"))?;
+    loop {
+        match rustix::io::write(stdin, b"\n") {
+            Ok(1) => return Ok(()),
+            Ok(_) => return Err(io::ErrorKind::WriteZero.into()),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
 }
 

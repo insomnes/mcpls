@@ -806,7 +806,18 @@ impl LspServer {
             config.server_config.env.len()
         );
 
-        let mut child = ServerProcess::spawn(command)
+        #[cfg(unix)]
+        let child = ServerProcess::spawn_configured(
+            command,
+            Self::build_gated_command(
+                config.server_config(),
+                config.child_working_dir(),
+                process_env,
+            ),
+        );
+        #[cfg(windows)]
+        let child = ServerProcess::spawn(command);
+        let mut child = child
             .map_err(|e| spawn_error(config.server_config.command.server_command().clone(), e))?;
 
         if let Some(pid) = &config.dispatcher_pid {
@@ -987,7 +998,37 @@ impl LspServer {
         working_dir: &ChildWorkingDir,
         parent_env: impl ParentEnv,
     ) -> Command {
-        let mut command = Command::new(&config.command);
+        Self::configure_command(
+            Command::new(&config.command),
+            config,
+            working_dir,
+            parent_env,
+        )
+    }
+
+    #[cfg(unix)]
+    fn build_gated_command(
+        config: &LspServerConfig,
+        working_dir: &ChildWorkingDir,
+        parent_env: impl ParentEnv,
+    ) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "IFS= read -r _ || exit\nexec \"$@\"\n",
+                "mcpls-lsp-gate",
+            ])
+            .arg(&config.command);
+        Self::configure_command(command, config, working_dir, parent_env)
+    }
+
+    fn configure_command(
+        mut command: Command,
+        config: &LspServerConfig,
+        working_dir: &ChildWorkingDir,
+        parent_env: impl ParentEnv,
+    ) -> Command {
         command
             .args(&config.args)
             .args(
@@ -2276,7 +2317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_spawn_nonexistent_command_is_server_not_found() {
+    async fn test_spawn_nonexistent_command_reports_startup_failure() {
         let mut server_config = LspServerConfig::rust_analyzer();
         server_config.command = ServerCommand::from_static("nonexistent-lsp-cmd-xyz").into();
         let config = ServerInitConfig::new(
@@ -2285,6 +2326,60 @@ mod tests {
             PositionEncodings::DEFAULT,
             std::sync::Arc::default(),
         );
+        let err = timeout(Duration::from_secs(5), LspServer::spawn(config))
+            .await
+            .expect("an exec failure must not wait for the initialize timeout")
+            .unwrap_err();
+        #[cfg(unix)]
+        assert_matches!(err, Error::ServerExitedDuringInit { .. }, "got {err:?}");
+        #[cfg(windows)]
+        assert_matches!(err, Error::ServerNotFound { .. }, "got {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_spawn_nonexecutable_and_missing_interpreter_fail_during_init() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        for (name, contents, mode) in [
+            ("not-executable", "#!/bin/sh\nexit 0\n", 0o644),
+            (
+                "missing-interpreter",
+                "#!/mcpls-no-such-interpreter\n",
+                0o755,
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, contents).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let mut server_config = LspServerConfig::rust_analyzer();
+            server_config.command = path.to_string_lossy().into_owned().into();
+            let config = ServerInitConfig::new(
+                server_config,
+                WorkspaceRoots::default(),
+                PositionEncodings::DEFAULT,
+                std::sync::Arc::default(),
+            );
+            let err = timeout(Duration::from_secs(5), LspServer::spawn(config))
+                .await
+                .expect("an exec failure must close stdout promptly")
+                .unwrap_err();
+            assert_matches!(err, Error::ServerExitedDuringInit { .. }, "{name}: {err:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_spawn_invalid_working_directory_keeps_native_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = ServerInitConfig::new(
+            LspServerConfig::rust_analyzer(),
+            WorkspaceRoots::default(),
+            PositionEncodings::DEFAULT,
+            std::sync::Arc::default(),
+        )
+        .with_child_working_dir(ChildWorkingDir::Fixed(dir.path().join("absent")));
         let err = LspServer::spawn(config).await.unwrap_err();
         assert_matches!(err, Error::ServerNotFound { .. }, "got {err:?}");
     }

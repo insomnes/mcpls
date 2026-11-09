@@ -93,9 +93,11 @@ A `failed` entry carries `reason`, an object with a `kind` and, for most kinds, 
 | `reason.kind` | Meaning | Old process |
 |---------------|---------|-------------|
 | `refused` | A check made before the old process was stopped rejected the restart, for example an [untrusted-workspace](../advanced/untrusted-mode.md) refusal of the launcher | Still running and serving |
-| `spawn_failed` | The replacement could not be started, for example the executable is gone | Stopped; the server stays registered and the next tool call retries the spawn |
+| `spawn_failed` | The replacement process could not be created, for example because its working directory is invalid | Stopped; the server stays registered and the next tool call retries the spawn |
 | `initialize_failed` | The replacement started but did not complete the handshake | Stopped; same retry |
 | `shutting_down` | mcpls is shutting down, so no replacement was started | Stopped |
+
+On Unix with a working anchor, configured-command exec failures (missing command, nonexecutable command or missing shebang interpreter) report `initialize_failed`: the private lifetime gate starts, but the command cannot complete initialization. If the anchor cannot start, the original ungated launch can retain native `spawn_failed` classification. Windows retains native spawn errors.
 
 A `refused` restart does not start the 5 second per-server cooldown, so you can fix the cause and call again at once. Every other outcome that stopped the old process starts it, and a repeat call within 5 seconds answers `throttled`.
 
