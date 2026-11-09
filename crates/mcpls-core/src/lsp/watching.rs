@@ -284,7 +284,7 @@ impl Backend {
                 if command.get(0) == Some(&json!("clock")) {
                     let clock = response
                         .get("clock")
-                        .ok_or_else(|| unavailable("missing Watchman clock"))?;
+                        .ok_or_else(|| startup_exit(&logfile))?;
                     let subscribe = json!(["subscribe", root, format!("mcpls-{index}"), {"since":clock,"fields":["name","exists","new","type"],"empty_on_fresh_instance":false}]);
                     write
                         .write_all(format!("{subscribe}\n").as_bytes())
@@ -292,7 +292,7 @@ impl Backend {
                         .map_err(|_| startup_exit(&logfile))?;
                     let response = setup_response(&mut lines, &logfile).await?;
                     if response.get("subscribe").is_none() || response.get("error").is_some() {
-                        return Err(unavailable(response));
+                        return Err(startup_exit(&logfile));
                     }
                 }
             }
@@ -313,7 +313,7 @@ impl Backend {
             .get("clock")
             .is_none()
         {
-            return Err(unavailable("missing startup clock response"));
+            return Err(startup_exit(&logfile));
         }
         let (events, _) = broadcast::channel(256);
         let failure = Arc::new(Mutex::new(None));
