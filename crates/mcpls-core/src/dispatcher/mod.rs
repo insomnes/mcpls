@@ -24,11 +24,61 @@ use crate::mcp::McplsServer;
 
 type Result<T> = std::result::Result<T, DispatchError>;
 
+/// Current failures contain only controlled text; no subprocess output is retained.
+#[derive(Debug, Clone, Copy)]
+enum Diagnostic {
+    WatchmanResourceExhausted,
+    WatchmanUnavailable,
+    RuntimePreparationFailed,
+    LanguageServerStartFailed,
+}
+impl Diagnostic {
+    fn value(self) -> Value {
+        let (stage, component, code, message, action, recovery) = match self {
+            Self::WatchmanResourceExhausted => (
+                "runtime_preparation",
+                "file_watching",
+                "watchman_resource_exhausted",
+                "Watchman could not start because a resource limit was reached.",
+                "repair_environment_then_retry",
+                "Resolve Watchman or inotify resource pressure, then retry the semantic call.",
+            ),
+            Self::WatchmanUnavailable => (
+                "runtime_preparation",
+                "file_watching",
+                "watchman_unavailable",
+                "Watchman could not establish file watching.",
+                "repair_environment_then_retry",
+                "Check Watchman availability and configuration, then retry the semantic call.",
+            ),
+            Self::RuntimePreparationFailed => (
+                "runtime_preparation",
+                "runtime",
+                "runtime_preparation_failed",
+                "Workspace runtime preparation failed.",
+                "repair_configuration_then_retry",
+                "Check the workspace runtime configuration, then retry the semantic call.",
+            ),
+            Self::LanguageServerStartFailed => (
+                "server_start",
+                "language_server",
+                "language_server_start_failed",
+                "The language server could not start or initialize.",
+                "repair_configuration_then_retry",
+                "Repair the language server configuration or availability, then retry after startup backoff or use restart_server.",
+            ),
+        };
+        json!({"stage":stage,"component":component,"code":code,"message":message,
+            "recovery":{"action":action,"message":recovery}})
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DispatchError {
     code: &'static str,
     message: String,
     retry: Option<u64>,
+    diagnostic: Option<Diagnostic>,
 }
 impl DispatchError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
@@ -36,6 +86,7 @@ impl DispatchError {
             code,
             message: message.into(),
             retry: None,
+            diagnostic: None,
         }
     }
     pub(crate) fn invalid(path: &Path) -> Self {
@@ -77,6 +128,11 @@ impl DispatchError {
             && let Some(data) = data.as_object_mut()
         {
             data.insert("retry_after_ms".into(), json!(retry));
+        }
+        if let Some(diagnostic) = self.diagnostic
+            && let Some(data) = data.as_object_mut()
+        {
+            data.insert("diagnostic".into(), diagnostic.value());
         }
         McpError::new(ErrorCode(number), self.message, Some(data))
     }
@@ -122,6 +178,7 @@ struct StartState {
     recovering: bool,
     failures: usize,
     failed_at: Option<Instant>,
+    diagnostic: Option<Diagnostic>,
 }
 struct ServerStart {
     config: crate::lsp::ServerInitConfig,
@@ -133,6 +190,7 @@ pub struct Resident {
     selection: Selection,
     pub(crate) generation: String,
     runtime: OnceCell<WorkspaceRuntime>,
+    preparation_failure: StdMutex<Option<Diagnostic>>,
     servers: OnceCell<Vec<ServerStart>>,
     pump: OnceCell<crate::runtime::pump::PumpShared>,
     sweep: StdMutex<Option<crate::runtime::disk_sweep::DiskSweepHandle>>,
@@ -575,6 +633,7 @@ impl Dispatcher {
                 selection: selection.clone(),
                 generation: opaque(),
                 runtime: OnceCell::new(),
+                preparation_failure: StdMutex::new(None),
                 servers: OnceCell::new(),
                 pump: OnceCell::new(),
                 sweep: StdMutex::new(None),
@@ -868,8 +927,18 @@ impl Dispatcher {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "status combines existing lifecycle fields and current failure health in one observation"
+)]
 async fn workspace_status(selection: Selection, resident: Option<Arc<Resident>>) -> Value {
+    let preparation_failure = resident
+        .as_ref()
+        .and_then(|r| *crate::util::lock_std(&r.preparation_failure));
     let mut servers = Vec::new();
+    let mut representative = preparation_failure;
+    let mut failed_servers = false;
+    let mut ready_servers = false;
     for configured in &selection.config.lsp_servers {
         let id = configured.id();
         let mut state = "not_started";
@@ -877,67 +946,87 @@ async fn workspace_status(selection: Selection, resident: Option<Arc<Resident>>)
         let mut failures = 0;
         let mut error = None;
         let mut retry = None;
-        if let Some(resident) = &resident {
-            if let Some(runtime) = resident.runtime.get() {
-                if runtime
+        let mut failure_diagnostic = None;
+        if let Some(resident) = &resident
+            && let Some(runtime) = resident.runtime.get()
+        {
+            if runtime
+                .translator
+                .dispatcher_server(&id)
+                .is_some_and(|(alive, _)| alive)
+            {
+                state = "ready";
+            }
+            if let Some(start) = resident
+                .servers
+                .get()
+                .and_then(|s| s.iter().find(|s| s.config.server_config().id() == id))
+            {
+                let mut start_state = start.state.lock().await;
+                let dead = runtime
                     .translator
                     .dispatcher_server(&id)
-                    .is_some_and(|(alive, _)| alive)
-                {
-                    state = "ready";
+                    .is_some_and(|(alive, _)| !alive);
+                if dead && !start_state.recovering && start_state.failed_at.is_none() {
+                    start_state.failed_at = Some(Instant::now());
+                    start_state.failures = start_state.failures.saturating_add(1);
                 }
-                if let Some(start) = resident
-                    .servers
-                    .get()
-                    .and_then(|s| s.iter().find(|s| s.config.server_config().id() == id))
-                {
-                    let mut start_state = start.state.lock().await;
-                    let dead = runtime
-                        .translator
-                        .dispatcher_server(&id)
-                        .is_some_and(|(alive, _)| !alive);
-                    if dead && !start_state.recovering && start_state.failed_at.is_none() {
-                        start_state.failed_at = Some(Instant::now());
-                        start_state.failures = start_state.failures.saturating_add(1);
-                    }
-                    failures = start_state.failures;
-                    if state != "ready" && start_state.launched {
-                        state = "starting";
-                    }
-                    if let Some(at) = start_state.failed_at {
-                        state = "failed";
-                        error = Some("language server failed to start".to_string());
-                        retry = Some(5000u64.saturating_sub(
-                            u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        ));
-                    }
-                    drop(start_state);
-                    let raw = start.pid.load(Ordering::Acquire);
-                    if raw > 0 && state != "failed" {
-                        pid = Some(raw);
-                    }
+                if state == "ready" {
+                    start_state.failed_at = None;
+                    start_state.diagnostic = None;
                 }
-                if let Some(reason) = runtime.translator.watching_error(&id) {
+                if start_state.failed_at.is_some() {
+                    start_state.diagnostic = Some(Diagnostic::LanguageServerStartFailed);
+                }
+                failure_diagnostic = start_state.diagnostic;
+                failures = start_state.failures;
+                if state != "ready" && start_state.launched {
+                    state = "starting";
+                }
+                if let Some(at) = start_state.failed_at {
                     state = "failed";
-                    error = Some(reason);
-                    pid = None;
-                }
-                if runtime.translator.startup_failure(&id).is_some() {
-                    state = "failed";
-                    failures = failures.max(1);
                     error = Some("language server failed to start".to_string());
-                    pid = None;
+                    retry = Some(5000u64.saturating_sub(
+                        u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    ));
+                }
+                drop(start_state);
+                let raw = start.pid.load(Ordering::Acquire);
+                if raw > 0 && state != "failed" {
+                    pid = Some(raw);
                 }
             }
-            if resident.draining.load(Ordering::Acquire) {
-                state = "draining";
+            if let Some(reason) = runtime.translator.watching_error(&id) {
+                state = "failed";
+                error = Some(reason);
+                failure_diagnostic = Some(Diagnostic::WatchmanUnavailable);
+                pid = None;
+            }
+            if runtime.translator.startup_failure(&id).is_some() {
+                state = "failed";
+                failure_diagnostic = Some(Diagnostic::LanguageServerStartFailed);
+                failures = failures.max(1);
+                error = Some("language server failed to start".to_string());
+                pid = None;
             }
         }
-        servers.push(json!({"server":id,"state":state,"pid":pid,"start_failures":failures,"last_error":error,"retry_after_ms":retry}));
+        failed_servers |= failure_diagnostic.is_some();
+        representative = representative.or(failure_diagnostic);
+        let diagnostic = failure_diagnostic.map(Diagnostic::value);
+        ready_servers |= state == "ready";
+        if resident
+            .as_ref()
+            .is_some_and(|r| r.draining.load(Ordering::Acquire))
+        {
+            state = "draining";
+        }
+        servers.push(json!({"server":id,"state":state,"pid":pid,"start_failures":failures,"last_error":error,"retry_after_ms":retry,"diagnostic":diagnostic}));
     }
     let state = resident.as_ref().map_or("discovered", |r| {
         if r.draining.load(Ordering::Acquire) {
             "draining"
+        } else if preparation_failure.is_some() {
+            "failed"
         } else if servers.iter().any(|s| s["state"] == "starting") {
             "starting"
         } else if servers.iter().any(|s| s["state"] == "ready") {
@@ -948,6 +1037,14 @@ async fn workspace_status(selection: Selection, resident: Option<Arc<Resident>>)
             "ready"
         }
     });
+    let health = if preparation_failure.is_some() || (failed_servers && !ready_servers) {
+        "failed"
+    } else if failed_servers {
+        "degraded"
+    } else {
+        "healthy"
+    };
+    let diagnostic = representative.map(Diagnostic::value);
     let last_activity = resident.as_ref().and_then(|r| {
         crate::util::lock_std(&r.activity)
             .as_ref()
@@ -958,7 +1055,7 @@ async fn workspace_status(selection: Selection, resident: Option<Arc<Resident>>)
     } else {
         0
     };
-    json!({"temporary":selection.temporary,"workspace_path":selection.identity.root,"identity":format!("{:x}",Sha256::digest(format!("{:?}",selection.identity))),"repository_common_dir":selection.identity.common,"git_dir":selection.identity.git_dir,"profile":selection.profile,"generation":resident.as_ref().map(|r|&r.generation),"state":state,"last_activity":last_activity,"active_requests":resident.as_ref().map_or(0,|r|r.active.load(Ordering::Acquire)),"subscriptions":subscriptions,"servers":servers})
+    json!({"temporary":selection.temporary,"workspace_path":selection.identity.root,"identity":format!("{:x}",Sha256::digest(format!("{:?}",selection.identity))),"repository_common_dir":selection.identity.common,"git_dir":selection.identity.git_dir,"profile":selection.profile,"generation":resident.as_ref().map(|r|&r.generation),"state":state,"health":health,"diagnostic":diagnostic,"last_activity":last_activity,"active_requests":resident.as_ref().map_or(0,|r|r.active.load(Ordering::Acquire)),"subscriptions":subscriptions,"servers":servers})
 }
 
 struct RuntimeValidity {
@@ -1032,11 +1129,19 @@ impl Resident {
                 let mut runtime =
                     WorkspaceRuntime::prepare_scoped(&config, Some(execution_boundary))
                         .await
-                        .map_err(|error| match error {
-                            crate::error::Error::FileWatchingUnavailable => {
-                                DispatchError::new("workspace_unavailable", error.to_string())
-                            }
-                            _ => DispatchError::profile(&self.selection.profile),
+                        .map_err(|error| {
+                            let diagnostic = match error {
+                                crate::error::Error::WatchmanResourceExhausted => Diagnostic::WatchmanResourceExhausted,
+                                crate::error::Error::FileWatchingUnavailable => Diagnostic::WatchmanUnavailable,
+                                _ => Diagnostic::RuntimePreparationFailed,
+                            };
+                            *crate::util::lock_std(&self.preparation_failure) = Some(diagnostic);
+                            let mut error = match diagnostic {
+                                Diagnostic::RuntimePreparationFailed => DispatchError::new("profile_invalid", "Workspace runtime preparation failed; check its configuration."),
+                                _ => DispatchError::new("workspace_unavailable", "Watchman could not establish file watching; repair the environment and retry the semantic call."),
+                            };
+                            error.diagnostic = Some(diagnostic);
+                            error
                         })?;
                 runtime
                     .subscription_registry
@@ -1077,6 +1182,7 @@ impl Resident {
                                 recovering: false,
                                 failures: 0,
                                 failed_at: None,
+                                diagnostic: None,
                             }),
                         }
                     })
@@ -1098,6 +1204,7 @@ impl Resident {
                     &self.invalid,
                 );
                 *crate::util::lock_std(&self.sweep) = Some(sweep);
+                *crate::util::lock_std(&self.preparation_failure) = None;
                 Ok(runtime)
             })
             .await
@@ -1156,12 +1263,15 @@ impl Resident {
                 .dispatcher_server(&id)
                 .is_some_and(|(alive, _)| alive)
             {
+                state.failed_at = None;
+                state.diagnostic = None;
                 continue;
             }
             let crashed = runtime.translator.dispatcher_server(&id).is_some();
             if crashed && !state.recovering && state.failed_at.is_none() {
                 state.failed_at = Some(Instant::now());
                 state.failures = state.failures.saturating_add(1);
+                state.diagnostic = Some(Diagnostic::LanguageServerStartFailed);
             }
             if let Some(at) = state.failed_at {
                 let retry = 5000u64
@@ -1172,6 +1282,7 @@ impl Resident {
                         format!("server {id} is in startup backoff"),
                     );
                     error.retry = Some(retry);
+                    error.diagnostic = Some(Diagnostic::LanguageServerStartFailed);
                     return Err(error);
                 }
                 state.launched = false;
@@ -1195,6 +1306,7 @@ impl Resident {
                         if failed {
                             state.failed_at = Some(Instant::now());
                             state.failures = state.failures.saturating_add(1);
+                            state.diagnostic = Some(Diagnostic::LanguageServerStartFailed);
                         }
                     }
                 }));
@@ -1275,6 +1387,10 @@ impl Resident {
                 .dispatcher_server(id)
                 .is_some_and(|(alive, _)| alive)
             {
+                let mut state = start.state.lock().await;
+                state.failed_at = None;
+                state.diagnostic = None;
+                drop(state);
                 return Ok(());
             }
             if start.state.lock().await.failed_at.is_some()
@@ -1286,12 +1402,14 @@ impl Resident {
                     state.failed_at = Some(Instant::now());
                     start.pid.store(0, Ordering::Release);
                 }
+                state.diagnostic = Some(Diagnostic::LanguageServerStartFailed);
                 drop(state);
                 let mut error = DispatchError::new(
                     "workspace_unavailable",
                     format!("server {id} failed to start"),
                 );
                 error.retry = Some(5000);
+                error.diagnostic = Some(Diagnostic::LanguageServerStartFailed);
                 return Err(error);
             }
             tokio::select! {()=self.invalid.cancelled()=>return Err(DispatchError::new("workspace_invalidated","workspace runtime was invalidated")), ()=tokio::time::sleep(Duration::from_millis(10))=>{}}

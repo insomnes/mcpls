@@ -2080,6 +2080,10 @@ pub enum Error {
     )]
     FileWatchingUnavailable,
 
+    /// Watchman reported resource exhaustion during workspace preparation.
+    #[error("Watchman could not start because a resource limit was reached")]
+    WatchmanResourceExhausted,
+
     /// LSP protocol error during message parsing.
     #[error("LSP protocol error: {}", escape_control(.0.as_str()))]
     LspProtocolError(RedactedText),
@@ -2632,6 +2636,7 @@ impl Error {
             | Self::ServerSpawnFailed { .. }
             | Self::ServerNotFound { .. }
             | Self::FileWatchingUnavailable
+            | Self::WatchmanResourceExhausted
             | Self::LspProtocolError(_)
             | Self::ServerTerminated
             | Self::ShutdownTimeout
@@ -2689,6 +2694,7 @@ impl Error {
             | Self::ServerSpawnFailed { .. }
             | Self::ServerNotFound { .. }
             | Self::FileWatchingUnavailable
+            | Self::WatchmanResourceExhausted
             | Self::LspProtocolError(..)
             | Self::NoResolvableListenUris
             | Self::InvalidPositionInput(..)

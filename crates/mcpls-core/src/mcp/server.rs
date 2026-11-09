@@ -829,7 +829,7 @@ impl McplsServer {
     }
 
     #[tool(
-        description = "Read discovered workspace identities, generations, lifecycle state, resource limits, and server status. Starts no language server.",
+        description = "Read workspace identities, lifecycle, health, diagnostics, limits, and server status. Starts no backend; retry after repairing the reported prerequisite.",
         title = "Workspace Status"
     )]
     async fn get_workspace_status(

@@ -164,6 +164,9 @@ async fn lazy_catalog_and_worktree_isolation() {
     .await
     .unwrap();
     assert_eq!(status["workspaces"][0]["state"], "discovered");
+    assert_eq!(status["workspaces"][0]["health"], "healthy");
+    assert!(status["workspaces"][0]["diagnostic"].is_null());
+    assert!(status["workspaces"][0]["servers"][0]["diagnostic"].is_null());
     assert_eq!(fixture.events(), [] as [serde_json::Value; 0]);
     let first = call(&client, "get_hover", hover(&fixture.main))
         .await
@@ -1133,6 +1136,22 @@ async fn lost_route_keeps_demand_only_backoff_and_recovery() {
             .count(),
         1
     );
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":fixture.main}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["workspaces"][0]["health"], "failed");
+    assert_eq!(
+        status["workspaces"][0]["diagnostic"]["code"],
+        "language_server_start_failed"
+    );
+    assert_eq!(
+        status["workspaces"][0]["servers"][0]["diagnostic"],
+        status["workspaces"][0]["diagnostic"]
+    );
     std::fs::remove_file(&failure).unwrap();
     let recovered = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -1151,6 +1170,16 @@ async fn lost_route_keeps_demand_only_backoff_and_recovery() {
     .await
     .unwrap();
     assert!(recovered.to_string().contains("AUTHORED MAIN"));
+    let status = call(
+        &client,
+        "get_workspace_status",
+        json!({"workspace_path":fixture.main}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status["workspaces"][0]["health"], "healthy");
+    assert!(status["workspaces"][0]["diagnostic"].is_null());
+    assert!(status["workspaces"][0]["servers"][0]["diagnostic"].is_null());
     assert_eq!(
         fixture
             .events()
@@ -2723,6 +2752,95 @@ async fn diagnostics_delta_server_identity_byte_boundary() {
         call(&client, "get_diagnostics", json!({"file_path":path}))
             .await
             .unwrap();
+        dispatcher.shutdown().await;
+        client.cancel().await.unwrap();
+        task.await.unwrap();
+    }
+}
+
+/// Failed preparation must retain a safe cause without inventing an LSP start.
+#[tokio::test]
+async fn watchman_startup_diagnostics_are_retained_and_sanitized() {
+    for (text, code) in [
+        (
+            "inotify_add_watch: nO sPaCe LeFt On DeViCe (ENOSPC)".to_owned(),
+            "watchman_resource_exhausted",
+        ),
+        (
+            format!("{} ENOSPC", "x".repeat(50_000)),
+            "watchman_resource_exhausted",
+        ),
+        (
+            "private-token=AUTHORED_SECRET /private/backend/path \x1b[31m".to_owned(),
+            "watchman_unavailable",
+        ),
+    ] {
+        let fixture = Fixture::new(4);
+        let backend = fixture.profile.parent().unwrap().join("backend");
+        let launches = fixture.profile.parent().unwrap().join("launches");
+        let text = serde_json::to_string(&text).unwrap();
+        std::fs::write(&backend, format!(
+            "#!/usr/bin/python3\nimport pathlib, sys\npathlib.Path({launches:?}).open('a').write('start\\n')\npathlib.Path(sys.argv[sys.argv.index('--logfile')+1]).write_text({text})\n"
+        )).unwrap();
+        std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let profile = std::fs::read_to_string(&fixture.profile).unwrap();
+        std::fs::write(
+            &fixture.profile,
+            format!(
+                "{profile}\n[workspace.file_watching]\nbackend='watchman'\ncommand={backend:?}\n"
+            ),
+        )
+        .unwrap();
+        let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+        let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+        let failure = call(&client, "get_hover", hover(&fixture.main))
+            .await
+            .unwrap_err();
+        let rmcp::ServiceError::McpError(failure) = failure else {
+            panic!("expected MCP failure")
+        };
+        assert!(!failure.message.contains("AUTHORED_SECRET"));
+        assert!(!failure.message.contains("/private/backend/path"));
+        assert!(!failure.message.contains('\x1b'));
+        let data = failure.data.unwrap();
+        assert_eq!(data["code"], "workspace_unavailable");
+        assert_eq!(data["retryable"], true);
+        let diagnostic = &data["diagnostic"];
+        assert_eq!(diagnostic["code"], code);
+        assert_eq!(diagnostic["stage"], "runtime_preparation");
+        assert_eq!(diagnostic["component"], "file_watching");
+        assert_eq!(
+            diagnostic["recovery"]["action"],
+            "repair_environment_then_retry"
+        );
+        assert!(diagnostic.to_string().len() <= 2048);
+        assert!(!diagnostic.to_string().contains("AUTHORED_SECRET"));
+        assert!(!diagnostic.to_string().contains("/private/backend/path"));
+        for message in [&diagnostic["message"], &diagnostic["recovery"]["message"]] {
+            let message = message.as_str().unwrap();
+            assert!(message.len() <= 512);
+            assert!(!message.contains('\x1b'));
+        }
+        for _ in 0..2 {
+            let status = call(
+                &client,
+                "get_workspace_status",
+                json!({"workspace_path":fixture.main}),
+            )
+            .await
+            .unwrap();
+            let workspace = &status["workspaces"][0];
+            assert_eq!(workspace["state"], "failed");
+            assert_eq!(workspace["health"], "failed");
+            assert_eq!(&workspace["diagnostic"], diagnostic);
+            let server = &workspace["servers"][0];
+            assert_eq!(server["state"], "not_started");
+            assert_eq!(server["start_failures"], 0);
+            assert!(server["pid"].is_null());
+            assert!(server["diagnostic"].is_null());
+        }
+        assert_eq!(std::fs::read_to_string(&launches).unwrap(), "start\n");
+        assert_eq!(fixture.events(), [] as [Value; 0]);
         dispatcher.shutdown().await;
         client.cancel().await.unwrap();
         task.await.unwrap();

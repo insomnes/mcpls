@@ -209,6 +209,7 @@ impl RestartFailure {
             | Error::Timeout(_)
             | Error::LspServerError(..)
             | Error::FileWatchingUnavailable
+            | Error::WatchmanResourceExhausted
             | Error::LspProtocolError(_)
             | Error::ShutdownTimeout
             | Error::Io(_)

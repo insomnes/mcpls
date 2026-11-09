@@ -23,14 +23,51 @@ pub(crate) fn unavailable(message: impl std::fmt::Display) -> Error {
     Error::FileWatchingUnavailable
 }
 
+// Classification inspects only bounded bytes and never retains backend text.
+#[cfg(target_os = "linux")]
+const FAILURE_CAPTURE_BYTES: usize = 16_384;
+
+#[cfg(target_os = "linux")]
+fn resource_exhausted(bytes: &[u8]) -> bool {
+    let bytes = bytes.get(..FAILURE_CAPTURE_BYTES).unwrap_or(bytes);
+    [b"enospc".as_slice(), b"no space left on device".as_slice()]
+        .iter()
+        .any(|marker| {
+            bytes
+                .windows(marker.len())
+                .any(|part| part.eq_ignore_ascii_case(marker))
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn startup_exit(logfile: &Path) -> Error {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let exhausted = (|| -> std::io::Result<bool> {
+        let mut file = std::fs::File::open(logfile)?;
+        let length = file.metadata()?.len();
+        let bound = u64::try_from(FAILURE_CAPTURE_BYTES).unwrap_or(u64::MAX);
+        file.seek(SeekFrom::Start(length.saturating_sub(bound)))?;
+        let mut bytes = Vec::with_capacity(FAILURE_CAPTURE_BYTES);
+        file.take(bound).read_to_end(&mut bytes)?;
+        Ok(resource_exhausted(&bytes))
+    })()
+    .unwrap_or(false);
+    if exhausted {
+        Error::WatchmanResourceExhausted
+    } else {
+        unavailable("Watchman startup failed")
+    }
+}
+
 // A quiet subscription need not produce an initial notification. Drain optional
 // initial frames while waiting for the next ordinary command response.
 #[cfg(target_os = "linux")]
 async fn setup_response(
     lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+    logfile: &Path,
 ) -> Result<Value> {
     use tokio::time::{Duration, timeout};
-    timeout(Duration::from_secs(10), async {
+    let result = timeout(Duration::from_secs(10), async {
         loop {
             let line = lines
                 .next_line()
@@ -42,7 +79,11 @@ async fn setup_response(
                 .iter()
                 .any(|key| response.get(*key).is_some())
             {
-                return Err(unavailable(response));
+                return Err(if resource_exhausted(line.as_bytes()) {
+                    Error::WatchmanResourceExhausted
+                } else {
+                    unavailable("Watchman setup failed")
+                });
             }
             if response.get("subscription").is_none() {
                 return Ok(response);
@@ -50,7 +91,11 @@ async fn setup_response(
         }
     })
     .await
-    .map_err(unavailable)?
+    .unwrap_or_else(|error| Err(unavailable(error)));
+    result.map_err(|error| match error {
+        Error::FileWatchingUnavailable => startup_exit(logfile),
+        error => error,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +209,7 @@ impl Backend {
             .tempdir()
             .map_err(unavailable)?;
         let socket = directory.path().join("sock");
+        let logfile = directory.path().join("log");
         let mut command = tokio::process::Command::new(&config.command);
         command
             .current_dir(
@@ -175,7 +221,7 @@ impl Backend {
             .arg("--sockname")
             .arg(&socket)
             .arg("--logfile")
-            .arg(directory.path().join("log"))
+            .arg(&logfile)
             .arg("--statefile")
             .arg(directory.path().join("state"))
             .arg("--pidfile")
@@ -216,7 +262,7 @@ impl Backend {
         let stream = timeout(Duration::from_secs(10), async {
             loop {
                 if child.try_wait().map_err(unavailable)?.is_some() {
-                    return Err(unavailable("Watchman exited during startup"));
+                    return Err(startup_exit(&logfile));
                 }
                 if let Ok(stream) = UnixStream::connect(&socket).await {
                     break Ok(stream);
@@ -225,7 +271,7 @@ impl Backend {
             }
         })
         .await
-        .map_err(unavailable)??;
+        .map_err(|_| startup_exit(&logfile))??;
         let (read, mut write) = stream.into_split();
         let mut lines = BufReader::new(read).lines();
         for (index, root) in roots.iter().enumerate() {
@@ -234,7 +280,7 @@ impl Backend {
                     .write_all(format!("{command}\n").as_bytes())
                     .await
                     .map_err(unavailable)?;
-                let response = setup_response(&mut lines).await?;
+                let response = setup_response(&mut lines, &logfile).await?;
                 if command.get(0) == Some(&json!("clock")) {
                     let clock = response
                         .get("clock")
@@ -244,7 +290,7 @@ impl Backend {
                         .write_all(format!("{subscribe}\n").as_bytes())
                         .await
                         .map_err(unavailable)?;
-                    let response = setup_response(&mut lines).await?;
+                    let response = setup_response(&mut lines, &logfile).await?;
                     if response.get("subscribe").is_none() || response.get("error").is_some() {
                         return Err(unavailable(response));
                     }
@@ -262,7 +308,11 @@ impl Backend {
             .write_all(format!("{barrier}\n").as_bytes())
             .await
             .map_err(unavailable)?;
-        if setup_response(&mut lines).await?.get("clock").is_none() {
+        if setup_response(&mut lines, &logfile)
+            .await?
+            .get("clock")
+            .is_none()
+        {
             return Err(unavailable("missing startup clock response"));
         }
         let (events, _) = broadcast::channel(256);

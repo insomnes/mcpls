@@ -108,6 +108,35 @@ The status result includes `mode`, `limits`, and sorted `workspaces`. Each works
 
 Workspace states are `discovered`, `starting`, `ready`, `draining`, and `failed`. Server states are `not_started`, `starting`, `ready`, `draining`, and `failed`. A discovered entry consumes no resident capacity. Starts and draining runtimes consume capacity until cleanup finishes.
 
+Each workspace also reports `health` and `diagnostic`; each server reports `diagnostic`.
+An untouched lazy workspace is `healthy` with null diagnostics. A current preparation
+failure sets workspace state and health to `failed`, even when every server remains
+`not_started`. A failed server with a ready peer gives `degraded` health; without a
+ready peer it gives `failed` health. Retirement keeps the `draining` lifecycle state
+without clearing observed failures. Status reads do not retry or clear failures.
+
+A non-null diagnostic contains `stage`, `component`, `code`, `message`, and
+`recovery` (`action` and `message`). Workspace status selects one current failure;
+failed server rows retain their own diagnostic. Messages use fixed summaries and do
+not include backend output. The same diagnostic accompanies affected semantic errors
+in `data.diagnostic`, alongside existing error codes and retry fields.
+
+| Diagnostic code | Meaning | Recovery action |
+| --- | --- | --- |
+| `watchman_resource_exhausted` | Watchman reported ENOSPC or equivalent resource pressure | `repair_environment_then_retry` |
+| `watchman_unavailable` | Watchman launch or setup failed for another or unknown reason | `repair_environment_then_retry` |
+| `runtime_preparation_failed` | Another runtime preparation step failed | `repair_configuration_then_retry` |
+| `language_server_start_failed` | The configured language server could not launch or initialize | `repair_configuration_then_retry` |
+
+For Watchman resource exhaustion, check Watchman and inotify resource pressure;
+ENOSPC alone does not identify disk exhaustion. Classification examines at most
+16 KiB of each captured source, including a bounded logfile tail. Unknown causes
+remain generic. Repair the prerequisite, then retry the semantic call. Language
+server recovery retains existing startup backoff and `restart_server` behavior.
+`retryable: true` permits another attempt; waiting alone need not repair the cause.
+A successful recovery clears only its relevant failure. Failures belong to the
+current runtime generation and are not preserved after retirement or restart.
+
 The first semantic request starts applicable backends lazily. Concurrent callers share a start. Canceling one waiter does not cancel another waiter. The global start limit also bounds profile starts; a smaller profile concurrency limit further restricts that runtime.
 
 Only workspaces without active requests or live subscriptions can be idle-evicted. An open HTTP session alone does not pin a runtime. Capacity pressure can evict an eligible idle runtime immediately. If all slots are busy, the request returns `workspace_capacity`. Failures and demand-driven retries remain isolated to the affected workspace/server. Automatic retries are separated by at least five seconds after failure, with delays no greater than thirty seconds. Explicit restart keeps its existing cooldown.
