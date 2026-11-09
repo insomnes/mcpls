@@ -6743,30 +6743,6 @@
           ],
           "type": "object"
         },
-        "PositionDegradation": {
-          "oneOf": [
-            {
-              "const": "response",
-              "type": "string"
-            },
-            {
-              "const": "request",
-              "type": "string"
-            }
-          ]
-        },
-        "PositionSource": {
-          "oneOf": [
-            {
-              "const": "selection_range",
-              "type": "string"
-            },
-            {
-              "const": "inferred",
-              "type": "string"
-            }
-          ]
-        },
         "Range": {
           "properties": {
             "end": {
@@ -6915,7 +6891,70 @@
             "source": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/ReferenceSource"
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "origin": {
+                          "enum": [
+                            "tracked",
+                            "disk"
+                          ],
+                          "type": "string"
+                        },
+                        "shortened": {
+                          "type": "boolean"
+                        },
+                        "start_line": {
+                          "format": "uint32",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "status": {
+                          "const": "text",
+                          "type": "string"
+                        },
+                        "text": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "text",
+                        "start_line",
+                        "origin",
+                        "shortened"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "reason": {
+                          "enum": [
+                            "candidate_limit",
+                            "file_limit",
+                            "source_budget",
+                            "text_budget",
+                            "deadline",
+                            "access_denied",
+                            "read_failed",
+                            "file_too_large",
+                            "invalid_utf8",
+                            "line_unavailable"
+                          ],
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": "unavailable",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "reason"
+                      ],
+                      "type": "object"
+                    }
+                  ]
                 },
                 {
                   "type": "null"
@@ -6931,144 +6970,6 @@
             "range"
           ],
           "type": "object"
-        },
-        "ReferenceSource": {
-          "oneOf": [
-            {
-              "properties": {
-                "origin": {
-                  "$ref": "#/$defs/SourceOrigin"
-                },
-                "shortened": {
-                  "type": "boolean"
-                },
-                "start_line": {
-                  "format": "uint32",
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "status": {
-                  "const": "text",
-                  "type": "string"
-                },
-                "text": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "status",
-                "text",
-                "start_line",
-                "origin",
-                "shortened"
-              ],
-              "type": "object"
-            },
-            {
-              "properties": {
-                "reason": {
-                  "$ref": "#/$defs/SourceUnavailableReason"
-                },
-                "status": {
-                  "const": "unavailable",
-                  "type": "string"
-                }
-              },
-              "required": [
-                "status",
-                "reason"
-              ],
-              "type": "object"
-            }
-          ]
-        },
-        "ResolvedSymbol": {
-          "properties": {
-            "container": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "name": {
-              "type": "string"
-            },
-            "position": {
-              "$ref": "#/$defs/Position2D"
-            },
-            "position_source": {
-              "$ref": "#/$defs/PositionSource"
-            }
-          },
-          "required": [
-            "name",
-            "kind",
-            "container",
-            "position",
-            "position_source"
-          ],
-          "type": "object"
-        },
-        "SourceOrigin": {
-          "oneOf": [
-            {
-              "const": "tracked",
-              "type": "string"
-            },
-            {
-              "const": "disk",
-              "type": "string"
-            }
-          ]
-        },
-        "SourceUnavailableReason": {
-          "oneOf": [
-            {
-              "const": "candidate_limit",
-              "type": "string"
-            },
-            {
-              "const": "file_limit",
-              "type": "string"
-            },
-            {
-              "const": "source_budget",
-              "type": "string"
-            },
-            {
-              "const": "text_budget",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            },
-            {
-              "const": "access_denied",
-              "type": "string"
-            },
-            {
-              "const": "read_failed",
-              "type": "string"
-            },
-            {
-              "const": "file_too_large",
-              "type": "string"
-            },
-            {
-              "const": "invalid_utf8",
-              "type": "string"
-            },
-            {
-              "const": "line_unavailable",
-              "type": "string"
-            }
-          ]
         },
         "SymbolFidelity": {
           "oneOf": [
@@ -7138,7 +7039,11 @@
         "positions_degraded": {
           "anyOf": [
             {
-              "$ref": "#/$defs/PositionDegradation"
+              "enum": [
+                "response",
+                "request"
+              ],
+              "type": "string"
             },
             {
               "type": "null"
@@ -7148,7 +7053,56 @@
         "resolved_symbol": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ResolvedSymbol"
+              "properties": {
+                "container": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "position": {
+                  "properties": {
+                    "character": {
+                      "format": "uint32",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "line": {
+                      "format": "uint32",
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "line",
+                    "character"
+                  ],
+                  "type": "object"
+                },
+                "position_source": {
+                  "enum": [
+                    "selection_range",
+                    "inferred"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "kind",
+                "container",
+                "position",
+                "position_source"
+              ],
+              "type": "object"
             },
             {
               "type": "null"

@@ -2949,6 +2949,47 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn test_truncated_oversized_request_is_answered_without_replying_to_notification() {
+            use crate::test_lsp::write_raw_frame;
+
+            for id in [serde_json::json!("srv-truncated"), serde_json::json!(17)] {
+                let (client, mut server) = fake_lsp_client();
+                let mut reader = BufReader::new(&mut server.write_stdout);
+                let padding = " ".repeat(crate::lsp::transport::MAX_CONTENT_LENGTH + 1);
+                write_raw_frame(
+                    &mut server.read_half_stdin,
+                    &format!(
+                        r#"{{"jsonrpc":"2.0","id":{id},"method":"workspace/configuration","params":{padding}"#
+                    ),
+                )
+                .await;
+                let reply = timeout(Duration::from_secs(5), read_framed_message(&mut reader))
+                    .await
+                    .expect("an identified oversized request must receive its error reply");
+                assert_eq!(reply["id"], id);
+                assert_eq!(reply["error"]["code"], -32600);
+
+                write_raw_frame(
+                    &mut server.read_half_stdin,
+                    &format!(
+                        r#"{{"jsonrpc":"2.0","method":"unrelated/notification","params":{padding}"#
+                    ),
+                )
+                .await;
+                let hover = spawn_hover(&client);
+                let request = read_framed_message(&mut reader).await;
+                assert_eq!(request["method"], "textDocument/hover");
+                write_response(
+                    &mut server.read_half_stdin,
+                    &request["id"],
+                    serde_json::json!("alive"),
+                )
+                .await;
+                assert_eq!(hover.await.unwrap().unwrap(), serde_json::json!("alive"));
+            }
+        }
+
+        #[tokio::test]
         async fn test_a_run_of_undecodable_frames_ends_the_connection() {
             use crate::test_lsp::write_raw_frame;
 

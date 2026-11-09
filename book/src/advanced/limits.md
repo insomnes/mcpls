@@ -74,6 +74,8 @@ A `notifications/*` request with an `id` and no `params` or object `params` deco
 
 A language server message larger than 10 MiB is not fatal. Up to 256 MiB, mcpls skips the frame in constant memory and fails only the request it answers: a tool call waiting on it returns an error, a request the server sent is answered `-32600`, and a notification is dropped. A dropped `textDocument/publishDiagnostics` marks its file `evicted` until the server publishes it again. When the file cannot be read from the frame, every file the server reported on is marked the same way, and files it never reported on read `evicted` only until the server's next write. The connection stays up and later messages are read. A frame announced above 256 MiB closes the connection, so a server that streams without end is still stopped.
 
+For an oversized server request, complete ID and method tokens recovered by the existing bounded scanner are enough to return `-32600`, even when params is unfinished. An oversized response needs a closed outer JSON object before it can be attributed to a waiting request. Otherwise the original request deadline still applies.
+
 While mcpls skips a frame it cannot read anything else from that server. A server that announces a large frame and then stops writing leaves its requests timing out until you call `restart_server`. The same holds for a stalled frame under 10 MiB, over a window 25 times narrower.
 
 If a result is too large for a single frame, narrow the query (`limit`, `kind_filter`, a smaller range) rather than raising any limit; the frame limit is fixed.

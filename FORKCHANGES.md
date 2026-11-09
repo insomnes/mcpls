@@ -11,6 +11,9 @@ This fork is version `0.9.1+insomnes.1`. Its upstream release is [v0.9.1](https:
 
 ## Deliberate fork differences
 
+- Oversized LSP requests with complete bounded ID and method tokens receive `-32600` even when params never closes. Oversized responses retain their closed-object attribution rule. Existing framing, notification silence and diagnostic-loss behavior remain.
+- Client tool declarations retain finite reference-source alternatives, degradation literals and resolved-symbol fields through local schema normalization. Nullable fields and runtime results are unchanged.
+
 - Unix LSP launch remains native: accepted environment keys and values, command paths (including `=`), argv, working directory and stdio are preserved. Missing commands, nonexecutable commands and missing shebang interpreters retain native startup errors and restart reason `spawn_failed`. Abrupt parent death before watchdog binding can leave servers or descendants alive; this startup gap remains. After binding, the existing watchdog cleans up attributable and already-recorded descendants, including `setsid` descendants. Ancestry must remain attributable at discovery: a kernel orphaned-group SIGHUP/SIGCONT transition can kill the native leader before the first snapshot and leave reparented helpers unknown. An independent leader exit can cause the same limit. These gaps remain; native signal behavior is unchanged. Anchor and watchdog failure fallbacks retain their documented limits.
 
 - The public Rust field `LspServerConfig.initialization_options` remains `Option<serde_json::Value>`. Private boundary adapters reject nested TOML datetimes. Settings and parent configuration Debug output redact values; initialization and configuration transmission preserve valid values.

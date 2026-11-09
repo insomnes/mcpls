@@ -362,7 +362,7 @@ fn shape_client_contract(tool: &mut Tool) {
         "get_tool_support" => &["$defs", "RouteShape"],
         "workspace_symbol_search" => &["$defs", "ServerOutcome"],
         "restart_server" => &["$defs", "ServerRestartEntry"],
-        "rename_symbol" => &[],
+        "rename_symbol" | "get_references" => &[],
         "get_diagnostics" => &["anyOf", "1", "properties", "results", "items"],
         _ => return,
     };
@@ -410,6 +410,10 @@ fn shape_client_contract(tool: &mut Tool) {
 
 /// Repair only the finite leaves demonstrated to lose types in client readback.
 fn repair_finite_client_leaves(value: &mut Value, tool: &str) {
+    if tool == "get_references" {
+        repair_reference_client_leaves(value);
+        return;
+    }
     let enum_paths: &[&str] = if tool == "get_diagnostics" {
         for (name, owner) in [
             (
@@ -498,6 +502,40 @@ fn repair_finite_client_leaves(value: &mut Value, tool: &str) {
         return;
     };
     compact_known_string_enums(value, enum_paths);
+}
+
+fn repair_reference_client_leaves(value: &mut Value) {
+    compact_known_string_enums(
+        value,
+        &[
+            "/$defs/SourceOrigin",
+            "/$defs/SourceUnavailableReason",
+            "/$defs/PositionDegradation",
+            "/$defs/PositionSource",
+        ],
+    );
+    if let Some(position) = value.pointer("/$defs/Position2D").cloned()
+        && let Some(field) = value.pointer_mut("/$defs/ResolvedSymbol/properties/position")
+    {
+        *field = position;
+    }
+    // These finite leaves are not recursive. Inline every reference before
+    // removing the definitions, including both uses of ReferenceLocation.
+    for name in [
+        "SourceOrigin",
+        "SourceUnavailableReason",
+        "PositionDegradation",
+        "PositionSource",
+        "ReferenceSource",
+        "ResolvedSymbol",
+    ] {
+        if let Some(definition) = value.pointer(&format!("/$defs/{name}")).cloned() {
+            inline_leaf_reference(value, &format!("#/$defs/{name}"), &definition);
+            if let Some(definitions) = value.get_mut("$defs").and_then(Value::as_object_mut) {
+                definitions.remove(name);
+            }
+        }
+    }
 }
 
 fn compact_known_string_enums(value: &mut Value, enum_paths: &[&str]) {
@@ -1168,6 +1206,94 @@ mod tests {
     }
 
     #[test]
+    fn test_references_publish_finite_source_and_position_contract() {
+        let tools = shaped_tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "get_references")
+            .unwrap();
+        let output = serde_json::to_value(tool.output_schema.as_ref().unwrap()).unwrap();
+        let source = &output["$defs"]["ReferenceLocation"]["properties"]["source"]["anyOf"];
+        assert_eq!(source[1]["type"], "null");
+        let alternatives = source[0]["oneOf"].as_array().unwrap();
+        assert_eq!(alternatives.len(), 2);
+        let text = alternatives
+            .iter()
+            .find(|branch| branch["properties"]["status"]["const"] == "text")
+            .unwrap();
+        let unavailable = alternatives
+            .iter()
+            .find(|branch| branch["properties"]["status"]["const"] == "unavailable")
+            .unwrap();
+        assert_eq!(text["type"], "object");
+        assert_eq!(text["properties"]["text"]["type"], "string");
+        assert_eq!(text["properties"]["start_line"]["type"], "integer");
+        assert_eq!(text["properties"]["shortened"]["type"], "boolean");
+        assert_eq!(
+            text["properties"]["origin"]["enum"],
+            serde_json::json!(["tracked", "disk"])
+        );
+        assert_eq!(unavailable["type"], "object");
+        assert_eq!(
+            unavailable["properties"]["reason"]["enum"],
+            serde_json::json!([
+                "candidate_limit",
+                "file_limit",
+                "source_budget",
+                "text_budget",
+                "deadline",
+                "access_denied",
+                "read_failed",
+                "file_too_large",
+                "invalid_utf8",
+                "line_unavailable"
+            ])
+        );
+        for branch in alternatives {
+            assert!(
+                branch["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("status"))
+            );
+        }
+        let degraded = &output["properties"]["positions_degraded"]["anyOf"];
+        assert_eq!(
+            degraded[0]["enum"],
+            serde_json::json!(["response", "request"])
+        );
+        assert_eq!(degraded[1]["type"], "null");
+        let resolved = &output["properties"]["resolved_symbol"]["anyOf"];
+        assert_eq!(resolved[1]["type"], "null");
+        let fields = &resolved[0]["properties"];
+        assert_eq!(resolved[0]["type"], "object");
+        assert_eq!(fields["name"]["type"], "string");
+        assert_eq!(fields["kind"]["type"], "integer");
+        assert_eq!(
+            fields["container"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        for coordinate in ["line", "character"] {
+            assert_eq!(
+                fields["position"]["properties"][coordinate]["type"],
+                "integer"
+            );
+        }
+        assert_eq!(
+            fields["position_source"]["enum"],
+            serde_json::json!(["selection_range", "inferred"])
+        );
+        for name in ["name", "kind", "container", "position", "position_source"] {
+            assert!(
+                resolved[0]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(name))
+            );
+        }
+    }
+
+    #[test]
     fn test_workspace_symbol_outcomes_publish_required_producers_and_finite_statuses() {
         let tools = shaped_tools();
         let tool = tools
@@ -1226,6 +1352,7 @@ mod tests {
             if matches!(
                 before.name.as_ref(),
                 "get_diagnostics"
+                    | "get_references"
                     | "get_incoming_calls"
                     | "get_outgoing_calls"
                     | "get_tool_support"

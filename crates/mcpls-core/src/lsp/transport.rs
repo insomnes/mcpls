@@ -396,6 +396,18 @@ fn undecodable_message(content: &[u8]) -> InboundMessage {
 /// The message for a frame that was skipped for its size, from the envelope
 /// scanned while skipping it.
 fn oversized_message(envelope: &Envelope, bytes: usize) -> InboundMessage {
+    // A completed, bounded request identity remains usable when the params
+    // value never closes. Do not attribute truncated responses this way.
+    if envelope.shape == Shape::Truncated
+        && envelope.kind() == MessageKind::Request
+        && envelope.method.decode::<String>().is_some()
+        && let Some(id) = envelope.id.decode()
+    {
+        return InboundMessage::UndecodableRequest {
+            id,
+            reason: UndecodableReason::Oversized { bytes },
+        };
+    }
     dropped_message(envelope, UndecodableReason::Oversized { bytes })
 }
 
@@ -1177,6 +1189,23 @@ mod tests {
 
         assert_matches!(&received[0], Ok(InboundMessage::UndecodableFrame));
         assert_matches!(&received[1], Ok(InboundMessage::Response(_)));
+    }
+
+    #[tokio::test]
+    async fn test_truncated_oversized_requests_do_not_recover_unsafe_identities() {
+        for prefix in [
+            r#"{"method":"m","id":true,"params":""#.to_owned(),
+            r#"{"method":"m","id":1,"id":2,"params":""#.to_owned(),
+            r#"{"method":"m","method":"n","id":1,"params":""#.to_owned(),
+            format!(r#"{{"method":"m","id":"{}","params":""#, "i".repeat(129)),
+            r#"{"id":1,"method":"unfinished"#.to_owned(),
+        ] {
+            let body = oversized_body(&prefix, "");
+            let next = frame(r#"{"jsonrpc":"2.0","id":8,"result":null}"#);
+            let received = receive_all(format!("{}{next}", frame(&body))).await;
+            assert_matches!(&received[0], Ok(InboundMessage::UndecodableFrame));
+            assert_matches!(&received[1], Ok(InboundMessage::Response(_)));
+        }
     }
 
     const PUBLISH_HEAD: &str = r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","#;
