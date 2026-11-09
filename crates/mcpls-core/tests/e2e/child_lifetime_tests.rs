@@ -82,12 +82,17 @@ if ($chatter == 0) {
 }
 
 my $escapee = spawn_sleep(600, $mode ne 'crash');
-write_file('pids', "$$ $escapee\n");
 
 if ($mode eq 'silent') {
+    my $initialize = read_message();
+    die "expected initialize" unless defined($initialize) && ($initialize->{method} // '') eq 'initialize';
+    write_file('initialize-request', encode_json($initialize));
+    die "watchdog is not bound" unless exists($initialize->{params}{processId}) && !defined($initialize->{params}{processId});
+    write_file('pids', "$$ $escapee\n");
     1 while sysread(STDIN, my $buffer, 4096);
     exit 0;
 }
+write_file('pids', "$$ $escapee\n");
 
 my $crash = $mode eq 'crash' && !-e "$dir/crashed";
 while (defined(my $message = read_message())) {
@@ -226,11 +231,21 @@ impl Run {
 
 /// SC-001: after `SIGKILL` of mcpls, a configured server that never answers
 /// `initialize` but exits on stdin EOF and writes to stdout/stderr, and its
-/// `setsid` grandchild, are both gone.
+/// `setsid` grandchild, are both gone. Receipt of initialize with a null
+/// processId establishes watchdog binding before the kill.
 #[test]
 #[ignore = "Requires mcpls binary built"]
 fn test_e2e_child_lifetime_sigkill_reaps_server_and_setsid_grandchild() -> Result<()> {
     let run = Run::start("silent")?;
+    wait_for_file(&run.path("initialize-request"))?;
+    let initialize: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run.path("initialize-request"))?)?;
+    assert_eq!(initialize["method"], "initialize");
+    assert_eq!(
+        initialize.pointer("/params/processId"),
+        Some(&serde_json::Value::Null),
+        "the watchdog must be bound before SIGKILL"
+    );
     let pids = wait_for_pids(&run.path("pids"))?;
     for pid in &pids {
         assert!(

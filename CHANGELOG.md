@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep `LspServerConfig.initialization_options: Option<serde_json::Value>` compatible through configuration adapters. Nested TOML datetimes are rejected; Debug output redacts settings and options without changing transmission.
 - Rank every completion response before count and byte limits. Report lost diagnostic evidence conservatively, including retained older pull results.
 - Deliberately upgrade `rmcp` and `rmcp-macros` to 3.9.0 in the root and fuzz lockfiles to address RUSTSEC-2026-0462 in the optional HTTP client dependency. Retain the complete upstream v0.9.1 base and fork version.
+- Retain native Unix LSP launches and startup errors. Document that abrupt parent death before watchdog binding can leave servers or descendants alive; cleanup of the attributable tree applies after binding. The startup gap remains.
 
 
 ### Changed
