@@ -25,6 +25,28 @@ The table includes full-profile-only tools: `get_folding_ranges`, `get_selection
 
 The default `[mcp].tool_profile = "agent"` exposes 31 tools. Set `tool_profile = "full"` to restore all 34 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
+## Choose the smallest useful answer
+
+Start with the question: use a [filtered outline](code-intelligence.md#choose-filters-from-the-question)
+for in-file discovery, [selected context sections](symbol-context.md#choose-sections-for-the-next-question)
+for source/types/direct calls, and [reference locations or files](code-intelligence.md#get_references)
+according to whether you need positions or file selection. Reuse a known valid
+definition position or [portable target](symbol-context.md#copy-a-portable-target)
+when continuing inspection. Optional source and enclosing context should answer
+the next question. Smaller output does not imply less provider work or fresher
+analysis.
+
+Tool/schema discovery establishes which calls a client can send.
+`get_tool_support` establishes support for the selected language/provider.
+Follow governing instructions that require this check before first use of each
+language; reuse valid session knowledge instead of repeating it before each call.
+A catalog entry can still be unsupported. Missing optional route details alone
+do not establish missing support. For transient initialization/indexing errors,
+allow at most two retries after short waits, honoring retry hints within the task
+budget, then use an available fallback and state the limitation. Unsupported
+operations need a fallback, not retries. Navigation grants no edit, restart, or
+source-access authority beyond the existing task and workspace boundaries.
+
 ## Addressing code
 
 Most tools take a `file_path`, which must be an absolute path to a file under a workspace root.

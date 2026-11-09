@@ -134,7 +134,10 @@ there is no cursor or offset. Increase `limit` or narrow `path_filter` for follo
 Smaller output does not guarantee less work by the LSP backend.
 
 
-Use `mode:"files"` to choose the next file to inspect. The default mode is
+Use default `mode:"locations"` for a small set of occurrences or exact positions.
+No preliminary files query is needed. Use `mode:"files"` to choose the next file
+to inspect or compare reported counts per file. Summary metadata can make files
+mode larger than a small locations response. The default mode is
 `"locations"`; explicit `null` and unknown modes fail. In files mode, `locations`
 is empty and `file_summary.files` contains groups in first-seen provider order.
 Each group has the exact provider `uri`, `count` including duplicates, and the
@@ -165,8 +168,8 @@ The `limits` fields are `max_processed_locations`, `max_uri_bytes`, `max_files`,
 and `max_output_bytes`, with the values above. This bounds additional local work
 and output; it does not bound the already received LSP response or backend work.
 
-For a supported file URI, `file_path` is an absolute lexical path. Query files
-first, then pass the chosen `file_path` as `path_filter` with `mode:"locations"`
+For a supported file URI, `file_path` is an absolute lexical path. When choosing
+a file, query files first, then pass the chosen `file_path` as `path_filter` with `mode:"locations"`
 to inspect details. For example, use `{"mode":"files","limit":5}` with your
 symbol address, then add `{"path_filter":"/work/app/src/usage.rs"}` to a new
 locations query. URI aliases can map to the same filter path. Unsupported URIs
@@ -347,6 +350,29 @@ Arguments: required absolute `file_path`; optional `query`, `kind_filter`, `offs
   "next_offset": null
 }
 ```
+
+### Choose filters from the question
+
+For a Neovim-style Lua module, request provider-reported functions:
+
+```json
+{"file_path":"/work/editor/lua/navigation.lua","kind_filter":"function","limit":20}
+```
+
+For a ConTree-style handler lookup, combine a known own-name fragment with the
+provider-reported method kind:
+
+```json
+{"file_path":"/work/service/handlers.py","query":"handle_","kind_filter":"method","limit":10}
+```
+
+Use `query` alone when the name matters but the kind is unknown. Use a kind filter
+alone when listing that kind, and combine them when both conditions matter.
+`function` (12) and `method` (6) are distinct LSP kinds; match the provider's
+classification. One `kind_filter` cannot express their union. Omit it or query
+each kind separately when both are required. An ancestor named `Handler` does
+not make its child `run` match `query:"Handler"`; case must also match.
+A filtered empty result does not prove the symbol is absent.
 
 Hierarchical responses use depth-first server order, preserve ancestor names, and navigate to the symbol's selection start.
 Flat responses retain server order and the supplied container name as one path segment.

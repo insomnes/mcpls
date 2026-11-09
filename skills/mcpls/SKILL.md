@@ -4,8 +4,9 @@ description: >-
   Install, configure, and run the mcpls CLI — a Rust binary bridging MCP to LSP that gives
   an agent compiler-grade code intelligence (hover, definitions, references, diagnostics,
   rename). Use when setting up or registering mcpls as an MCP server, writing or debugging
-  an mcpls.toml, choosing CLI flags or MCPLS_* environment variables, or diagnosing why
-  mcpls or one of its language servers fails to start.
+  an mcpls.toml, choosing CLI flags or MCPLS_* environment variables, diagnosing why
+  mcpls or one of its language servers fails to start, or choosing focused code-navigation
+  requests with existing mcpls tools.
 license: MIT OR Apache-2.0
 compatibility: >-
   Wraps the `mcpls` Rust binary (Rust 1.99+ / edition 2024 to build from source). Requires at
@@ -31,9 +32,9 @@ Secrets configured for a server (secret-named `env` values, flags and options) a
 `[redacted:NAME]` markers in the display text of tool results. This is partial: edits, URIs,
 identifiers and command arguments are returned unmodified.
 
-This skill covers operating the **binary**: installing it, choosing CLI flags and
+This skill covers focused code navigation and operating the **binary**: installing it, choosing CLI flags and
 environment variables, registering it with an MCP client, and writing `mcpls.toml`.
-It does not enumerate the MCP tools themselves or their parameters — for that, see
+For the complete MCP tool and parameter reference, see
 [Tools Reference](https://bug-ops.github.io/mcpls/tools/overview.html).
 If the bridge is configured with `mcp.tool_prefix`, every tool name listed there gains
 that prefix (`{tool_prefix}_{tool}`).
@@ -70,6 +71,84 @@ Batch output retains at most 100 diagnostics per file, 256 overall, 8192 compact
 Completion labels, details, and documentation are clipped at 512, 2048, and 4096 UTF-8 bytes after existing display redaction. Labels retain identifier-payload redaction semantics. Clipping keeps a Unicode-scalar prefix without an ellipsis; a clipped label is partial, not an exact source replacement. Each item lists clipped fields in `truncated_fields`, in label/detail/documentation order.
 
 The compact structured JSON is at most 65536 bytes, including escaping and metadata; the legacy text encodes the same result. The longest fitting ranked prefix is returned. `omitted_count` counts excluded candidates. `truncated` means candidates were omitted or retained fields clipped; disabled documentation alone does not set it. `provider_is_incomplete` is the provider's explicit boolean, or null for bare arrays/null responses. Empty responses preserve this distinction. Provider incompleteness and local truncation are independent; false does not prove complete API coverage. Existing `positions_degraded` behavior is unchanged. Output bounds do not bound the original LSP response, provider work, process memory, or whole MCP envelope. The existing completion timeout remains 10 seconds.
+
+## Choose a navigation request
+
+Choose the request from the question, then reuse the established target.
+Tool/schema discovery and language-provider support are separate checks. Follow
+owner instructions that require `get_tool_support` before first use of each
+language. Reuse valid session capability knowledge within that policy; a visible
+tool can still be unsupported. Missing optional route detail alone does not
+establish missing support. For temporary initialization/indexing errors, allow
+at most two retries after short waits, following retry hints within the task
+budget. Then use an available fallback and state the limitation. Do not retry an
+unsupported operation or restart a server without authority.
+
+| Question | Focused request |
+|---|---|
+| Which functions or methods are in this file? | `get_document_outline` with the provider's `kind_filter` and a small page. |
+| Where is a handler with a known name fragment? | Outline `query`, optionally combined with its reported kind. |
+| What is the source of this known declaration? | `get_symbol_context` with `sections:["source"]`, in direct mode. |
+| What is its type or documentation? | `get_hover`, or context with `sections:["hover"]`. |
+| What does it call directly? | `get_outgoing_calls`, or context with `sections:["outgoing_calls"]`. |
+| What are its source and type together? | One context request; the defaults are source plus hover. |
+| Where does this use point lead? | `get_definition` for locations, or context with `resolve:"definition"` for selected definition context. |
+| Where are a few exact occurrences? | `get_references` in default `locations` mode; no preliminary files query. |
+| Which file should I inspect next? | References with `mode:"files"` to compare reported counts per file. |
+
+For a Neovim-style Lua module, list provider-reported functions:
+
+```json
+{"file_path":"/work/editor/lua/navigation.lua","kind_filter":"function","limit":20}
+```
+
+For a ConTree-style handler lookup, combine an own-name fragment with the reported
+method kind:
+
+```json
+{"file_path":"/work/service/handlers.py","query":"handle_","kind_filter":"method","limit":10}
+```
+
+These are `get_document_outline` arguments. Match the provider's kinds:
+`function` is 12 and `method` is 6. One filter cannot select both kinds; omit it
+or issue separate requests when both matter. `query` is a case-sensitive
+substring of the symbol's own name, never its ancestors. Follow `next_offset`
+while `truncated` only if further matches are needed; restart after edits.
+Use `get_document_symbols` for full ranges/hierarchy. Empty filtered output does
+not prove absence. Confirm flat or degraded coordinates against current source.
+
+For mcpls/Zhournal-style symbol inspection, use an already established definition
+position directly, without another definition lookup:
+
+```json
+{"file_path":"/work/app/src/index.rs","line":24,"character":8,"sections":["source"]}
+```
+
+These are `get_symbol_context` arguments; positions are 1-based UTF-16.
+Select only the sections the next step needs. Bundles can avoid separate calls
+for a combined question; they are not always smaller than standalone tools.
+Navigation excerpts do not guarantee complete bodies. Section failures are
+independent; inspect each status and reason. Context reports
+`analysis_freshness:"unknown"` and `atomic_snapshot:false`: source and semantic
+observations can describe different revisions. Source hashes identify observed
+bytes, not the analyzer's snapshot.
+
+Reuse a valid definition position or copy an emitted `symbol_target` unchanged
+into a supported consumer. Request `include_targets:true` from discovery only
+when a later operation benefits. Do not fabricate or decode the opaque reference,
+or combine the envelope with legacy selectors. Failed reuse requires renewed
+discovery from current evidence. Reuse proves neither analyzer freshness nor
+access to another workspace. See [portable target inputs and errors](https://bug-ops.github.io/mcpls/tools/symbol-context.html#copy-a-portable-target).
+
+Request `include_source:true` or `context:"enclosing_symbol"` only when excerpts
+or enclosing names answer the next question. Files-mode reference summaries add
+metadata and can be larger than a small locations response. Use them to choose
+files, then narrow `path_filter` for exact occurrences if needed; otherwise query
+locations directly. Increase `limit` or narrow the filter when output is cut.
+Counts preserve duplicates and provider order; incomplete counts are lower
+bounds for the received response, never proof of complete workspace coverage.
+Smaller output does not establish less provider work. Read-only navigation
+provides no authority to edit, acquire unauthorized source, or restart servers.
 
 ### Small reference queries
 
@@ -132,8 +211,8 @@ The `limits` fields are `max_processed_locations`, `max_uri_bytes`, `max_files`,
 and `max_output_bytes`, with the values above. This bounds additional local work
 and output; it does not bound the already received LSP response or backend work.
 
-For a supported file URI, `file_path` is an absolute lexical path. Query files
-first, then pass the chosen `file_path` as `path_filter` with `mode:"locations"`
+For a supported file URI, `file_path` is an absolute lexical path. When file
+selection is the question, query files first, then pass the chosen `file_path` as `path_filter` with `mode:"locations"`
 to inspect details. For example, use `{"mode":"files","limit":5}` with your
 symbol address, then add `{"path_filter":"/work/app/src/usage.rs"}` to a new
 locations query. URI aliases can map to the same filter path. Unsupported URIs
@@ -192,7 +271,8 @@ Disabled source omits the field and additional acquisition, copying, and hashing
 Source alone adds no LSP opens or semantic requests. Observations are read-only
 and have no atomic consistency guarantee with LSP locations or later reads.
 
-`get_tool_support` is an optional diagnostic aid.
+`get_tool_support` also provides diagnostics; this does not waive owner-required
+first-language capability checks described above.
 
 ## Prerequisites
 

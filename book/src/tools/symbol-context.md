@@ -42,6 +42,37 @@ must contain the target point. Flat, malformed, conflicting or degraded symbols
 and body-only positions give `range_fidelity: "unknown"`. Name addressing also
 retains `target.resolved_symbol`. Direct mode does not follow definitions to guess a range.
 
+## Choose sections for the next question
+
+For mcpls/Zhournal-style inspection, start from an established declaration
+position and request only the evidence needed:
+
+```json
+{"file_path":"/work/app/src/index.rs","line":24,"character":8,"sections":["source"]}
+```
+
+Use `sections:["hover"]` for type/documentation only, or `get_hover` when a
+standalone result suffices. Use `sections:["outgoing_calls"]` for direct callees,
+or standalone `get_outgoing_calls`. Omit `sections` for source plus hover, or
+request both explicitly with `sections:["source","hover"]`. One combined
+request can answer a combined question without separate context calls; it is
+not always smaller than a standalone result.
+
+Use direct mode when the desired definition position or valid emitted target is
+already known. Do not repeat discovery or definition resolution merely to inspect
+that target. Use `resolve:"definition"` when starting from a use site whose
+destination is unknown. Use `get_definition` alone when only locations are needed.
+Select `include_source`, enclosing context, or portable-target enrichment on
+navigation tools only when the next step needs that evidence.
+
+Read each requested section's status independently. An available source section
+does not make an unavailable hover usable. Navigation excerpts do not guarantee
+complete bodies. Combined observations retain `analysis_freshness:"unknown"`
+and `atomic_snapshot:false`; source and semantics can describe different
+revisions. Source hashes identify observed bytes, not the analyzer's snapshot.
+See [semantic uncertainty](#semantic-scope-and-uncertainty) and
+[target reuse rules](#reuse-an-observed-target).
+
 ## Resolve a definition
 
 Omit `resolve`, or use `"resolve": "direct"`, to preserve direct behavior.
@@ -194,7 +225,10 @@ outline entries put these fields in `symbols[]`; definitions use `locations[]`.
 reference. Its descriptive `target` remains. Top-level `symbol_ref` and
 `symbol_ref_unavailable` are no longer emitted.
 
-Copy the complete object into any of `get_symbol_context`, `get_hover`,
+Request discovery targets only when a later operation benefits. Reuse the emitted
+envelope instead of rediscovering a known target. Do not fabricate or decode its
+opaque reference. Reuse does not authorize another workspace or establish fresh
+analysis. Copy the complete object into any of `get_symbol_context`, `get_hover`,
 `get_definition`, `get_references`, `get_incoming_calls`, or `get_outgoing_calls`:
 
 ```json

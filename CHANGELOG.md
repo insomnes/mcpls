@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add focused agent navigation guidance for outline filters, selected context sections, known-target reuse, and reference modes. Preserve capability checks and result uncertainty.
+
 - Expose running-service `runtime_provenance` through `get_tool_support` and new private feedback records. On Linux, validate the adjacent installation receipt against measured executable bytes; report explicit unknown values when provenance is unavailable. Caller observations and feedback inputs remain unchanged.
 
 ## [0.9.1+insomnes.1] - 2026-11-09
