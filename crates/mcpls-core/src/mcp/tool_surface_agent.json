@@ -1413,7 +1413,8 @@
           "required": [
             "range",
             "severity",
-            "message"
+            "message",
+            "code"
           ],
           "type": "object"
         },
@@ -2331,7 +2332,8 @@
             }
           },
           "required": [
-            "title"
+            "title",
+            "is_preferred"
           ],
           "type": "object"
         },
@@ -2375,7 +2377,8 @@
           "required": [
             "range",
             "severity",
-            "message"
+            "message",
+            "code"
           ],
           "type": "object"
         },
@@ -2759,6 +2762,9 @@
           },
           "required": [
             "label",
+            "kind",
+            "detail",
+            "documentation",
             "truncated_fields"
           ],
           "type": "object"
@@ -3300,6 +3306,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -3609,7 +3616,8 @@
           "required": [
             "range",
             "severity",
-            "message"
+            "message",
+            "code"
           ],
           "type": "object"
         },
@@ -4340,7 +4348,8 @@
       "required": [
         "symbols",
         "fidelity",
-        "truncated"
+        "truncated",
+        "next_offset"
       ],
       "type": "object"
     },
@@ -4697,6 +4706,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -4740,7 +4750,8 @@
         }
       },
       "required": [
-        "contents"
+        "contents",
+        "range"
       ],
       "type": "object"
     },
@@ -5263,6 +5274,7 @@
                       "required": [
                         "name",
                         "kind",
+                        "container",
                         "position",
                         "position_source"
                       ],
@@ -5385,6 +5397,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -6049,6 +6062,7 @@
                       "required": [
                         "name",
                         "kind",
+                        "container",
                         "position",
                         "position_source"
                       ],
@@ -6216,6 +6230,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -6655,6 +6670,7 @@
           },
           "required": [
             "uri",
+            "file_path",
             "count",
             "example"
           ],
@@ -6852,6 +6868,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -7743,6 +7760,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -8153,6 +8171,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -8613,7 +8632,8 @@
               },
               "required": [
                 "status",
-                "server"
+                "server",
+                "languages"
               ],
               "type": "object"
             },
@@ -8638,7 +8658,8 @@
               },
               "required": [
                 "status",
-                "server"
+                "server",
+                "languages"
               ],
               "type": "object"
             },
@@ -8667,7 +8688,8 @@
               "required": [
                 "status",
                 "server",
-                "capability"
+                "capability",
+                "languages"
               ],
               "type": "object"
             },
@@ -8691,7 +8713,8 @@
                 }
               },
               "required": [
-                "status"
+                "status",
+                "languages"
               ],
               "type": "object"
             },
@@ -8716,7 +8739,8 @@
               },
               "required": [
                 "status",
-                "server"
+                "server",
+                "languages"
               ],
               "type": "object"
             },
@@ -8737,7 +8761,8 @@
                 }
               },
               "required": [
-                "status"
+                "status",
+                "languages"
               ],
               "type": "object"
             }
@@ -9704,6 +9729,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -10273,6 +10299,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -10815,6 +10842,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],

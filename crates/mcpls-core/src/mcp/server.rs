@@ -1735,7 +1735,7 @@ impl McplsServer {
 
     /// Prepare type hierarchy at a position.
     #[tool(
-        description = concat!("Prepare type hierarchy at position. Returns type items (classes, interfaces, structs) to pass to get_supertypes / get_subtypes, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. ", indexing_note!(), " ", positions_note_request!(), " ", out_of_workspace_note!()),
+        description = "Type hierarchy at position: classes, interfaces, structs for get_supertypes / get_subtypes. Fixed cap; `truncated: true` means more exist. `indexing_in_progress: true`: routed server is indexing; empty/partial results may be incomplete. Non-UTF-16 `positions_degraded`: `\"request\"` means an unconverted query may select another symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. `out_of_workspace: true`: not provably in configured roots (lexical, advisory).",
         title = "Prepare Type Hierarchy"
     )]
     async fn prepare_type_hierarchy(
@@ -1841,7 +1841,7 @@ impl McplsServer {
 
     /// Get the chain of ranges enclosing a position.
     #[tool(
-        description = "Ranges enclosing a position, innermost first, as the server reports them; their values can be passed to get_code_actions or format_range. Capped at a fixed maximum; `truncated: true` means the outermost were dropped. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was inexact: do not trust the result.",
+        description = "Server-reported enclosing ranges, innermost first; pass them to get_code_actions or format_range. Fixed cap; `truncated: true` means outermost ranges were dropped. Non-UTF-16 only: `positions_degraded: \"request\"` means an inexact query; do not trust the result.",
         title = "Selection Ranges"
     )]
     async fn get_selection_ranges(
@@ -1863,7 +1863,7 @@ impl McplsServer {
 
     /// Get the foldable regions of a file.
     #[tool(
-        description = "Foldable regions of a file (blocks, imports, comments, marked regions): 1-based lines, optional columns, `kind`, collapsed text. Sorted by start line, longest first. Capped at a fixed maximum; `truncated: true` means more exist.",
+        description = "Foldable blocks, imports, comments and marked regions: 1-based lines, optional columns, `kind`, collapsed text. Sorted by start line, longest first. Fixed cap; `truncated: true` means more exist.",
         title = "Folding Ranges"
     )]
     async fn get_folding_ranges(

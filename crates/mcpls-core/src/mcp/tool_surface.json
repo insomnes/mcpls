@@ -1413,7 +1413,8 @@
           "required": [
             "range",
             "severity",
-            "message"
+            "message",
+            "code"
           ],
           "type": "object"
         },
@@ -2331,7 +2332,8 @@
             }
           },
           "required": [
-            "title"
+            "title",
+            "is_preferred"
           ],
           "type": "object"
         },
@@ -2375,7 +2377,8 @@
           "required": [
             "range",
             "severity",
-            "message"
+            "message",
+            "code"
           ],
           "type": "object"
         },
@@ -2759,6 +2762,9 @@
           },
           "required": [
             "label",
+            "kind",
+            "detail",
+            "documentation",
             "truncated_fields"
           ],
           "type": "object"
@@ -3300,6 +3306,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -3609,7 +3616,8 @@
           "required": [
             "range",
             "severity",
-            "message"
+            "message",
+            "code"
           ],
           "type": "object"
         },
@@ -4340,7 +4348,8 @@
       "required": [
         "symbols",
         "fidelity",
-        "truncated"
+        "truncated",
+        "next_offset"
       ],
       "type": "object"
     },
@@ -4479,7 +4488,7 @@
   {
     "name": "get_folding_ranges",
     "title": "Folding Ranges",
-    "description": "Foldable regions of a file (blocks, imports, comments, marked regions): 1-based lines, optional columns, `kind`, collapsed text. Sorted by start line, longest first. Capped at a fixed maximum; `truncated: true` means more exist.",
+    "description": "Foldable blocks, imports, comments and marked regions: 1-based lines, optional columns, `kind`, collapsed text. Sorted by start line, longest first. Fixed cap; `truncated: true` means more exist.",
     "inputSchema": {
       "$defs": {
         "FoldingKindFilter": {
@@ -4837,6 +4846,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -4880,7 +4890,8 @@
         }
       },
       "required": [
-        "contents"
+        "contents",
+        "range"
       ],
       "type": "object"
     },
@@ -5403,6 +5414,7 @@
                       "required": [
                         "name",
                         "kind",
+                        "container",
                         "position",
                         "position_source"
                       ],
@@ -5525,6 +5537,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -6189,6 +6202,7 @@
                       "required": [
                         "name",
                         "kind",
+                        "container",
                         "position",
                         "position_source"
                       ],
@@ -6356,6 +6370,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -6795,6 +6810,7 @@
           },
           "required": [
             "uri",
+            "file_path",
             "count",
             "example"
           ],
@@ -6992,6 +7008,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -7158,7 +7175,7 @@
   {
     "name": "get_selection_ranges",
     "title": "Selection Ranges",
-    "description": "Ranges enclosing a position, innermost first, as the server reports them; their values can be passed to get_code_actions or format_range. Capped at a fixed maximum; `truncated: true` means the outermost were dropped. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was inexact: do not trust the result.",
+    "description": "Server-reported enclosing ranges, innermost first; pass them to get_code_actions or format_range. Fixed cap; `truncated: true` means outermost ranges were dropped. Non-UTF-16 only: `positions_degraded: \"request\"` means an inexact query; do not trust the result.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -8000,6 +8017,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -8410,6 +8428,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -8870,7 +8889,8 @@
               },
               "required": [
                 "status",
-                "server"
+                "server",
+                "languages"
               ],
               "type": "object"
             },
@@ -8895,7 +8915,8 @@
               },
               "required": [
                 "status",
-                "server"
+                "server",
+                "languages"
               ],
               "type": "object"
             },
@@ -8924,7 +8945,8 @@
               "required": [
                 "status",
                 "server",
-                "capability"
+                "capability",
+                "languages"
               ],
               "type": "object"
             },
@@ -8948,7 +8970,8 @@
                 }
               },
               "required": [
-                "status"
+                "status",
+                "languages"
               ],
               "type": "object"
             },
@@ -8973,7 +8996,8 @@
               },
               "required": [
                 "status",
-                "server"
+                "server",
+                "languages"
               ],
               "type": "object"
             },
@@ -8994,7 +9018,8 @@
                 }
               },
               "required": [
-                "status"
+                "status",
+                "languages"
               ],
               "type": "object"
             }
@@ -9961,6 +9986,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -10530,6 +10556,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
@@ -10677,7 +10704,7 @@
   {
     "name": "prepare_type_hierarchy",
     "title": "Prepare Type Hierarchy",
-    "description": "Prepare type hierarchy at position. Returns type items (classes, interfaces, structs) to pass to get_supertypes / get_subtypes, capped at a fixed maximum; `truncated: true` on the result means more exist than are returned. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. `out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory).",
+    "description": "Type hierarchy at position: classes, interfaces, structs for get_supertypes / get_subtypes. Fixed cap; `truncated: true` means more exist. `indexing_in_progress: true`: routed server is indexing; empty/partial results may be incomplete. Non-UTF-16 `positions_degraded`: `\"request\"` means an unconverted query may select another symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. `out_of_workspace: true`: not provably in configured roots (lexical, advisory).",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -11240,6 +11267,7 @@
           "required": [
             "name",
             "kind",
+            "container",
             "position",
             "position_source"
           ],
