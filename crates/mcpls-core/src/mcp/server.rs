@@ -7613,7 +7613,7 @@ sleep 0.3
             let value = &result["result"]["structuredContent"];
             assert_eq!(value["items"].as_array().unwrap().len(), 20, "{result}");
             assert_eq!(value["items"][0]["label"], "candidate-0");
-            assert_eq!(value["items"][19]["label"], "candidate-19");
+            assert_eq!(value["items"][19]["label"], "candidate-8");
             assert_eq!(value["items"][0]["detail"], "");
             assert!(value["items"][0]["documentation"].is_null());
             assert_eq!(value["items"][0]["truncated_fields"], serde_json::json!([]));

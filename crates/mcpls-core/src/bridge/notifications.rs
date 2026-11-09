@@ -4672,8 +4672,8 @@ mod tests {
         cache.assert_consistent();
     }
 
-    /// #742: a file that already carries a lost mark, or that still shows
-    /// another owner's diagnostics, is not announced again.
+    /// Loss changes availability even when another owner's diagnostics remain;
+    /// repeating the same loss does not change the view again.
     #[test]
     fn test_lost_publish_reports_only_files_whose_view_changed() {
         let mut cache = NotificationCache::new();
@@ -4687,9 +4687,19 @@ mod tests {
         let first = cache.record_lost_files(&server, &[lost(&uri), lost(&shared)]);
         let second = cache.record_lost_files(&server, &[lost(&uri), lost(&shared)]);
 
-        assert_eq!(first, [DiagnosticsKey::of(&uri)]);
+        assert_eq!(
+            first,
+            [DiagnosticsKey::of(&uri), DiagnosticsKey::of(&shared)]
+        );
         assert!(second.is_empty(), "{second:?}");
         assert!(cache.has_diagnostics(&shared));
+        assert_eq!(cache.diagnostics_owner(&shared), Some(&other));
+        let current = cache.diagnostic_sources(&shared).merge().unwrap();
+        assert_eq!(messages(&current), ["theirs"]);
+        assert_eq!(
+            cache.availability(&shared, Some(&server)),
+            DiagnosticsAvailability::Evicted
+        );
     }
 
     /// #738: a lost publish that could only be resolved lexically names the

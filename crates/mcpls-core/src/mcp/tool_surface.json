@@ -5468,14 +5468,6 @@
           ],
           "type": "string"
         },
-        "PreparationStatus": {
-          "enum": [
-            "no_item",
-            "selection_required",
-            "preparation_incomplete"
-          ],
-          "type": "string"
-        },
         "Range": {
           "properties": {
             "end": {
@@ -6304,14 +6296,6 @@
           "enum": [
             "selection_range",
             "inferred"
-          ],
-          "type": "string"
-        },
-        "PreparationStatus": {
-          "enum": [
-            "no_item",
-            "selection_required",
-            "preparation_incomplete"
           ],
           "type": "string"
         },

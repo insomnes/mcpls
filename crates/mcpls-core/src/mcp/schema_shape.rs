@@ -397,6 +397,10 @@ fn shape_client_contract(tool: &mut Tool) {
                 inline_leaf_reference(selection, "#/$defs/Position2D", position);
             }
         }
+        // PreparationStatus is fully inlined into the finite preparation branch.
+        if let Some(definitions) = value.get_mut("$defs").and_then(Value::as_object_mut) {
+            definitions.remove("PreparationStatus");
+        }
     }
     repair_finite_client_leaves(&mut value, tool.name.as_ref());
     if let Value::Object(shaped) = value {
@@ -1164,6 +1168,54 @@ mod tests {
     }
 
     #[test]
+    fn test_workspace_symbol_outcomes_publish_required_producers_and_finite_statuses() {
+        let tools = shaped_tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "workspace_symbol_search")
+            .unwrap();
+        let output = serde_json::to_value(tool.output_schema.as_ref().unwrap()).unwrap();
+        assert_eq!(output["$defs"]["ServerId"]["type"], "string");
+        let outcomes = output["$defs"]["ServerOutcome"]["oneOf"]
+            .as_array()
+            .unwrap();
+        let mut names = BTreeSet::new();
+        for outcome in outcomes {
+            assert_eq!(outcome["type"], "object");
+            let required = outcome["required"].as_array().unwrap();
+            for field in ["server", "outcome"] {
+                assert!(required.contains(&Value::String(field.into())));
+            }
+            let properties = &outcome["properties"];
+            assert_eq!(properties["server"]["$ref"], "#/$defs/ServerId");
+            assert_eq!(properties["outcome"]["type"], "string");
+            let name = properties["outcome"]["const"].as_str().unwrap();
+            assert!(names.insert(name));
+            if name == "answered" {
+                assert!(required.contains(&Value::String("symbols".into())));
+                assert_eq!(properties["symbols"]["type"], "integer");
+                assert_eq!(properties["symbols"]["minimum"], 0);
+                assert_eq!(properties["indexing_in_progress"]["type"], "boolean");
+                assert_eq!(
+                    properties["index_coverage"]["$ref"],
+                    "#/$defs/IndexCoverage"
+                );
+            }
+        }
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "answered",
+                "initializing",
+                "unavailable",
+                "timed_out",
+                "failed",
+                "capability_not_advertised"
+            ])
+        );
+    }
+
+    #[test]
     fn test_unaffected_schemas_change_only_description_annotations() {
         let unshaped = McplsServer::unshaped_tool_router().list_all();
         let shaped = shaped_tools();
@@ -1182,13 +1234,22 @@ mod tests {
             ) {
                 continue;
             }
-            for (old, new) in schemas_of(before).zip(schemas_of(after)) {
-                assert_eq!(
-                    without_annotations(&Value::Object(old.clone())),
-                    without_annotations(&Value::Object(new.clone())),
-                    "{}: structure changed",
-                    before.name
-                );
+            for (schema_index, (old, new)) in schemas_of(before).zip(schemas_of(after)).enumerate()
+            {
+                let mut old = without_annotations(&Value::Object(old.clone()));
+                let mut new = without_annotations(&Value::Object(new.clone()));
+                if before.name == "workspace_symbol_search" && schema_index == 1 {
+                    // The public finite outcome contract is checked separately above.
+                    for schema in [&mut old, &mut new] {
+                        schema
+                            .get_mut("$defs")
+                            .unwrap()
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("ServerOutcome");
+                    }
+                }
+                assert_eq!(old, new, "{}: structure changed", before.name);
             }
             assert_eq!(
                 before.output_schema.is_some(),
@@ -1249,7 +1310,7 @@ mod tests {
                 ) || schema_index == 0
                     && matches!(
                         before.name.as_ref(),
-                        "get_symbol_context" | "get_references"
+                        "get_symbol_context" | "get_references" | "workspace_symbol_search"
                     )
                     || schema_index == 1
                         && matches!(
@@ -1271,6 +1332,7 @@ mod tests {
                                 | "format_range"
                                 | "get_code_actions"
                                 | "get_diagnostics"
+                                | "get_cached_diagnostics"
                                 | "get_tool_support"
                                 | "restart_server"
                         )
@@ -1305,14 +1367,12 @@ mod tests {
     /// also contain the fact, and at least one must exist.
     #[test]
     fn test_published_descriptions_keep_their_key_facts() {
-        const FACTS: [(&str, &str); 9] = [
+        const FACTS: [(&str, &str); 7] = [
             (
                 "keep only symbols inside a container",
                 "type, impl, class, module",
             ),
             ("Extra context:", "one request per file"),
-            ("symbol kind filter", "function, class"),
-            ("`pending` or `evicted`", "not a clean file"),
             ("workspace root (stdlib", "not provably inside"),
             ("`character` offsets are inexact", "non-UTF-16"),
             ("capped below", "response"),
@@ -1334,6 +1394,49 @@ mod tests {
             for text in carrying {
                 assert!(text.contains(fact), "{marker:?} lost {fact:?}: {text:?}");
             }
+        }
+        let workspace = tools
+            .iter()
+            .find(|tool| tool.name == "workspace_symbol_search")
+            .unwrap();
+        let input = serde_json::to_value(&workspace.input_schema).unwrap();
+        let kinds = &input["properties"]["kind_filter"]["anyOf"][0]["anyOf"];
+        assert_eq!(kinds[0]["type"], "string");
+        let literals = kinds[0]["enum"].as_array().unwrap();
+        for kind in ["function", "class"] {
+            assert!(literals.contains(&Value::String(kind.into())));
+        }
+        assert_eq!(kinds[1]["type"], "string");
+        assert_eq!(kinds[1]["pattern"], "^[0-9]+$");
+        assert_eq!(input["properties"]["query"]["type"], "string");
+        assert!(
+            input["required"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::String("query".into()))
+        );
+        assert_eq!(input["properties"]["limit"]["default"], 100);
+        assert_eq!(input["properties"]["include_targets"]["default"], false);
+        // Compact cached output keeps these meanings in the public tool guidance.
+        let cached = tools
+            .iter()
+            .find(|tool| tool.name == "get_cached_diagnostics")
+            .unwrap();
+        let cached_guidance = cached.description.as_deref().unwrap();
+        for fact in [
+            "no new analysis",
+            "published",
+            "pending",
+            "evicted",
+            "not clean",
+            "indexing_in_progress",
+            "push_notifications_degraded",
+            "positions_degraded",
+        ] {
+            assert!(
+                cached_guidance.contains(fact),
+                "cached diagnostics lost {fact}"
+            );
         }
         let restart = tools
             .iter()
