@@ -435,6 +435,7 @@ pub(super) struct ToolEntry {
 /// The `get_tool_support` response.
 #[derive(Debug, Serialize, JsonSchema)]
 pub(super) struct ToolSupportReport {
+    runtime_provenance: &'static super::runtime_provenance::RuntimeProvenance,
     languages: Vec<LanguageId>,
     tools: Vec<ToolEntry>,
 }
@@ -500,6 +501,7 @@ impl ToolSupportReport {
             })
             .collect();
         Self {
+            runtime_provenance: super::runtime_provenance::current(),
             languages: languages.to_vec(),
             tools,
         }
@@ -510,6 +512,7 @@ impl ToolSupportReport {
 impl ServerText for ToolSupportReport {
     fn redact_server_text(&mut self, _redactions: &Redactions) {
         let Self {
+            runtime_provenance: _,
             languages: _,
             tools: _,
         } = self;

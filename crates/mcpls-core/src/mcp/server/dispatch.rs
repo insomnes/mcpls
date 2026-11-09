@@ -187,7 +187,7 @@ impl McplsServer {
             if local {json!({"name":tool.name,"coverage":"always"})} else {let unknown=routes.iter().any(|route|route.get("status").and_then(Value::as_str)==Some("initializing"));json!({"name":tool.name,"coverage":if unknown {"unknown"} else {"none"},"routes":routes})}
         }).collect::<Vec<_>>();
         Ok(completed(
-            json!({"basis":"configured","languages":languages,"tools":tools}),
+            json!({"basis":"configured","languages":languages,"tools":tools,"runtime_provenance":super::super::runtime_provenance::current()}),
         ))
     }
 

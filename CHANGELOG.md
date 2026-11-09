@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Expose running-service `runtime_provenance` through `get_tool_support` and new private feedback records. On Linux, validate the adjacent installation receipt against measured executable bytes; report explicit unknown values when provenance is unavailable. Caller observations and feedback inputs remain unchanged.
+
 ## [0.9.1+insomnes.1] - 2026-11-09
 
 - Integrate the complete upstream v0.9.1 release while preserving fork APIs, profiles, shared HTTP workspaces, Watchman, bounded output, call graphs, and portable targets. See [FORKCHANGES.md](FORKCHANGES.md) for provenance and deliberate differences.

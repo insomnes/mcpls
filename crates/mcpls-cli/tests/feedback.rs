@@ -20,9 +20,13 @@ struct Client {
 )]
 impl Client {
     fn new(root: &Path, config: &str) -> Self {
+        Self::with_executable(root, config, Path::new(env!("CARGO_BIN_EXE_mcpls")))
+    }
+
+    fn with_executable(root: &Path, config: &str, executable: &Path) -> Self {
         let config_path = root.join("config.toml");
         std::fs::write(&config_path, config).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_mcpls"))
+        let mut child = Command::new(executable)
             .args(["--config", config_path.to_str().unwrap()])
             .current_dir(root)
             .env("HOME", root)
@@ -78,6 +82,72 @@ impl Client {
     }
 }
 
+// A valid receipt must identify the launched release, while feedback retains
+// the same receiving-service identity and leaves historical caller text intact.
+#[cfg(target_os = "linux")]
+#[test]
+fn runtime_provenance_matches_release_receipt_and_preserves_feedback_history() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempDir::new().unwrap();
+    let release = root.path().join("release");
+    std::fs::create_dir(&release).unwrap();
+    let executable = release.join("mcpls");
+    std::fs::copy(env!("CARGO_BIN_EXE_mcpls"), &executable).unwrap();
+    let output = Command::new("sha256sum").arg(&executable).output().unwrap();
+    assert!(output.status.success());
+    let digest = String::from_utf8(output.stdout).unwrap()[..64].to_owned();
+    let revision = "a".repeat(40);
+    let expected = json!({"status":"verified","revision":revision,"executable_sha256":digest});
+    std::fs::write(
+        release.join("build.json"),
+        json!({"revision":revision,"sha256":digest,"features":["transport-http"]}).to_string(),
+    )
+    .unwrap();
+    // The working directory's receipt must have no authority over this release.
+    std::fs::write(
+        root.path().join("build.json"),
+        json!({"revision":"b".repeat(40),"sha256":digest}).to_string(),
+    )
+    .unwrap();
+    let state = root.path().join("state/mcpls");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = state.join("feedback.jsonl");
+    let old = b"{\"observation\":\"old\"}\n";
+    std::fs::write(&file, old).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut client = Client::with_executable(root.path(), "[workspace]\nroots = []\n", &executable);
+    let support = client.feedback("get_tool_support", &json!({}));
+    assert_eq!(
+        support["result"]["structuredContent"]["runtime_provenance"],
+        expected
+    );
+    let observation = format!("  build_sha={} λ\n", "b".repeat(40));
+    success(&client.feedback(
+        "feedback_add",
+        &json!({"operation":"get_hover","observation":observation}),
+    ));
+    let bytes = std::fs::read(file).unwrap();
+    assert!(bytes.starts_with(old));
+    let record: Value = serde_json::from_slice(&bytes[old.len()..]).unwrap();
+    assert_eq!(record["observation"], observation);
+    assert_eq!(record["runtime_provenance"], expected);
+    drop(client);
+    // A digest mismatch must retain the measured digest and unknown revision.
+    std::fs::write(
+        release.join("build.json"),
+        json!({"revision":revision,"sha256":"0".repeat(64)}).to_string(),
+    )
+    .unwrap();
+    let mut client = Client::with_executable(root.path(), "[workspace]\nroots = []\n", &executable);
+    let support = client.feedback("get_tool_support", &json!({}));
+    assert_eq!(
+        support["result"]["structuredContent"]["runtime_provenance"],
+        json!({"status":"unknown","revision":"unknown","executable_sha256":digest})
+    );
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -130,7 +200,12 @@ fn feedback_preserves_explicit_text_and_repeated_reports_in_both_profiles() {
             }
             assert_eq!(record["version"], env!("CARGO_PKG_VERSION"));
             assert!(record["timestamp"].as_str().unwrap().ends_with('Z'));
-            assert_eq!(record.as_object().unwrap().len(), 6);
+            assert_eq!(record.as_object().unwrap().len(), 7);
+            let support = client.feedback("test_get_tool_support", &json!({}));
+            assert_eq!(
+                record["runtime_provenance"],
+                support["result"]["structuredContent"]["runtime_provenance"]
+            );
         }
     }
 }
@@ -149,6 +224,7 @@ fn invalid_feedback_never_creates_storage() {
         json!({"operation":"hover","observation":"failure","workaround":null}),
         json!({"operation":"hover","observation":"failure","workaround":""}),
         json!({"operation":"hover","observation":"failure","workspace_path":"/tmp"}),
+        json!({"operation":"hover","observation":"failure","runtime_provenance":{}}),
     ] {
         let response = client.feedback("feedback_add", &args);
         assert!(

@@ -9052,9 +9052,33 @@
             "$ref": "#/$defs/ToolEntry"
           },
           "type": "array"
+        },
+        "runtime_provenance": {
+          "properties": {
+            "executable_sha256": {
+              "type": "string"
+            },
+            "revision": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "verified",
+                "unknown"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "revision",
+            "executable_sha256"
+          ],
+          "type": "object"
         }
       },
       "required": [
+        "runtime_provenance",
         "languages",
         "tools"
       ],

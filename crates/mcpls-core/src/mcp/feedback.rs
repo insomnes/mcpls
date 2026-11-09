@@ -60,6 +60,7 @@ pub(super) struct FeedbackStored {
 struct Record {
     timestamp: String,
     version: &'static str,
+    runtime_provenance: &'static super::runtime_provenance::RuntimeProvenance,
     #[serde(flatten)]
     input: FeedbackInput,
 }
@@ -79,10 +80,11 @@ pub(super) async fn add(input: FeedbackInput) -> Result<FeedbackStored, McpError
             ));
         }
     }
-    // Construct the complete line before any filesystem access.
+    // Construct the complete line before any feedback storage access.
     let mut line = serde_json::to_vec(&Record {
         timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         version: env!("CARGO_PKG_VERSION"),
+        runtime_provenance: super::runtime_provenance::current(),
         input,
     })
     .map_err(storage_error)?;
