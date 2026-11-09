@@ -120,23 +120,12 @@ impl ServerProcess {
 
     fn spawn_with(command: Command, options: &lifeline::Options) -> io::Result<Self> {
         let spawned = lifeline::spawn(command, options)?;
-        Ok(Self::from_spawned(spawned))
-    }
-
-    /// Delay configured LSP execution until its watchdog owns the pipe holds.
-    /// The original command remains available for the unbound anchor fallback.
-    pub(crate) fn spawn_configured(command: Command, gated: Command) -> io::Result<Self> {
-        let spawned = lifeline::spawn_configured(command, gated, &lifeline::Options::default())?;
-        Ok(Self::from_spawned(spawned))
-    }
-
-    fn from_spawned(spawned: lifeline::Spawned) -> Self {
-        Self {
+        Ok(Self {
             dispatcher_pid: None,
             child: Some(spawned.child),
             stderr: Some(spawned.stderr),
             lifeline: spawned.lifeline,
-        }
+        })
     }
 
     /// Whether an out-of-process watchdog still guards this server.

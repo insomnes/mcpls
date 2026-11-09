@@ -11,8 +11,6 @@ This fork is version `0.9.1+insomnes.1`. Its upstream release is [v0.9.1](https:
 
 ## Deliberate fork differences
 
-- On Unix, configured LSP commands wait behind a private stdin gate until the existing watchdog owns the lifetime descriptors. The gate consumes only its release line before protocol traffic starts. Missing commands, nonexecutable commands, and missing shebang interpreters now fail through `ServerExitedDuringInit` and restart reason `initialize_failed`; startup remains unavailable with bounded, redacted diagnostics. Native gate-creation errors retain their existing handling. Anchor failure retains the original ungated launch; watchdog failure retains the warning and Rust cleanup fallback. Windows and Watchman launches are unchanged.
-
 - The public Rust field `LspServerConfig.initialization_options` remains `Option<serde_json::Value>`. Private boundary adapters reject nested TOML datetimes. Settings and parent configuration Debug output redact values; initialization and configuration transmission preserve valid values.
 - Every completion response is ranked before count or byte cuts, including responses with at most 100 candidates. Defaults remain 20 items and no documentation. Existing 65536-byte compact output and field-clipping limits, omission metadata, and provider completeness remain independent.
 - Diagnostic deltas qualify removals only from complete comparable evidence. Lost pushes remain visible as evicted evidence even when an older pull remains cached; uncertain removals stay conservative. Fresh recovery can restore ordinary comparisons.

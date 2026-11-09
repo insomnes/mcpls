@@ -853,7 +853,7 @@ async fn test_spawn_retries_once_with_a_fresh_anchor_when_the_group_vanished() {
     let mut command = Command::new("sleep");
     command.arg("606");
 
-    let mut child = spawn_leader(&mut command, &mut anchor, &stderr_hold, &mut None)
+    let mut child = spawn_leader(&mut command, &mut anchor, &stderr_hold)
         .expect("FR-007: the spawn must succeed after the retry");
 
     let fresh = anchor.take().unwrap();
@@ -873,7 +873,7 @@ async fn test_permission_denied_with_a_live_anchor_is_returned_unchanged() {
     let group = anchor.as_ref().unwrap().group;
     let mut command = Command::new(&not_executable);
 
-    let error = spawn_leader(&mut command, &mut anchor, &stderr_hold, &mut None).unwrap_err();
+    let error = spawn_leader(&mut command, &mut anchor, &stderr_hold).unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     let kept = anchor.take().unwrap();

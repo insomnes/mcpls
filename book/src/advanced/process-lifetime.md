@@ -16,17 +16,13 @@ The mechanism differs by platform.
 
 Each server has its own lifeline: a small anchor process leads the server's process group, and a watchdog sits outside the group. When mcpls exits, or the server is shut down or restarted, the watchdog freezes the tree, finds descendants that left the group with `setsid()` or `setpgid()` (for example the `cargo check` that rust-analyzer's flycheck runs), and kills everything. A crashed server's leftovers are killed when the crash is noticed.
 
-Configured LSP commands first wait in a private shell gate. The watchdog receives its lifetime descriptors before mcpls releases the command. If mcpls dies before that ownership transfer, the gate exits without executing the server. The private release line is consumed before LSP traffic starts; arguments, environment, working directory and protocol streams retain their configured values.
-
-Missing commands, nonexecutable commands and missing shebang interpreters fail during initialization, with `ServerExitedDuringInit` in the Rust API and `initialize_failed` for a restart. They remain unavailable and do not register as live servers. Failed initial startup does not retry automatically. Diagnostics remain bounded and redacted. Native errors creating the gate, such as an invalid working directory, retain the existing spawn-error classification and dead-anchor retry rule.
-
 Caveats:
 
 - The sweep needs `ps` and `awk`. Without `ps`, mcpls logs a warning and escaped descendants survive.
 - Descendants whose parent exited before the sweep (reparented to init) cannot be attributed and may survive. A `pkill -9` that matches `lsp-lifeline-watchdog` kills the watchdog and prevents the sweep.
 - Servers that exit only on stdin EOF wait out the 3 second shutdown grace and are then killed. `processId` is sent as `null` in `initialize`.
 - Servers run in their own process group, so Ctrl-C in the terminal no longer reaches them directly. A descendant that reads `/dev/tty`, such as an ssh or git credential prompt, may be stopped by `SIGTTIN` when mcpls runs in an interactive terminal.
-- If the anchor cannot be started, the original command runs ungated and unbound in its own process group; native command-exec errors can retain their earlier classification. If only the watchdog fails, the group is killed from mcpls on exit but escaped descendants are not swept. Ctrl-C does not reach servers in either case.
+- If the anchor cannot be started, the server runs unbound in its own process group. If only the watchdog fails, the group is killed from mcpls on exit but escaped descendants are not swept. Ctrl-C does not reach servers in either case.
 
 ## Windows
 
