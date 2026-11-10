@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 /// Call peer path filter.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(try_from = "CallPathFilterWire")]
+#[serde(try_from = "serde_json::Map<String, serde_json::Value>")]
 #[schemars(with = "CallPathFilterWire")]
 pub struct CallPathFilter {
     include: Vec<PathBuf>,
@@ -29,6 +29,16 @@ fn usable(path: &Path) -> bool {
     path.is_absolute()
         && !path.components().any(|part| part == Component::ParentDir)
         && !path.as_os_str().as_encoded_bytes().contains(&0)
+}
+
+impl TryFrom<serde_json::Map<String, serde_json::Value>> for CallPathFilter {
+    type Error = String;
+
+    fn try_from(fields: serde_json::Map<String, serde_json::Value>) -> Result<Self, Self::Error> {
+        let wire: CallPathFilterWire = serde_json::from_value(serde_json::Value::Object(fields))
+            .map_err(|error| error.to_string())?;
+        Self::try_from(wire)
+    }
 }
 
 impl TryFrom<CallPathFilterWire> for CallPathFilter {

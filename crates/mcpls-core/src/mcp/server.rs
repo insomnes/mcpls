@@ -7142,6 +7142,39 @@ sleep 0.3
         assert_eq!(result["filtered_calls"], 0);
     }
 
+    /// A filter must be an object; Serde positional struct arrays are not valid inputs.
+    #[tokio::test]
+    async fn test_call_path_filter_rejects_sequences_over_mcp() {
+        for name in [
+            "get_incoming_calls",
+            "get_outgoing_calls",
+            "get_call_graph",
+            "get_symbol_context",
+        ] {
+            for filter in [serde_json::json!([]), serde_json::json!([[], []])] {
+                let fixture = hierarchy_wire_fixture();
+                let mut arguments = serde_json::json!({"file_path":fixture.file,"line":1,"character":4,
+                    "call_path_filter":filter});
+                if name == "get_call_graph" {
+                    arguments["direction"] = serde_json::json!("outgoing");
+                }
+                let response = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    serde_json::json!({"name":name,"arguments":arguments}),
+                )
+                .await;
+                assert_eq!(response["result"]["isError"], true, "{name}: {response}");
+                assert!(
+                    response["result"]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("failed to deserialize parameters:"),
+                    "{name}: {response}"
+                );
+            }
+        }
+    }
+
     /// Invalid filters fail input validation, including on context without outgoing calls.
     #[tokio::test]
     async fn test_call_path_filter_validation_over_mcp() {
