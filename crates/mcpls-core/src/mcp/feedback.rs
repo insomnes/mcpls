@@ -488,6 +488,49 @@ fn read_lines<T: serde::de::DeserializeOwned>(file: &mut fs::File) -> io::Result
         .collect()
 }
 
+fn decode_record(raw: serde_json::Value) -> Result<Record, McpError> {
+    let object = raw
+        .as_object()
+        .ok_or_else(|| storage_error("feedback report must be an object"))?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "timestamp"
+                | "version"
+                | "operation"
+                | "observation"
+                | "category"
+                | "workaround"
+                | "runtime_provenance"
+        )
+    }) {
+        return Err(storage_error("feedback report contains an unknown field"));
+    }
+    let record: Record = serde_json::from_value(raw).map_err(storage_error)?;
+    if chrono::DateTime::parse_from_rfc3339(&record.timestamp).is_err()
+        || record.version.trim().is_empty()
+    {
+        return Err(storage_error("invalid feedback timestamp or version"));
+    }
+    if record
+        .runtime_provenance
+        .as_ref()
+        .is_some_and(|provenance| !provenance.is_well_formed())
+    {
+        return Err(storage_error("invalid feedback runtime provenance"));
+    }
+    for (field, text, maximum) in [
+        ("operation", Some(record.input.operation.as_str()), 128),
+        ("observation", Some(record.input.observation.as_str()), 2048),
+        ("workaround", record.input.workaround.as_deref(), 2048),
+    ] {
+        if let Some(text) = text {
+            validate_text(field, text, maximum).map_err(storage_error)?;
+        }
+    }
+    Ok(record)
+}
+
 fn load() -> Result<Option<Store>, McpError> {
     let directory = directory().map_err(storage_error)?;
     match fs::symlink_metadata(&directory) {
@@ -512,43 +555,11 @@ fn load() -> Result<Option<Store>, McpError> {
         result => result.map_err(storage_error)?,
     };
     file.lock().map_err(storage_error)?;
-    let raw_records: Vec<serde_json::Value> = read_lines(&mut file).map_err(storage_error)?;
-    let mut records = Vec::with_capacity(raw_records.len());
-    for raw in raw_records {
-        let object = raw
-            .as_object()
-            .ok_or_else(|| storage_error("feedback report must be an object"))?;
-        if object.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "timestamp"
-                    | "version"
-                    | "operation"
-                    | "observation"
-                    | "category"
-                    | "workaround"
-                    | "runtime_provenance"
-            )
-        }) {
-            return Err(storage_error("feedback report contains an unknown field"));
-        }
-        let record: Record = serde_json::from_value(raw).map_err(storage_error)?;
-        if chrono::DateTime::parse_from_rfc3339(&record.timestamp).is_err()
-            || record.version.trim().is_empty()
-        {
-            return Err(storage_error("invalid feedback timestamp or version"));
-        }
-        for (field, text, maximum) in [
-            ("operation", Some(record.input.operation.as_str()), 128),
-            ("observation", Some(record.input.observation.as_str()), 2048),
-            ("workaround", record.input.workaround.as_deref(), 2048),
-        ] {
-            if let Some(text) = text {
-                validate_text(field, text, maximum).map_err(storage_error)?;
-            }
-        }
-        records.push(record);
-    }
+    let records = read_lines::<serde_json::Value>(&mut file)
+        .map_err(storage_error)?
+        .into_iter()
+        .map(decode_record)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut items: Vec<_> = records
         .into_iter()
         .enumerate()

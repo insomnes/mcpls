@@ -527,3 +527,124 @@ fn feedback_lifecycle_retains_runtime_metadata_and_legacy_absence() {
     assert_eq!(content(&reopened)["state"], "open");
     assert_eq!(std::fs::read(&path).unwrap(), original);
 }
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one public MCP fixture table covers valid and malformed historical provenance"
+)]
+fn stored_runtime_provenance_validates_values_without_reauthenticating_history() {
+    for (metadata, valid) in [
+        (None, true),
+        (
+            Some(
+                json!({"status":"verified","revision":"a".repeat(40),"executable_sha256":"b".repeat(64)}),
+            ),
+            true,
+        ),
+        (
+            Some(
+                json!({"status":"unknown","revision":"unknown","executable_sha256":"b".repeat(64)}),
+            ),
+            true,
+        ),
+        (
+            Some(json!({"status":"unknown","revision":"unknown","executable_sha256":"unknown"})),
+            true,
+        ),
+        (Some(Value::Null), false),
+        (
+            Some(
+                json!({"status":"verified","revision":"not-a-revision","executable_sha256":"not-a-digest"}),
+            ),
+            false,
+        ),
+        (
+            Some(
+                json!({"status":"unknown","revision":"a".repeat(40),"executable_sha256":"b".repeat(64)}),
+            ),
+            false,
+        ),
+        (
+            Some(
+                json!({"status":"verified","revision":"A".repeat(40),"executable_sha256":"b".repeat(64)}),
+            ),
+            false,
+        ),
+        (
+            Some(
+                json!({"status":"verified","revision":"a".repeat(40),"executable_sha256":"B".repeat(64)}),
+            ),
+            false,
+        ),
+        (
+            Some(
+                json!({"status":"unknown","revision":"unknown","executable_sha256":"b".repeat(63)}),
+            ),
+            false,
+        ),
+    ] {
+        let root = TempDir::new().unwrap();
+        let mut client = Client::new(root.path(), "[workspace]\nroots = []\n");
+        success(&client.feedback(
+            "feedback_add",
+            &json!({"operation":"test", "observation":"historical"}),
+        ));
+        let listed = client.feedback("feedback_list", &json!({}));
+        let id = content(&listed)["items"][0]["feedback_id"].clone();
+        let path = root.path().join("state/mcpls/feedback.jsonl");
+        let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if let Some(metadata) = &metadata {
+            record["runtime_provenance"] = metadata.clone();
+        } else {
+            record.as_object_mut().unwrap().remove("runtime_provenance");
+        }
+        let original = format!("{record}\n").into_bytes();
+        std::fs::write(&path, &original).unwrap();
+        for (tool, arguments) in [
+            ("feedback_list", json!({})),
+            (
+                "feedback_resolve",
+                json!({"feedback_id":id,"resolution":"verified"}),
+            ),
+            ("feedback_reopen", json!({"feedback_id":id})),
+        ] {
+            let response = client.feedback(tool, &arguments);
+            if valid {
+                let result = content(&response);
+                if tool == "feedback_list" {
+                    assert_eq!(
+                        result["items"][0].get("runtime_provenance"),
+                        metadata.as_ref()
+                    );
+                } else {
+                    assert_eq!(result["feedback_id"], id);
+                    let state = if tool == "feedback_resolve" {
+                        "resolved"
+                    } else {
+                        "open"
+                    };
+                    assert_eq!(result["state"], state);
+                    let current = client.feedback("feedback_list", &json!({"state":state}));
+                    assert_eq!(content(&current)["total_count"], 1);
+                    assert_eq!(
+                        content(&current)["items"][0].get("runtime_provenance"),
+                        metadata.as_ref()
+                    );
+                }
+            } else {
+                assert_eq!(
+                    response["error"]["data"]["code"], "feedback_storage_failed",
+                    "{metadata:?}: {response}"
+                );
+                assert!(
+                    !root
+                        .path()
+                        .join("state/mcpls/feedback-state.jsonl")
+                        .exists()
+                );
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+    }
+}

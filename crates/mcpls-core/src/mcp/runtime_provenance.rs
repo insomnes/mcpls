@@ -43,6 +43,26 @@ pub(super) fn current() -> &'static RuntimeProvenance {
 }
 
 impl RuntimeProvenance {
+    /// Check stored syntax without reauthenticating a historical observation.
+    pub(super) fn is_well_formed(&self) -> bool {
+        let revision_is_hex = self.revision.len() == 40
+            && self
+                .revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        let digest_is_hex = self.executable_sha256.len() == 64
+            && self
+                .executable_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        match self.status {
+            Status::Verified => revision_is_hex && digest_is_hex,
+            Status::Unknown => {
+                self.revision == "unknown" && (digest_is_hex || self.executable_sha256 == "unknown")
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn measure(&mut self) {
         use std::fs::{File, read, read_link};

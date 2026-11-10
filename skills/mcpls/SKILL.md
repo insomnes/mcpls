@@ -79,8 +79,10 @@ Use `feedback_add` for concrete mcpls failures, missing capabilities, or useful
 workarounds once per distinct observation. Skip routine success and duplicates.
 Verify the observed `runtime_provenance` before attributing a report to a build;
 use its verified full revision when available. If provenance is unknown, say so.
-Never guess `build_sha` from a checkout's HEAD. Preserve the original trigger and
-observation; do not include secrets or source code.
+Include `build_sha=<verified full revision>` in `observation` for the observed
+build; use `build_sha=unknown` when unavailable. The receiving service's metadata
+can describe a different build. Never guess `build_sha` from a checkout's HEAD.
+Preserve the original trigger and observation; do not include secrets or source code.
 
 Use `feedback_list` to investigate unresolved reports. Its default state is
 `open`; request `resolved` or `all` explicitly when needed. Copy opaque
