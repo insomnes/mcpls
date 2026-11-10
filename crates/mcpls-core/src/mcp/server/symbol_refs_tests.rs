@@ -200,7 +200,7 @@ async fn compact_targets_independent_known_context_wire() {
                 ).await;
                 assert!(reused.get("error").is_none() && reused["result"]["isError"] != true, "{reused}");
                 let recorded = requests.lock().await;
-                assert!(!recorded[before..].is_empty());
+                assert_ne!(recorded[before..].len(), 0);
                 for request in &recorded[before..] {
                     assert_eq!(request["params"]["position"], json!({"line":1,"character":3}));
                 }
