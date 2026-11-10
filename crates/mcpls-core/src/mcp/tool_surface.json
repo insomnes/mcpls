@@ -1826,7 +1826,7 @@
   {
     "name": "get_call_graph",
     "title": "Call Graph",
-    "description": "Bounded caller/callee graph. Required direction: incoming or outgoing. Use a file position/name, symbol_target, or unchanged item. depth:2 (1..8); max_nodes:30 (1..256). Edges point caller to callee; ranges belong to caller URI. Shared budgets and partial statuses are explicit. Freshness is unknown; no atomic snapshot. Analyzer work and inbound parsing use existing limits.",
+    "description": "Caller/callee graph; required direction:incoming/outgoing. Use 1-based UTF-16 position, name, symbol_target, or unchanged item. Edges point caller-to-callee; ranges belong to caller. call_path_filter selects lexical peer paths; exclude wins; empty/null inactive. Keep root; prune rejected branches. usage.filtered_relationships counts examined rejections only. Unknown freshness; non-atomic.",
     "inputSchema": {
       "$defs": {
         "CallGraphDirection": {
@@ -1835,6 +1835,33 @@
             "outgoing"
           ],
           "type": "string"
+        },
+        "CallPathFilter": {
+          "additionalProperties": false,
+          "description": "Call peer path filter.",
+          "properties": {
+            "exclude": {
+              "default": [],
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            },
+            "include": {
+              "default": [],
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            }
+          },
+          "type": "object"
         },
         "HierarchyItem": {
           "additionalProperties": false,
@@ -1945,8 +1972,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "call_path_filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CallPathFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "character": {
-          "description": "One-based UTF-16 column.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -1955,7 +1991,6 @@
           ]
         },
         "container": {
-          "description": "Optional immediate container.",
           "type": [
             "string",
             "null"
@@ -1963,7 +1998,6 @@
         },
         "depth": {
           "default": 2,
-          "description": "Maximum hops.",
           "format": "uint",
           "maximum": 8,
           "minimum": 1,
@@ -1973,7 +2007,6 @@
           "$ref": "#/$defs/CallGraphDirection"
         },
         "file_path": {
-          "description": "Absolute file path.",
           "type": [
             "string",
             "null"
@@ -1987,11 +2020,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Unchanged returned hierarchy item."
+          ]
         },
         "line": {
-          "description": "One-based line.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -2001,7 +2032,6 @@
         },
         "max_nodes": {
           "default": 30,
-          "description": "Retained nodes, including root.",
           "format": "uint",
           "maximum": 256,
           "minimum": 1,
@@ -2052,11 +2082,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Optional kind name or numeric string."
+          ]
         },
         "symbol_name": {
-          "description": "Symbol name instead of a position.",
           "type": [
             "string",
             "null"
@@ -2070,8 +2098,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Portable target instead of other selectors."
+          ]
         }
       },
       "required": [
@@ -2083,7 +2110,9 @@
       "$defs": {
         "HierarchyItem": {
           "properties": {
-            "data": {},
+            "data": {
+              "description": "Preserve provider data."
+            },
             "detail": {
               "type": [
                 "string",
@@ -2094,7 +2123,6 @@
               "type": "string"
             },
             "kind": {
-              "description": "Numeric LSP symbol kind.",
               "maximum": 4294967295,
               "minimum": 0,
               "type": "integer"
@@ -2125,7 +2153,7 @@
           "type": "object"
         },
         "Position2D": {
-          "description": "Coordinates follow enclosing positions_base and positions_encoding.",
+          "description": "Use enclosing positions_base and positions_encoding.",
           "properties": {
             "character": {
               "maximum": 4294967295,
@@ -2145,7 +2173,6 @@
           "type": "object"
         },
         "Range": {
-          "description": "Range in the enclosing coordinate convention.",
           "properties": {
             "end": {
               "$ref": "#/$defs/Position2D"
@@ -2175,7 +2202,6 @@
           ]
         },
         "edges": {
-          "description": "First-seen caller-to-callee relationships; ranges belong to caller URI.",
           "items": {
             "properties": {
               "callee": {
@@ -2185,14 +2211,13 @@
                 "type": "string"
               },
               "from_ranges": {
-                "description": "Distinct caller call sites in first-seen order.",
                 "items": {
                   "$ref": "#/$defs/Range"
                 },
                 "type": "array"
               },
               "positions_base": {
-                "description": "Raw zero-based or normalized one-based coordinates.",
+                "description": "Raw base 0; normalized base 1.",
                 "enum": [
                   0,
                   1
@@ -2221,7 +2246,6 @@
           "type": "boolean"
         },
         "items": {
-          "description": "Bounded preparation candidates; present only when preparation stops.",
           "items": {
             "$ref": "#/$defs/HierarchyItem"
           },
@@ -2275,7 +2299,6 @@
           "type": "object"
         },
         "nodes": {
-          "description": "Nodes in first-seen breadth-first order.",
           "items": {
             "properties": {
               "depth": {
@@ -2283,7 +2306,6 @@
                 "type": "integer"
               },
               "expansion_status": {
-                "description": "Expansion outcome; completeness remains unknown.",
                 "enum": [
                   "expanded",
                   "depth_boundary",
@@ -2314,7 +2336,6 @@
                 ]
               },
               "source_identity": {
-                "description": "Hash of already observed complete source, or unavailable.",
                 "oneOf": [
                   {
                     "properties": {
@@ -2366,18 +2387,15 @@
           "type": "array"
         },
         "positions_base": {
-          "const": 0,
-          "description": "Raw preparation candidates use base 0."
+          "const": 0
         },
         "positions_degraded": {
-          "description": "Worst coordinate conversion degradation; request takes precedence.",
           "enum": [
             "request",
             "response"
           ]
         },
         "positions_encoding": {
-          "description": "Encoding of raw preparation candidates.",
           "enum": [
             "utf-8",
             "utf-16",
@@ -2408,17 +2426,21 @@
           "type": "array"
         },
         "truncated": {
-          "description": "An aggregate budget, bounded admission or replacement omitted known work.",
           "type": "boolean"
         },
         "usage": {
           "properties": {
             "analysis_requests": {
-              "description": "Analysis send attempts, including retries.",
+              "description": "Analysis attempts, including retries.",
               "minimum": 0,
               "type": "integer"
             },
             "edges": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "filtered_relationships": {
+              "description": "Active filter: rejected visits examined; duplicates count; unseen work excluded.",
               "minimum": 0,
               "type": "integer"
             },
@@ -2427,27 +2449,27 @@
               "type": "integer"
             },
             "omitted_relationships": {
-              "description": "Examined relationships omitted; excludes unseen work.",
+              "description": "Examined omissions; excludes unseen work.",
               "minimum": 0,
               "type": "integer"
             },
             "output_bytes": {
-              "description": "Final compact UTF-8 bytes, including this count.",
+              "description": "Final UTF-8 bytes, including this count.",
               "minimum": 0,
               "type": "integer"
             },
             "ranges_examined": {
-              "description": "Call-site range visits, including duplicates.",
+              "description": "Range visits, including duplicates.",
               "minimum": 0,
               "type": "integer"
             },
             "records_examined": {
-              "description": "Item and relationship visits, including duplicates.",
+              "description": "Item/relationship visits, including duplicates.",
               "minimum": 0,
               "type": "integer"
             },
             "retained_data_bytes": {
-              "description": "Opaque JSON bytes per retained identity or candidate.",
+              "description": "Opaque JSON bytes per retained item.",
               "minimum": 0,
               "type": "integer"
             }
@@ -5191,9 +5213,35 @@
   {
     "name": "get_incoming_calls",
     "title": "Incoming Calls",
-    "description": "Functions calling a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. `out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory).",
+    "description": "Callers of a symbol. Use absolute file_path with line/character (1-based UTF-16), symbol_name, symbol_target, or unchanged item. Only complete nondegraded singleton preparation traverses. Direct results add status/indexing_in_progress; item results omit them. call_path_filter selects lexical caller paths; exclude wins; empty/null inactive. filtered_calls counts examined rejections only. Budget omissions set truncated. out_of_workspace is lexical/advisory.",
     "inputSchema": {
       "$defs": {
+        "CallPathFilter": {
+          "additionalProperties": false,
+          "properties": {
+            "exclude": {
+              "default": [],
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            },
+            "include": {
+              "default": [],
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "HierarchyItem": {
           "additionalProperties": false,
           "properties": {
@@ -5293,8 +5341,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "call_path_filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CallPathFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "character": {
-          "description": "UTF-16 column (1-based), with `line`.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -5309,7 +5366,6 @@
           ]
         },
         "file_path": {
-          "description": "Absolute path, instead of `item`.",
           "type": [
             "string",
             "null"
@@ -5323,11 +5379,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Reuse an item unchanged, instead of a file target."
+          ]
         },
         "line": {
-          "description": "Line number (1-based), with `character`.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -5396,8 +5450,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Portable target instead of item or legacy addressing."
+          ]
         }
       },
       "type": "object"
@@ -5478,6 +5531,14 @@
               },
               "type": "array"
             },
+            "filtered_calls": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "positions_degraded": {
               "anyOf": [
                 {
@@ -5506,6 +5567,14 @@
                     "$ref": "#/$defs/IncomingCall"
                   },
                   "type": "array"
+                },
+                "filtered_calls": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "indexing_in_progress": {
                   "type": "boolean"
@@ -6024,9 +6093,35 @@
   {
     "name": "get_outgoing_calls",
     "title": "Outgoing Calls",
-    "description": "Functions called by a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. `out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory).",
+    "description": "Callees of a symbol. Use absolute file_path with line/character (1-based UTF-16), symbol_name, symbol_target, or unchanged item. Only complete nondegraded singleton preparation traverses. Direct results add status/indexing_in_progress; item results omit them. call_path_filter selects lexical callee paths; exclude wins; empty/null inactive. filtered_calls counts examined rejections only. Budget omissions set truncated. out_of_workspace is lexical/advisory.",
     "inputSchema": {
       "$defs": {
+        "CallPathFilter": {
+          "additionalProperties": false,
+          "properties": {
+            "exclude": {
+              "default": [],
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            },
+            "include": {
+              "default": [],
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "HierarchyItem": {
           "additionalProperties": false,
           "properties": {
@@ -6126,8 +6221,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "call_path_filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CallPathFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "character": {
-          "description": "UTF-16 column (1-based), with `line`.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -6142,7 +6246,6 @@
           ]
         },
         "file_path": {
-          "description": "Absolute path, instead of `item`.",
           "type": [
             "string",
             "null"
@@ -6156,11 +6259,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Reuse an item unchanged, instead of a file target."
+          ]
         },
         "line": {
-          "description": "Line number (1-based), with `character`.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -6229,8 +6330,7 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Portable target instead of item or legacy addressing."
+          ]
         }
       },
       "type": "object"
@@ -6294,6 +6394,14 @@
                     "$ref": "#/$defs/OutgoingCall"
                   },
                   "type": "array"
+                },
+                "filtered_calls": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
                 },
                 "indexing_in_progress": {
                   "type": "boolean"
@@ -6546,6 +6654,14 @@
                 "$ref": "#/$defs/OutgoingCall"
               },
               "type": "array"
+            },
+            "filtered_calls": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "positions_degraded": {
               "anyOf": [
@@ -8725,9 +8841,35 @@
   {
     "name": "get_symbol_context",
     "title": "Symbol Context",
-    "description": "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Requested sections have independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
+    "description": "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. Optional call_path_filter applies only to outgoing_calls; empty/null is inactive. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Requested sections have independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
     "inputSchema": {
       "$defs": {
+        "CallPathFilter": {
+          "additionalProperties": false,
+          "properties": {
+            "exclude": {
+              "default": [],
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            },
+            "include": {
+              "default": [],
+              "items": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 32,
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
         "ContextResolve": {
           "oneOf": [
             {
@@ -8760,6 +8902,16 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "call_path_filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CallPathFilter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "character": {
           "format": "uint32",
           "minimum": 0,

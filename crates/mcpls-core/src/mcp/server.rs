@@ -1604,7 +1604,7 @@ impl McplsServer {
 
     /// Traverse a bounded caller or callee graph.
     #[tool(
-        description = "Caller/callee graph; required direction:incoming/outgoing. Use position/name, symbol_target, or unchanged item. Edges point caller-to-callee; ranges belong to caller. call_path_filter selects lexical peer paths; exclude wins; empty/null inactive. Keep root; prune rejected branches. usage.filtered_relationships counts examined rejections only. Unknown freshness; non-atomic.",
+        description = "Caller/callee graph; required direction:incoming/outgoing. Use 1-based UTF-16 position, name, symbol_target, or unchanged item. Edges point caller-to-callee; ranges belong to caller. call_path_filter selects lexical peer paths; exclude wins; empty/null inactive. Keep root; prune rejected branches. usage.filtered_relationships counts examined rejections only. Unknown freshness; non-atomic.",
         title = "Call Graph"
     )]
     async fn get_call_graph(
