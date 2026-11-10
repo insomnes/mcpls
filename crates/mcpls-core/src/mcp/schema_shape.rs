@@ -1100,9 +1100,10 @@ mod tests {
             let mut found = Vec::new();
             object_schemas_with_openness(&Value::Object(output.clone()), "", false, &mut found);
             let target_path = match tool.name.as_ref() {
-                "get_definition" | "get_document_outline" | "workspace_symbol_search" => {
-                    Some("/$defs/SymbolTargetEnvelope")
-                }
+                "get_definition"
+                | "get_document_outline"
+                | "workspace_symbol_search"
+                | "get_references" => Some("/$defs/SymbolTargetEnvelope"),
                 "get_symbol_context" => Some("/properties/symbol_target"),
                 _ => None,
             };
@@ -1143,7 +1144,7 @@ mod tests {
                     .map(|path| format!("{}: {path}", tool.name)),
             );
         }
-        assert_eq!(target_records, 4);
+        assert_eq!(target_records, 5);
         assert!(
             violations.is_empty(),
             "output schema objects closed to additional properties:\n{}",
