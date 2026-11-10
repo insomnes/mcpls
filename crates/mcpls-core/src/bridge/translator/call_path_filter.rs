@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-/// Lexical call peer prefixes; exclusions win.
+/// Call peer path filter.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(try_from = "CallPathFilterWire")]
 #[schemars(with = "CallPathFilterWire")]
@@ -17,11 +17,9 @@ pub struct CallPathFilter {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CallPathFilterWire {
-    /// Include absolute prefixes; empty means all.
     #[serde(default)]
     #[schemars(length(max = 32), extend("items" = {"type":"string","minLength":1,"maxLength":4096}))]
     include: Vec<String>,
-    /// Exclude absolute prefixes.
     #[serde(default)]
     #[schemars(length(max = 32), extend("items" = {"type":"string","minLength":1,"maxLength":4096}))]
     exclude: Vec<String>,

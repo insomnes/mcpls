@@ -35,10 +35,10 @@ pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
         direction.remove("description");
     }
     let hierarchy = json!({"type":"object","required":["name","kind","uri","range","selectionRange"],"properties":{
-        "name":{"type":"string"},"kind":{"type":"integer","minimum":0,"maximum":4_294_967_295_u64,"description":"Numeric LSP kind."},
+        "name":{"type":"string"},"kind":{"type":"integer","minimum":0,"maximum":4_294_967_295_u64},
         "detail":{"type":["string","null"]},"uri":{"type":"string"},
         "range":{"$ref":"#/$defs/Range"},"selectionRange":{"$ref":"#/$defs/Range"},
-        "data":{"description":"Preserve provider data."},"out_of_workspace":{"type":"boolean","description":"Advisory workspace membership."},
+        "data":{"description":"Preserve provider data."},"out_of_workspace":{"type":"boolean"},
         "dispatcher_context":{"type":"string"}}});
     let point = json!({"type":"object","required":["line","character"],"description":"Use enclosing positions_base and positions_encoding.","properties":{
         "line":{"type":"integer","minimum":0,"maximum":4_294_967_295_u64},"character":{"type":"integer","minimum":0,"maximum":4_294_967_295_u64}}});
@@ -47,21 +47,21 @@ pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
         "status":{"enum":["ok","no_item","selection_required","preparation_incomplete"]},
         "direction":{"enum":["incoming","outgoing"]},
         "root":{"type":["string","null"]},
-        "nodes":{"type":"array","description":"Breadth-first node order.","items":{"type":"object","required":["id","item","depth","expansion_status","positions_encoding","positions_base","source_identity"],"properties":{
+        "nodes":{"type":"array","items":{"type":"object","required":["id","item","depth","expansion_status","positions_encoding","positions_base","source_identity"],"properties":{
             "id":{"type":"string"},"item":{"$ref":"#/$defs/HierarchyItem"},
             "depth":{"type":"integer","minimum":0},
-            "expansion_status":{"enum":["expanded","depth_boundary","excluded_scope","truncated","failed","unexpanded_budget"],"description":"Expansion outcome; completeness unknown."},
+            "expansion_status":{"enum":["expanded","depth_boundary","excluded_scope","truncated","failed","unexpanded_budget"]},
             "positions_encoding":{"enum":["utf-8","utf-16","utf-32"]},"positions_base":{"enum":[0,1],"description":"Raw base 0 or normalized UTF-16 base 1."},
-            "source_identity":{"oneOf":[{"type":"object","required":["status"],"properties":{"status":{"const":"unavailable"}}},{"type":"object","required":["status","origin","sha256"],"properties":{"status":{"const":"observed"},"origin":{"enum":["tracked","disk"]},"sha256":{"type":"string"}}}],"description":"Observed source hash or unavailable."}
+            "source_identity":{"oneOf":[{"type":"object","required":["status"],"properties":{"status":{"const":"unavailable"}}},{"type":"object","required":["status","origin","sha256"],"properties":{"status":{"const":"observed"},"origin":{"enum":["tracked","disk"]},"sha256":{"type":"string"}}}]}
         }}},
-        "edges":{"type":"array","description":"Caller-to-callee; ranges use caller URI.","items":{"type":"object","required":["caller","callee","from_ranges","positions_encoding","positions_base"],"properties":{
-            "caller":{"type":"string"},"callee":{"type":"string"},"from_ranges":{"type":"array","items":{"$ref":"#/$defs/Range"},"description":"Distinct caller sites, first-seen order."},"positions_encoding":{"enum":["utf-8","utf-16","utf-32"]},"positions_base":{"enum":[0,1],"description":"Raw base 0; normalized base 1."}}}},
-        "items":{"type":"array","items":{"$ref":"#/$defs/HierarchyItem"},"description":"Candidates when preparation stops."},
+        "edges":{"type":"array","items":{"type":"object","required":["caller","callee","from_ranges","positions_encoding","positions_base"],"properties":{
+            "caller":{"type":"string"},"callee":{"type":"string"},"from_ranges":{"type":"array","items":{"$ref":"#/$defs/Range"}},"positions_encoding":{"enum":["utf-8","utf-16","utf-32"]},"positions_base":{"enum":[0,1],"description":"Raw base 0; normalized base 1."}}}},
+        "items":{"type":"array","items":{"$ref":"#/$defs/HierarchyItem"}},
         "limits":{"type":"object"},"usage":{"type":"object"},
         "warnings":{"type":"array","items":{"type":"string"}},"stop_reasons":{"type":"array","items":{"type":"string"}},
-        "truncated":{"type":"boolean","description":"Known work omitted by a limit or replacement."},"indexing_in_progress":{"type":"boolean"},"positions_degraded":{"enum":["request","response"],"description":"Worst degradation; request takes precedence."},
-        "positions_encoding":{"enum":["utf-8","utf-16","utf-32"],"description":"Raw candidate encoding."},
-        "positions_base":{"const":0,"description":"Raw candidate base."},
+        "truncated":{"type":"boolean"},"indexing_in_progress":{"type":"boolean"},"positions_degraded":{"enum":["request","response"]},
+        "positions_encoding":{"enum":["utf-8","utf-16","utf-32"]},
+        "positions_base":{"const":0},
         "resolved_symbol":{"type":"object"},"analysis_freshness":{"const":"unknown"},"atomic_snapshot":{"const":false}
     }});
     schema["$defs"] = json!({"HierarchyItem":hierarchy,"Range":range,"Position2D":point});
@@ -106,7 +106,7 @@ pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
         }
     }
     schema["properties"]["usage"]["properties"]["filtered_relationships"] = json!({
-        "type":"integer","minimum":0,"description":"Active filter: rejected visits examined, including duplicates; excludes unseen work."});
+        "type":"integer","minimum":0,"description":"Active filter: rejected visits examined; duplicates count; unseen work excluded."});
     if let Value::Object(schema) = schema {
         route.attr.output_schema = Some(Arc::new(schema));
     }

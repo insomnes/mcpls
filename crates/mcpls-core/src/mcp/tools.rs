@@ -1035,23 +1035,14 @@ struct CallHierarchyCallsWire {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct FilteredCallHierarchyCallsWire {
-    /// Optional lexical peer filter.
     call_path_filter: Option<crate::bridge::CallPathFilter>,
-    /// Portable target instead of item or legacy addressing.
     symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
-    /// Reuse an item unchanged, instead of a file target.
     item: Option<HierarchyItemInput>,
-    /// Absolute path, instead of `item`.
     file_path: Option<PathBuf>,
-    /// Line number (1-based), with `character`.
     line: Option<u32>,
-    /// UTF-16 column (1-based), with `line`.
     character: Option<u32>,
-    /// Symbol name, instead of a position.
     symbol_name: Option<String>,
-    /// Optional symbol kind, with `symbol_name`.
     symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
-    /// Optional immediate container, with `symbol_name`.
     container: Option<String>,
 }
 
@@ -1115,33 +1106,21 @@ pub struct CallGraphParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CallGraphWire {
-    /// Optional lexical peer filter.
     call_path_filter: Option<crate::bridge::CallPathFilter>,
-    /// Follow callers or callees.
     direction: crate::bridge::CallGraphDirection,
-    /// Maximum hops.
     #[serde(default = "graph_default_depth")]
     #[schemars(range(min = 1, max = 8))]
     depth: usize,
-    /// Retained nodes, including root.
     #[serde(default = "graph_default_nodes")]
     #[schemars(range(min = 1, max = 256))]
     max_nodes: usize,
-    /// Portable target instead of other selectors.
     symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
-    /// Unchanged returned hierarchy item.
     item: Option<HierarchyItemInput>,
-    /// Absolute file path.
     file_path: Option<PathBuf>,
-    /// One-based line.
     line: Option<u32>,
-    /// One-based UTF-16 column.
     character: Option<u32>,
-    /// Symbol name instead of a position.
     symbol_name: Option<String>,
-    /// Optional kind name or numeric string.
     symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
-    /// Optional immediate container.
     container: Option<String>,
 }
 

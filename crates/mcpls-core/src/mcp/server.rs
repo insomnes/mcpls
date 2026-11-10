@@ -1604,7 +1604,7 @@ impl McplsServer {
 
     /// Traverse a bounded caller or callee graph.
     #[tool(
-        description = "Bounded caller/callee graph; direction:incoming/outgoing. Use file position/name, symbol_target, or unchanged item. depth:2(1..8), max_nodes:30(1..256). Edges:caller to callee; ranges:caller URI. call_path_filter selects lexical peer paths; exclude wins. Empty/null is inactive. Keep root; prune rejected branches. usage.filtered_relationships counts examined rejections only. Budgets and partial outcomes remain explicit. Unknown freshness; non-atomic. Analyzer/inbound limits remain.",
+        description = "Caller/callee graph; required direction:incoming/outgoing. Use position/name, symbol_target, or unchanged item. Edges point caller-to-callee; ranges belong to caller. call_path_filter selects lexical peer paths; exclude wins; empty/null inactive. Keep root; prune rejected branches. usage.filtered_relationships counts examined rejections only. Unknown freshness; non-atomic.",
         title = "Call Graph"
     )]
     async fn get_call_graph(
@@ -1674,7 +1674,7 @@ impl McplsServer {
 
     /// Get incoming calls (callers).
     #[tool(
-        description = concat!("Functions calling a symbol. Use absolute file_path with 1-based UTF-16 line/character, symbol_name (optional symbol_kind/container), symbol_target, or unchanged item. Direct status:ok has calls; no_item has empty items; selection_required has multiple/truncated items; preparation_incomplete has degraded items. Traverse only a complete, nondegraded singleton. Direct results include indexing_in_progress; empty may be incomplete. Item results omit status/indexing. Known omissions set truncated:true. call_path_filter matches lexical caller paths; exclude wins. Empty/null is inactive. filtered_calls counts examined rejections only. ", out_of_workspace_note!()),
+        description = "Callers of a symbol. Use absolute file_path with line/character (1-based UTF-16), symbol_name, symbol_target, or unchanged item. Only complete nondegraded singleton preparation traverses. Direct results add status/indexing_in_progress; item results omit them. call_path_filter selects lexical caller paths; exclude wins; empty/null inactive. filtered_calls counts examined rejections only. Budget omissions set truncated. out_of_workspace is lexical/advisory.",
         title = "Incoming Calls"
     )]
     async fn get_incoming_calls(
@@ -1707,7 +1707,7 @@ impl McplsServer {
 
     /// Get outgoing calls (callees).
     #[tool(
-        description = concat!("Functions called by a symbol. Use absolute file_path with 1-based UTF-16 line/character, symbol_name (optional symbol_kind/container), symbol_target, or unchanged item. Direct status:ok has calls; no_item has empty items; selection_required has multiple/truncated items; preparation_incomplete has degraded items. Traverse only a complete, nondegraded singleton. Direct results include indexing_in_progress; empty may be incomplete. Item results omit status/indexing. Known omissions set truncated:true. call_path_filter matches lexical callee paths; exclude wins. Empty/null is inactive. filtered_calls counts examined rejections only. ", out_of_workspace_note!()),
+        description = "Callees of a symbol. Use absolute file_path with line/character (1-based UTF-16), symbol_name, symbol_target, or unchanged item. Only complete nondegraded singleton preparation traverses. Direct results add status/indexing_in_progress; item results omit them. call_path_filter selects lexical callee paths; exclude wins; empty/null inactive. filtered_calls counts examined rejections only. Budget omissions set truncated. out_of_workspace is lexical/advisory.",
         title = "Outgoing Calls"
     )]
     async fn get_outgoing_calls(
