@@ -168,6 +168,40 @@ Errors use the existing MCP envelope. Structured `data` contains `code`, `retrya
 
 Normal static errors, language-server errors, and cancellation retain their existing behavior.
 
+## Enroll each root in Watchman exclusions
+
+Root authorization and exclusion setup are separate operations. For each new
+project or independent worktree, select its Watchman-enabled workspace profile and
+run the Python 3.11+ helper explicitly:
+
+```bash
+python3 scripts/setup-watch-exclusions.py \
+  --profile "$HOME/.config/mcpls/profiles/rust.toml" \
+  --root /srv/worktrees/feature \
+  --exclude packages/web/node_modules
+```
+
+Review the JSON dry-run receipt, then repeat with `--apply`. Configure a linked
+worktree separately even when it has a `.git` file and shares repository metadata.
+Setup changes only the selected root's `.watchmanconfig`; it does not enroll
+dispatcher parents or discover other roots. Ordinary serving and read requests
+never invoke setup or write exclusion policy.
+
+The helper seeds defaults only when `ignore_dirs` is absent. Existing arrays,
+including `[]`, remain local policy. Use repeated `--exclude` and `--include`
+for exact additions and removals. Nested paths need explicit entries; root-level
+names do not match nested basenames. Run setup without concurrent policy edits.
+See [Watchman configuration](../reference/config.md#workspacefile_watching) for
+the baseline, input restrictions, backup location, and restoration commands.
+
+Apply changed exclusions to an active root through an authorized workspace
+runtime or service restart. Setup never restarts a process. Watch exclusions
+reduce native watches and do not disable dependency analysis.
+
+The helper can also be copied into an immutable release and exposed as
+`setup-watch-exclusions` on `PATH`. Use the helper from the same selected release
+as the service; its arguments and Python requirement are unchanged.
+
 ## Install, restart, and roll back
 
 On Linux with a systemd user service, use `scripts/install-shared-service.py`. It builds the selected exact commit with `transport-http`, retains the previous executable/configuration, installs an immutable release, updates a dedicated service override and CLI symlink, reloads systemd, restarts the service, and checks the MCP endpoint.

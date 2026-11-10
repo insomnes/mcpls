@@ -61,6 +61,77 @@ Manage exclusions in each authorized root's `.watchmanconfig`:
 
 `ignore_dirs` uses Watchman's root-relative directory semantics. On Linux local filesystems, excluded trees consume no parent-owned native watches. mcpls never modifies this file. An independently authorized child worktree can use its own root and exclusions. `WATCHMAN_CONFIG_FILE` selects global settings and cannot replace root exclusions.
 
+For explicit enrollment, use the standalone Python 3.11+ helper from a checkout:
+
+```bash
+python3 scripts/setup-watch-exclusions.py \
+  --profile "$HOME/.config/mcpls/profiles/rust.toml" \
+  --root /srv/projects/example
+```
+
+The selected TOML workspace profile must set `workspace.file_watching.backend = "watchman"`.
+The helper never executes the profile's commands. `--root` must name one existing
+absolute directory without symlink components. The helper rejects symlink and
+non-regular `.watchmanconfig` files. Run setup while other operators and tools are
+not editing the root policy; concurrent edits are unsupported.
+
+The default is a dry run with no writes. Add `--apply` to write the proposed
+configuration. Each successful invocation prints one JSON object containing
+`root`, `changed`, `applied`, `ignore_dirs`, and `backup`. `changed` reports a
+configuration difference; `applied` reports whether this invocation wrote it.
+`backup` is a path or `null`.
+
+For a missing file or missing `ignore_dirs` key, the helper seeds this ordered list:
+
+```json
+[".agnt-tsks", "target", ".venv", "venv", "node_modules", "__pycache__",
+ ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".uv-cache",
+ ".uv_cache", ".hypothesis", ".next", ".nuxt", ".turbo", ".pnpm-store"]
+```
+
+An existing `ignore_dirs` array, including `[]`, is authoritative. The helper does
+not merge defaults into it. It preserves existing order and duplicates. Add exact
+paths with repeated `--exclude`; remove all exact matches with repeated `--include`:
+
+```bash
+python3 scripts/setup-watch-exclusions.py \
+  --profile "$HOME/.config/mcpls/profiles/rust.toml" \
+  --root /srv/projects/example \
+  --exclude packages/web/node_modules --include target --apply
+```
+
+`--include` also removes a seeded default. Supplying the same path to both options
+is an error. Later runs without overrides retain earlier additions and removals.
+Identical invocations preserve the complete file bytes and create no backup.
+
+Paths are literal, root-relative, and slash-separated. `node_modules` excludes
+only that root-level tree; list `packages/web/node_modules` explicitly for a nested
+tree. The helper never scans for nested directory names or traverses excluded
+trees. New paths cannot contain empty, `.` or `..` components, backslashes, NUL,
+or glob syntax (`*`, `?`, `[` or `]`). Absolute paths, `.git`, and `.git`
+descendants are rejected. Existing legacy strings remain unchanged unless removed.
+
+Changes preserve unrelated JSON values and the file's Unix permission mode.
+Malformed JSON, non-object JSON, and invalid `ignore_dirs` arrays fail without
+replacement. Before replacing an existing policy, the helper saves its original
+bytes and mode under
+`${XDG_STATE_HOME:-$HOME/.local/state}/mcpls/watch-config-backups/` in a private
+directory. The backup location must be outside the selected root. A failed backup
+leaves the policy unchanged. New policies use mode `0600` and need no backup.
+
+To restore an existing policy, use the exact `backup` path from the JSON receipt:
+
+```bash
+cp --preserve=mode -- /absolute/backup/.watchmanconfig /srv/projects/example/.watchmanconfig
+```
+
+To roll back a newly created policy, remove its `.watchmanconfig`. Keep backups
+until the resulting watcher behavior is confirmed. The helper never starts or
+restarts a watcher. After changing an already active root policy, restart its
+workspace runtime or service through the authorized operational procedure.
+Exclusions reduce filesystem watching; language servers can still analyze
+dependencies through their own configuration and import resolution.
+
 Each workspace runtime owns a private, ephemeral Watchman daemon shared by its language servers and HTTP sessions. mcpls supports standard string glob registrations and WatchKind masks. RelativePattern objects are unsupported. Native watching does not follow directory symlinks outside authorized roots.
 
 Enabled startup fails explicitly if Watchman is missing, its root configuration is malformed, or the platform is unsupported. Backend disconnect, cancellation, overflow, or a fresh instance after baseline makes affected LSP requests unavailable. Other workspace runtimes remain independent. No polling or native fallback is used. Restart the workspace runtime or mcpls service after restoring the backend. Restart also applies configuration and exclusion changes. To roll back, set `backend = "disabled"` and restart.
