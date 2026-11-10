@@ -5052,13 +5052,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(response["result"]["isError"], true, "{response}");
-        assert!(
-            response["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("failed to deserialize parameters:")
-        );
+        assert_eq!(response["error"]["code"], -32602, "{response}");
         assert_eq!(
             response["error"]["message"], "file_path must be absolute",
             "{response}"
@@ -7092,6 +7086,62 @@ sleep 0.3
         }
     }
 
+    /// Parent segments must not disappear during file-URI parsing.
+    #[tokio::test]
+    async fn test_call_path_filter_peer_parent_over_mcp() {
+        for middle in ["ghost/../", "ghost/%2e%2E/", "ghost\\..\\"] {
+            let fixture = hierarchy_wire_fixture();
+            let root = hierarchy_lsp_item(&fixture.file);
+            let (prefix, name) = root["uri"].as_str().unwrap().rsplit_once('/').unwrap();
+            let mut peer = root.clone();
+            peer["uri"] = serde_json::json!(format!("{prefix}/{middle}{name}"));
+            let calls = serde_json::json!([{"to":peer,"fromRanges":[]}]);
+            let (result, _) = hierarchy_wire_call(
+                fixture,
+                "get_outgoing_calls",
+                |file| {
+                    serde_json::json!({"file_path":file,"line":1,"character":4,
+                    "call_path_filter":{"include":[file]}})
+                },
+                serde_json::json!([root]),
+                calls,
+                false,
+            )
+            .await;
+            assert_eq!(
+                result["calls"].as_array().unwrap().len(),
+                0,
+                "{middle}: {result}"
+            );
+            assert_eq!(result["filtered_calls"], 1);
+        }
+    }
+
+    /// Query and fragment text are not native path components.
+    #[tokio::test]
+    async fn test_call_path_filter_uri_query_over_mcp() {
+        let fixture = hierarchy_wire_fixture();
+        let root = hierarchy_lsp_item(&fixture.file);
+        let mut peer = root.clone();
+        peer["uri"] = serde_json::json!(format!("{}?../query#..", root["uri"].as_str().unwrap()));
+        let calls = serde_json::json!([{"to":peer,"fromRanges":[]}]);
+        let (result, _) = hierarchy_wire_call(
+            fixture,
+            "get_outgoing_calls",
+            |file| {
+                serde_json::json!({"file_path":file,"line":1,"character":4,
+                "call_path_filter":{"include":[file]}})
+            },
+            serde_json::json!([root]),
+            calls,
+            false,
+        )
+        .await;
+        assert_eq!(result["calls"].as_array().unwrap().len(), 1, "{result}");
+        assert_eq!(result["calls"][0]["to"]["uri"], peer["uri"]);
+        assert_eq!(result["filtered_calls"], 0);
+    }
+
     /// Invalid filters fail input validation, including on context without outgoing calls.
     #[tokio::test]
     async fn test_call_path_filter_validation_over_mcp() {
@@ -7139,7 +7189,13 @@ sleep 0.3
             let response = tools_call_over_the_wire(create_test_server(), serde_json::json!({
                 "name":name,"arguments":{"file_path":"/absent.rs","line":1,"character":1,"call_path_filter":{}}
             })).await;
-            assert_eq!(response["error"]["code"], -32602, "{response}");
+            assert_eq!(response["result"]["isError"], true, "{response}");
+            assert!(
+                response["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("failed to deserialize parameters:")
+            );
         }
     }
 

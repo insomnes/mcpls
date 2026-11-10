@@ -66,9 +66,13 @@ impl CallPathFilter {
     #[must_use]
     pub fn matches_uri(&self, uri: &str) -> bool {
         // URL parsing removes dot segments. Reject parent components first,
-        // including URI-encoded dots, to preserve the lexical matching contract.
+        // including URI-encoded dots and raw URL backslash separators. Query
+        // and fragment text do not belong to the native path.
         if uri
-            .split(['/', '?', '#'])
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(uri)
+            .split(['/', '\\'])
             .any(|part| part.replace("%2e", ".").replace("%2E", ".") == "..")
         {
             return false;
