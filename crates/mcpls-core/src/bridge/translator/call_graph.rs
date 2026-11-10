@@ -61,6 +61,8 @@ pub enum CallGraphStart {
 
 /// Limits selected for this request.
 pub struct CallGraphOptions {
+    /// Optional lexical peer filter, separate from canonical workspace authority.
+    pub call_path_filter: Option<super::CallPathFilter>,
     /// Traversal direction.
     pub direction: CallGraphDirection,
     /// Requested maximum hop count.
@@ -290,14 +292,22 @@ impl Graph {
 
 /// The graph's initial bounded empty result.
 fn empty(options: &CallGraphOptions) -> Value {
-    json!({"status":"preparation_incomplete","direction":options.direction,"root":null,
+    let mut result = json!({"status":"preparation_incomplete","direction":options.direction,"root":null,
         "nodes":[],"edges":[],"items":[],"limits":{"depth":options.depth,"max_nodes":options.max_nodes,
         "max_edges":MAX_EDGES,"max_ranges":MAX_RANGES,"max_records":MAX_RECORDS,"max_requests":64,
         "max_data_bytes":MAX_DATA_BYTES,"max_output_bytes":MAX_OUTPUT_BYTES},
         "usage":{"nodes":0,"edges":0,"ranges_examined":0,"records_examined":0,"analysis_requests":0,
         "retained_data_bytes":0,"output_bytes":0,"omitted_relationships":0},
         "warnings":[],"stop_reasons":[],"truncated":false,"indexing_in_progress":false,
-        "analysis_freshness":"unknown","atomic_snapshot":false})
+        "analysis_freshness":"unknown","atomic_snapshot":false});
+    if options
+        .call_path_filter
+        .as_ref()
+        .is_some_and(super::CallPathFilter::is_active)
+    {
+        result["usage"]["filtered_relationships"] = json!(0);
+    }
+    result
 }
 
 /// Normalize a canonical, authorized item. Keep original coordinates on failure.
@@ -862,6 +872,26 @@ impl Translator {
         let nodes_before = graph.pending.len();
         let edges_before = graph.value["edges"].as_array().unwrap().len();
         let data_before = graph.usage("retained_data_bytes");
+        let peer_key = if graph.options.direction == CallGraphDirection::Incoming {
+            "from"
+        } else {
+            "to"
+        };
+        if let Some(filter) = graph
+            .options
+            .call_path_filter
+            .as_ref()
+            .filter(|filter| filter.is_active())
+        {
+            let uri = record
+                .get(peer_key)
+                .and_then(|peer| peer.get("uri"))
+                .and_then(Value::as_str);
+            if uri.is_none_or(|uri| !filter.matches_uri(uri)) {
+                graph.add("filtered_relationships", 1);
+                return Ok(());
+            }
+        }
         let ranges = record
             .get("fromRanges")
             .and_then(Value::as_array)
@@ -869,11 +899,6 @@ impl Translator {
         if ranges.len() > MAX_RANGES.saturating_sub(graph.usage("ranges_examined")) {
             return Err("max_ranges");
         }
-        let peer_key = if graph.options.direction == CallGraphDirection::Incoming {
-            "from"
-        } else {
-            "to"
-        };
         let peer = record.get(peer_key).ok_or("branch_failed")?;
         let bytes = data_size(peer);
         // Preflight a possible new identity before materializing provider data.

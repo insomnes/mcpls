@@ -1085,6 +1085,9 @@ pub struct IncomingCall {
 /// Result of incoming calls request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IncomingCallsResult {
+    /// Rejected raw peer visits examined by an active path filter, including duplicates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered_calls: Option<usize>,
     /// List of incoming calls.
     pub calls: Vec<IncomingCall>,
     /// Whether `calls` (with their `from_ranges`) was capped below the server's full response.
@@ -1111,6 +1114,9 @@ pub struct OutgoingCall {
 /// Result of outgoing calls request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OutgoingCallsResult {
+    /// Rejected raw peer visits examined by an active path filter, including duplicates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filtered_calls: Option<usize>,
     /// List of outgoing calls.
     pub calls: Vec<OutgoingCall>,
     /// Whether `calls` (with their `from_ranges`) was capped below the server's full response.
@@ -2360,6 +2366,7 @@ impl ServerText for IncomingCallsResult {
             calls,
             truncated: _,
             positions_degraded: _,
+            filtered_calls: _,
         } = self;
         calls.redact_server_text(redactions);
     }
@@ -2378,6 +2385,7 @@ impl ServerText for OutgoingCallsResult {
             calls,
             truncated: _,
             positions_degraded: _,
+            filtered_calls: _,
         } = self;
         calls.redact_server_text(redactions);
     }

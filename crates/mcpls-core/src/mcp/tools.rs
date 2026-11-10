@@ -1032,11 +1032,75 @@ struct CallHierarchyCallsWire {
     container: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FilteredCallHierarchyCallsWire {
+    /// Optional lexical peer source paths; exclusions win.
+    call_path_filter: Option<crate::bridge::CallPathFilter>,
+    /// Portable target instead of item or legacy addressing.
+    symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
+    /// Reuse an item unchanged, instead of a file target.
+    item: Option<HierarchyItemInput>,
+    /// Absolute path, instead of `item`.
+    file_path: Option<PathBuf>,
+    /// Line number (1-based), with `character`.
+    line: Option<u32>,
+    /// UTF-16 column (1-based), with `line`.
+    character: Option<u32>,
+    /// Symbol name, instead of a position.
+    symbol_name: Option<String>,
+    /// Optional symbol kind, with `symbol_name`.
+    symbol_kind: Option<KindFilterInput<SymbolKindFilter>>,
+    /// Optional immediate container, with `symbol_name`.
+    container: Option<String>,
+}
+
+/// Call selectors with a request-local peer source-path filter.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(try_from = "FilteredCallHierarchyCallsWire")]
+#[schemars(with = "FilteredCallHierarchyCallsWire")]
+pub struct FilteredCallHierarchyCallsParams {
+    /// Existing hierarchy selector.
+    pub target: CallHierarchyCallsParams,
+    /// Optional lexical filter; empty filters are inactive.
+    pub call_path_filter: Option<crate::bridge::CallPathFilter>,
+}
+
+impl From<CallHierarchyCallsParams> for FilteredCallHierarchyCallsParams {
+    fn from(target: CallHierarchyCallsParams) -> Self {
+        Self {
+            target,
+            call_path_filter: None,
+        }
+    }
+}
+impl TryFrom<FilteredCallHierarchyCallsWire> for FilteredCallHierarchyCallsParams {
+    type Error = String;
+    fn try_from(w: FilteredCallHierarchyCallsWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            call_path_filter: w.call_path_filter,
+            target: CallHierarchyCallsWire {
+                symbol_target: w.symbol_target,
+                item: w.item,
+                file_path: w.file_path,
+                line: w.line,
+                character: w.character,
+                symbol_name: w.symbol_name,
+                symbol_kind: w.symbol_kind,
+                container: w.container,
+            }
+            .try_into()?,
+        })
+    }
+}
+
 /// One bounded breadth-first caller or callee traversal.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(try_from = "CallGraphWire")]
 #[schemars(with = "CallGraphWire")]
 pub struct CallGraphParams {
+    /// Optional lexical peer source-path filter.
+    pub call_path_filter: Option<crate::bridge::CallPathFilter>,
     /// Existing hierarchy addressing, validated before traversal.
     pub target: CallHierarchyCallsParams,
     /// Follow callers or callees.
@@ -1051,6 +1115,8 @@ pub struct CallGraphParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CallGraphWire {
+    /// Optional lexical peer source paths; rejected branches are pruned.
+    call_path_filter: Option<crate::bridge::CallPathFilter>,
     /// Follow callers or callees.
     direction: crate::bridge::CallGraphDirection,
     /// Maximum hops.
@@ -1106,6 +1172,7 @@ impl TryFrom<CallGraphWire> for CallGraphParams {
         Ok(Self {
             target,
             direction: w.direction,
+            call_path_filter: w.call_path_filter,
             depth: w.depth,
             max_nodes: w.max_nodes,
         })
@@ -1853,6 +1920,8 @@ mod tests {
 reusable_target_wire! {
     /// Wire form of a symbol context request.
     SymbolContextWire {
+        /// Optional lexical filter for `outgoing_calls` only.
+        call_path_filter: Option<crate::bridge::CallPathFilter>,
         #[serde(default)]
         resolve: ContextResolve,
         #[serde(default = "default_context_sections")]
@@ -1881,6 +1950,8 @@ pub enum ContextResolve {
 #[serde(try_from = "SymbolContextWire")]
 #[schemars(with = "SymbolContextWire")]
 pub struct SymbolContextParams {
+    /// Optional lexical filter for `outgoing_calls` only.
+    pub call_path_filter: Option<crate::bridge::CallPathFilter>,
     /// Context selection policy.
     pub resolve: ContextResolve,
     /// Validated addressing form.
@@ -1916,6 +1987,7 @@ impl TryFrom<SymbolContextWire> for SymbolContextParams {
         Ok(Self {
             target,
             sections: wire.sections,
+            call_path_filter: wire.call_path_filter,
             resolve: wire.resolve,
         })
     }

@@ -352,3 +352,11 @@ before semantic dispatch; a change after that observation can produce a result
 or a typed failure. Collection is not atomic with filesystem writes or LSP
 analysis. No guarantee covers undetectable concurrent rewrites or other files.
 Existing freshness and position-degradation signals remain authoritative.
+
+
+Use optional `call_path_filter` to select the peer source paths in the requested
+`outgoing_calls` section. Other sections and target resolution remain unchanged.
+Its retained call data includes `filtered_calls` whenever the filter is active,
+including empty results. Existing section and bundle budgets can still replace
+unavailable data with an explicit outcome. See [call source paths](hierarchies.md#select-call-source-paths)
+for lexical matching, exclusions, limits, and request-local continuation behavior.

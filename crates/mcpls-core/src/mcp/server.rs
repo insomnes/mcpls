@@ -1118,7 +1118,7 @@ impl McplsServer {
 
     /// Collect bounded context for one primary-file symbol.
     #[tool(
-        description = "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Requested sections have independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
+        description = "Bounded source and semantic sections for one symbol. Use position (1-based UTF-16) or symbol_name. Default: source and hover. Optional call_path_filter applies only to outgoing_calls; empty/null is inactive. resolve:direct (default) uses the query; definition follows one reliable in-workspace definition and adds query/resolution. Requested sections have independent status and optional reason/data. Freshness is unknown; collection is non-atomic.",
         title = "Symbol Context"
     )]
     async fn get_symbol_context(
@@ -1604,7 +1604,7 @@ impl McplsServer {
 
     /// Traverse a bounded caller or callee graph.
     #[tool(
-        description = "Bounded caller/callee graph. Required direction: incoming or outgoing. Use a file position/name, symbol_target, or unchanged item. depth:2 (1..8); max_nodes:30 (1..256). Edges point caller to callee; ranges belong to caller URI. Shared budgets and partial statuses are explicit. Freshness is unknown; no atomic snapshot. Analyzer work and inbound parsing use existing limits.",
+        description = "Optional call_path_filter matches peer source paths lexically; include prefixes select, exclude prefixes win. Empty/null is inactive. Rejected branches are pruned; root stays. usage.filtered_relationships counts examined rejected visits only. Bounded caller/callee graph. Required direction: incoming or outgoing. Use a file position/name, symbol_target, or unchanged item. depth:2 (1..8); max_nodes:30 (1..256). Edges point caller to callee; ranges belong to caller URI. Shared budgets and partial statuses are explicit. Freshness is unknown; no atomic snapshot. Analyzer work and inbound parsing use existing limits.",
         title = "Call Graph"
     )]
     async fn get_call_graph(
@@ -1654,6 +1654,7 @@ impl McplsServer {
                     depth: params.depth,
                     max_nodes: params.max_nodes,
                     authenticated,
+                    call_path_filter: params.call_path_filter,
                 },
                 origin.clone(),
             )
@@ -1673,12 +1674,12 @@ impl McplsServer {
 
     /// Get incoming calls (callers).
     #[tool(
-        description = concat!("Functions calling a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. ", out_of_workspace_note!()),
+        description = concat!("Functions calling a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. Optional call_path_filter matches caller source paths lexically; exclude wins over include. Empty/null is inactive. filtered_calls counts examined rejected visits only. ", out_of_workspace_note!()),
         title = "Incoming Calls"
     )]
     async fn get_incoming_calls(
         &self,
-        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        Parameters(params): Parameters<super::tools::FilteredCallHierarchyCallsParams>,
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<Json<CallHierarchyCallsResult<IncomingCallsResult>>, McpError> {
         self.get_incoming_calls_with_origin(
@@ -1693,23 +1694,25 @@ impl McplsServer {
 
     async fn get_incoming_calls_with_origin(
         &self,
-        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        Parameters(params): Parameters<super::tools::FilteredCallHierarchyCallsParams>,
         origin: Option<crate::bridge::HierarchyOrigin>,
     ) -> Result<Json<CallHierarchyCallsResult<IncomingCallsResult>>, McpError> {
-        self.call_hierarchy_calls(params, origin, |item| {
-            self.context.translator.handle_incoming_calls(item)
+        self.call_hierarchy_calls(params.target, origin, |item| {
+            self.context
+                .translator
+                .handle_incoming_calls_filtered(item, params.call_path_filter.as_ref())
         })
         .await
     }
 
     /// Get outgoing calls (callees).
     #[tool(
-        description = concat!("Functions called by a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. ", out_of_workspace_note!()),
+        description = concat!("Functions called by a symbol. Give absolute `file_path` plus `line`/`character` (1-based UTF-16) or `symbol_name` (optional `symbol_kind`/`container`). Use unchanged `item` to select or follow returned items. Direct `status`: `ok` has `calls` (possibly empty); `no_item` has empty `items`; `selection_required` has multiple/truncated `items`; `preparation_incomplete` has `items` and `positions_degraded`. Only complete, nondegraded singleton preparation traverses. Direct results include `indexing_in_progress`; empty results may be incomplete. Item results omit status/indexing fields. Omitted entries set `truncated: true`. Optional call_path_filter matches callee source paths lexically; exclude wins over include. Empty/null is inactive. filtered_calls counts examined rejected visits only. ", out_of_workspace_note!()),
         title = "Outgoing Calls"
     )]
     async fn get_outgoing_calls(
         &self,
-        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        Parameters(params): Parameters<super::tools::FilteredCallHierarchyCallsParams>,
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<Json<CallHierarchyCallsResult<OutgoingCallsResult>>, McpError> {
         self.get_outgoing_calls_with_origin(
@@ -1724,11 +1727,13 @@ impl McplsServer {
 
     async fn get_outgoing_calls_with_origin(
         &self,
-        Parameters(params): Parameters<CallHierarchyCallsParams>,
+        Parameters(params): Parameters<super::tools::FilteredCallHierarchyCallsParams>,
         origin: Option<crate::bridge::HierarchyOrigin>,
     ) -> Result<Json<CallHierarchyCallsResult<OutgoingCallsResult>>, McpError> {
-        self.call_hierarchy_calls(params, origin, |item| {
-            self.context.translator.handle_outgoing_calls(item)
+        self.call_hierarchy_calls(params.target, origin, |item| {
+            self.context
+                .translator
+                .handle_outgoing_calls_filtered(item, params.call_path_filter.as_ref())
         })
         .await
     }
@@ -3641,18 +3646,20 @@ mod tests {
                     .map(|_| ()),
                 server
                     .get_incoming_calls_with_origin(
-                        Parameters(CallHierarchyCallsParams::Target(
-                            position(line, character).into(),
-                        )),
+                        Parameters(
+                            CallHierarchyCallsParams::Target(position(line, character).into())
+                                .into(),
+                        ),
                         None,
                     )
                     .await
                     .map(|_| ()),
                 server
                     .get_outgoing_calls_with_origin(
-                        Parameters(CallHierarchyCallsParams::Target(
-                            position(line, character).into(),
-                        )),
+                        Parameters(
+                            CallHierarchyCallsParams::Target(position(line, character).into())
+                                .into(),
+                        ),
                         None,
                     )
                     .await
@@ -3753,18 +3760,24 @@ mod tests {
             let results = [
                 server
                     .get_incoming_calls_with_origin(
-                        Parameters(CallHierarchyCallsParams::Item {
-                            item: item_json(range, selection),
-                        }),
+                        Parameters(
+                            CallHierarchyCallsParams::Item {
+                                item: item_json(range, selection),
+                            }
+                            .into(),
+                        ),
                         None,
                     )
                     .await
                     .map(|_| ()),
                 server
                     .get_outgoing_calls_with_origin(
-                        Parameters(CallHierarchyCallsParams::Item {
-                            item: item_json(range, selection),
-                        }),
+                        Parameters(
+                            CallHierarchyCallsParams::Item {
+                                item: item_json(range, selection),
+                            }
+                            .into(),
+                        ),
                         None,
                     )
                     .await
@@ -3963,7 +3976,7 @@ mod tests {
         let call = |item| async {
             server
                 .get_incoming_calls_with_origin(
-                    Parameters(CallHierarchyCallsParams::Item { item }),
+                    Parameters(CallHierarchyCallsParams::Item { item }.into()),
                     None,
                 )
                 .await
@@ -5039,7 +5052,13 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(response["error"]["code"], -32602, "{response}");
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert!(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("failed to deserialize parameters:")
+        );
         assert_eq!(
             response["error"]["message"], "file_path must be absolute",
             "{response}"
@@ -5119,9 +5138,12 @@ mod tests {
                 "end": {"line": 1, "character": 10}
             }
         });
-        let params = Parameters(CallHierarchyCallsParams::Item {
-            item: serde_json::from_value(item).unwrap(),
-        });
+        let params = Parameters(
+            CallHierarchyCallsParams::Item {
+                item: serde_json::from_value(item).unwrap(),
+            }
+            .into(),
+        );
         let result = server.get_incoming_calls_with_origin(params, None).await;
         assert!(result.is_err());
     }
@@ -5143,9 +5165,12 @@ mod tests {
                 "end": {"line": 1, "character": 10}
             }
         });
-        let params = Parameters(CallHierarchyCallsParams::Item {
-            item: serde_json::from_value(item).unwrap(),
-        });
+        let params = Parameters(
+            CallHierarchyCallsParams::Item {
+                item: serde_json::from_value(item).unwrap(),
+            }
+            .into(),
+        );
         let result = server.get_outgoing_calls_with_origin(params, None).await;
         assert!(result.is_err());
     }
@@ -6961,6 +6986,163 @@ sleep 0.3
         response
     }
 
+    /// Peer filtering keeps the root, preserves call sites, and charges duplicate rejections.
+    #[tokio::test]
+    async fn test_call_path_filter_over_mcp() {
+        for tool in ["get_incoming_calls", "get_outgoing_calls", "get_call_graph"] {
+            let fixture = hierarchy_wire_fixture();
+            let root = hierarchy_lsp_item(&fixture.file);
+            let mut excluded = root.clone();
+            excluded["uri"] = serde_json::json!("file:///excluded/dependency.rs");
+            let field = if tool == "get_incoming_calls" {
+                "from"
+            } else {
+                "to"
+            };
+            let ranges = serde_json::json!([{"start":{"line":0,"character":3},"end":{"line":0,"character":4}}]);
+            let calls = serde_json::json!([
+                {field:excluded,"fromRanges":ranges},
+                {field:root,"fromRanges":ranges},
+                {field:excluded,"fromRanges":ranges}
+            ]);
+            let (result, requests) = hierarchy_wire_call(
+                fixture,
+                tool,
+                |file| {
+                    let mut args = serde_json::json!({"file_path":file,"line":1,"character":4,
+                    "call_path_filter":{"include":[file]}});
+                    if tool == "get_call_graph" {
+                        args["direction"] = serde_json::json!("outgoing");
+                    }
+                    args
+                },
+                serde_json::json!([root]),
+                calls,
+                false,
+            )
+            .await;
+            assert_eq!(result["status"], "ok", "{result}");
+            assert_ne!(result["truncated"], true);
+            if tool == "get_call_graph" {
+                assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+                assert_eq!(result["edges"].as_array().unwrap().len(), 1);
+                assert_eq!(result["usage"]["filtered_relationships"], 2);
+                assert_eq!(result["usage"]["omitted_relationships"], 0);
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|r| r["method"] == "callHierarchy/outgoingCalls")
+                        .count(),
+                    1
+                );
+            } else {
+                assert_eq!(result["calls"].as_array().unwrap().len(), 1);
+                assert_eq!(result["filtered_calls"], 2);
+                assert_eq!(
+                    result["calls"][0]["from_ranges"][0]["start"]["character"],
+                    4
+                );
+                assert_eq!(result["calls"][0][field]["data"], root["data"]);
+            }
+        }
+    }
+
+    /// Inactive filters preserve results, while component prefixes and exclusions select peers.
+    #[tokio::test]
+    async fn test_call_path_filter_membership_over_mcp() {
+        for case in 0..8 {
+            let fixture = hierarchy_wire_fixture();
+            let root = hierarchy_lsp_item(&fixture.file);
+            let calls = serde_json::json!([{"to":root,"fromRanges":[]}]);
+            let (result, _) = hierarchy_wire_call(
+                fixture,
+                "get_outgoing_calls",
+                |file| {
+                    let mut args = serde_json::json!({"file_path":file,"line":1,"character":4});
+                    let prefix = file.parent().unwrap().to_string_lossy();
+                    let filter = match case {
+                        0 => return args,
+                        1 => serde_json::Value::Null,
+                        2 => serde_json::json!({}),
+                        3 => serde_json::json!({"include":[format!("{prefix}//./")]}),
+                        4 => serde_json::json!({"include":["/nonexistent",file]}),
+                        5 => serde_json::json!({"include":[file],"exclude":[file]}),
+                        6 => serde_json::json!({"include":[format!("{prefix}-extra")]}),
+                        _ => serde_json::json!({"exclude":["/nonexistent"]}),
+                    };
+                    args["call_path_filter"] = filter;
+                    args
+                },
+                serde_json::json!([root]),
+                calls,
+                false,
+            )
+            .await;
+            let rejected = matches!(case, 5 | 6);
+            assert_eq!(
+                result["calls"].as_array().unwrap().len(),
+                usize::from(!rejected)
+            );
+            if case < 3 {
+                assert!(result.get("filtered_calls").is_none());
+            } else {
+                assert_eq!(result["filtered_calls"], usize::from(rejected));
+            }
+            assert_ne!(result["truncated"], true);
+        }
+    }
+
+    /// Invalid filters fail input validation, including on context without outgoing calls.
+    #[tokio::test]
+    async fn test_call_path_filter_validation_over_mcp() {
+        for tool in [
+            "get_incoming_calls",
+            "get_outgoing_calls",
+            "get_call_graph",
+            "get_symbol_context",
+            "get_supertypes",
+            "get_subtypes",
+        ] {
+            for filter in [
+                serde_json::json!({"include":["relative"]}),
+                serde_json::json!({"include":["/".repeat(4097)]}),
+                serde_json::json!({"include":["/a\u{0}b"]}),
+                serde_json::json!({"exclude":null}),
+                serde_json::json!({"include":["/a/../b"]}),
+                serde_json::json!({"unknown":[]}),
+                serde_json::json!({"include":vec!["/a";33]}),
+            ] {
+                let mut arguments = serde_json::json!({"file_path":"/absent.rs","line":1,"character":1,
+                    "call_path_filter":filter});
+                if tool == "get_call_graph" {
+                    arguments["direction"] = serde_json::json!("outgoing");
+                }
+                let result = tools_call_over_the_wire(
+                    create_test_server(),
+                    serde_json::json!({"name":tool,"arguments":arguments}),
+                )
+                .await;
+                assert_eq!(result["result"]["isError"], true, "{tool}: {result}");
+                assert!(
+                    result["result"]["content"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("failed to deserialize parameters:")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_type_hierarchy_rejects_call_path_filter_over_mcp() {
+        for name in ["get_supertypes", "get_subtypes"] {
+            let response = tools_call_over_the_wire(create_test_server(), serde_json::json!({
+                "name":name,"arguments":{"file_path":"/absent.rs","line":1,"character":1,"call_path_filter":{}}
+            })).await;
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+        }
+    }
+
     /// Direct queries must distinguish no callable from a callable with no calls,
     /// and must not traverse ambiguous or degraded preparation.
     #[tokio::test]
@@ -7862,7 +8044,7 @@ sleep 0.3
             let reused = tools_call_over_the_wire(
                 fixture.server.for_new_session(),
                 serde_json::json!({
-                    "name": tool, "arguments": {"item": item},
+                    "name": tool, "arguments": {"item": item, "call_path_filter": arguments.get("call_path_filter")},
                 }),
             )
             .await;
@@ -9105,6 +9287,7 @@ sleep 0.3
         match tool {
             McpTool::GetSymbolContext => server
                 .get_symbol_context(Parameters(crate::mcp::tools::SymbolContextParams {
+                    call_path_filter: None,
                     target: position().into(),
                     resolve: crate::mcp::tools::ContextResolve::Direct,
                     sections: vec!["source".into()],
@@ -9206,12 +9389,13 @@ sleep 0.3
                 .await
                 .map(|_| ()),
             McpTool::GetIncomingCalls => server
-                .get_incoming_calls_with_origin(Parameters(item()), None)
+                .get_incoming_calls_with_origin(Parameters(item().into()), None)
                 .await
                 .map(|_| ()),
             McpTool::GetCallGraph => server
                 .get_call_graph_with_origin(
                     super::super::tools::CallGraphParams {
+                        call_path_filter: None,
                         target: item(),
                         direction: crate::bridge::CallGraphDirection::Outgoing,
                         depth: 2,
@@ -9223,7 +9407,7 @@ sleep 0.3
                 .await
                 .map(|_| ()),
             McpTool::GetOutgoingCalls => server
-                .get_outgoing_calls_with_origin(Parameters(item()), None)
+                .get_outgoing_calls_with_origin(Parameters(item().into()), None)
                 .await
                 .map(|_| ()),
             McpTool::PrepareTypeHierarchy => server

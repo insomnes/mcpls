@@ -75,12 +75,12 @@ pub use translator::{
     UnavailableReason,
 };
 pub(crate) use translator::{
-    CallGraphOptions, CallGraphStart, CallHierarchyPrepareResult, CodeActionsResult,
-    DiagnosticsRole, HierarchyOrigin, IncomingCallsResult, InlayHintsResult, Interest,
-    MAX_COMPANION_FILES, MAX_SWEPT_FILES_PER_TICK, NotificationReceivers, NotificationWiring,
-    OutgoingCallsResult, SWEEP_INTERVAL, ServerLogsResult, ServerMessagesResult,
-    SignatureHelpResult, SweepContext, SweepMemo, ToolSupportSnapshot, WorkspaceSymbolResult,
-    call_graph,
+    CallGraphOptions, CallGraphStart, CallHierarchyPrepareResult, CallPathFilter,
+    CodeActionsResult, DiagnosticsRole, HierarchyOrigin, IncomingCallsResult, InlayHintsResult,
+    Interest, MAX_COMPANION_FILES, MAX_SWEPT_FILES_PER_TICK, NotificationReceivers,
+    NotificationWiring, OutgoingCallsResult, SWEEP_INTERVAL, ServerLogsResult,
+    ServerMessagesResult, SignatureHelpResult, SweepContext, SweepMemo, ToolSupportSnapshot,
+    WorkspaceSymbolResult, call_graph,
 };
 #[cfg(test)]
 pub(crate) use workspace_roots::{CanonicalizeFn, ProcessCwd};

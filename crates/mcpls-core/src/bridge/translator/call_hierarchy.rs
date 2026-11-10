@@ -38,6 +38,7 @@ struct WalkedCall {
 struct CallWalk {
     calls: Vec<WalkedCall>,
     truncated: bool,
+    filtered_calls: Option<usize>,
     positions_degraded: Option<PositionDegradation>,
 }
 
@@ -117,8 +118,23 @@ impl Translator {
         &self,
         item: CheckedHierarchyItem,
     ) -> Result<IncomingCallsResult> {
-        let walk = self.walk_calls(item, CallDirection::Incoming).await?;
+        self.handle_incoming_calls_filtered(item, None).await
+    }
+
+    /// Traverse peers with an optional lexical source-path filter.
+    ///
+    /// # Errors
+    /// Returns the same routing, authorization, and provider errors as the unfiltered traversal.
+    pub async fn handle_incoming_calls_filtered(
+        &self,
+        item: CheckedHierarchyItem,
+        filter: Option<&super::CallPathFilter>,
+    ) -> Result<IncomingCallsResult> {
+        let walk = self
+            .walk_calls(item, CallDirection::Incoming, filter)
+            .await?;
         Ok(IncomingCallsResult {
+            filtered_calls: walk.filtered_calls,
             calls: walk
                 .calls
                 .into_iter()
@@ -144,8 +160,23 @@ impl Translator {
         &self,
         item: CheckedHierarchyItem,
     ) -> Result<OutgoingCallsResult> {
-        let walk = self.walk_calls(item, CallDirection::Outgoing).await?;
+        self.handle_outgoing_calls_filtered(item, None).await
+    }
+
+    /// Traverse peers with an optional lexical source-path filter.
+    ///
+    /// # Errors
+    /// Returns the same routing, authorization, and provider errors as the unfiltered traversal.
+    pub async fn handle_outgoing_calls_filtered(
+        &self,
+        item: CheckedHierarchyItem,
+        filter: Option<&super::CallPathFilter>,
+    ) -> Result<OutgoingCallsResult> {
+        let walk = self
+            .walk_calls(item, CallDirection::Outgoing, filter)
+            .await?;
         Ok(OutgoingCallsResult {
+            filtered_calls: walk.filtered_calls,
             calls: walk
                 .calls
                 .into_iter()
@@ -164,6 +195,7 @@ impl Translator {
         &self,
         item: CheckedHierarchyItem,
         direction: CallDirection,
+        filter: Option<&super::CallPathFilter>,
     ) -> Result<CallWalk> {
         let (raw, ctx, _doc): (Vec<RawCall>, EncodingCtx, PreparedDocument) = match direction {
             CallDirection::Incoming => {
@@ -206,7 +238,15 @@ impl Translator {
         // Not filtered to workspace roots -- see `handle_call_hierarchy_prepare`.
         let mut budget = ItemBudget::new();
         let mut calls = Vec::new();
+        let filter = filter.filter(|filter| filter.is_active());
+        let mut filtered_calls = filter.map(|_| 0_usize);
         for call in raw {
+            if filter.is_some_and(|filter| !filter.matches_uri(call.peer.uri.as_ref())) {
+                if let Some(count) = &mut filtered_calls {
+                    *count = count.saturating_add(1);
+                }
+                continue;
+            }
             // A call is kept together with all its ranges or not at all.
             if !budget.spend_whole(call.from_ranges.len().saturating_add(1)) {
                 continue;
@@ -222,6 +262,7 @@ impl Translator {
         }
 
         Ok(CallWalk {
+            filtered_calls,
             calls,
             truncated: budget.truncated(),
             positions_degraded: ctx.positions_degraded(),

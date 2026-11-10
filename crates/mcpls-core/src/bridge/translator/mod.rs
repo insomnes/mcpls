@@ -33,6 +33,8 @@ mod assist;
 mod availability;
 pub mod call_graph;
 mod call_hierarchy;
+mod call_path_filter;
+pub use call_path_filter::CallPathFilter;
 #[cfg(test)]
 mod characterization;
 mod clock;

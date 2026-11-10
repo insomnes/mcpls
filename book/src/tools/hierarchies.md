@@ -164,3 +164,45 @@ Finish the tool tour with [Server Monitoring and Control](server-control.md).
 
 Copy an emitted `symbol_target` unchanged into the supported read-only consumers.
 See [portable target inputs, producers, limits, and errors](symbol-context.md#copy-a-portable-target).
+
+
+## Select call source paths
+
+`get_incoming_calls`, `get_outgoing_calls`, and `get_call_graph` accept an optional
+`call_path_filter`. `get_symbol_context` applies the same filter only to its
+requested `outgoing_calls` section.
+
+```json
+{"call_path_filter":{"include":["/project"],"exclude":["/project/.venv"]}}
+```
+
+The filter compares the peer's provider file URI as a lexical native path:
+callers for incoming calls, callees for outgoing calls. Include prefixes form a
+union; an empty include list permits all usable file paths. Exclusions win.
+Prefixes match complete path components: `/project/src` does not match
+`/project/src-extra`. Equality matches. Paths need not exist. Repeated separators,
+trailing separators, and `.` use ordinary path-component semantics. Matching is
+case-sensitive on Linux. URI percent escapes are decoded. Symlink aliases retain
+their lexical identity; no symlink lookup or glob expansion occurs.
+
+Each list permits at most 32 paths, each with 1–4096 UTF-8 bytes. Paths must be
+absolute and contain neither NUL nor `..` components. Null arrays and unknown
+filter members are invalid. An active filter rejects non-file URIs and unusable
+paths. Omitted, null, and empty filters preserve dependency-inclusive results and
+omit filter counters.
+
+The selected symbol and preparation candidates remain unchanged. Graphs retain
+the root as an anchor, even outside the filter. A rejected peer adds no edge or
+node and is not expanded. Matching descendants behind a rejected intermediate
+are therefore absent unless another retained path reaches them. Back-edges to
+the root must pass the filter too. Filters grant no additional source access or
+workspace authority. Matching peers outside graph scope remain terminal.
+
+Active direct results with `calls` include `filtered_calls`, including zero.
+Graphs include `usage.filtered_relationships`. These count rejected raw visits
+actually examined, including duplicates and unsupported URIs. They exclude
+preparation candidates, hidden descendants, and unseen work after a budget stop.
+They do not measure all relationships in a project. Filtering alone does not set
+`truncated` or increment graph `omitted_relationships`. Existing budgets and
+partial-result disclosures remain in effect. A filter belongs to one request;
+reuse returned hierarchy items unchanged and choose the next request's filter.

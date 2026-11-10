@@ -580,7 +580,10 @@ impl McplsServer {
                 },
                 "outgoing_calls" => value(
                     self.get_outgoing_calls_with_origin(
-                        Parameters(CallHierarchyCallsParams::Target(pos.clone().into())),
+                        Parameters(super::super::tools::FilteredCallHierarchyCallsParams {
+                            target: CallHierarchyCallsParams::Target(pos.clone().into()),
+                            call_path_filter: params.call_path_filter.clone(),
+                        }),
                         None,
                     )
                     .await,

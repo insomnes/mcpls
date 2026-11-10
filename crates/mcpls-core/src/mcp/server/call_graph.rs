@@ -105,6 +105,8 @@ pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
             schema["properties"][field]["properties"][name] = count;
         }
     }
+    schema["properties"]["usage"]["properties"]["filtered_relationships"] = json!({
+        "type":"integer","minimum":0,"description":"Active filter: rejected raw peer visits examined, including duplicates; excludes unseen descendants."});
     if let Value::Object(schema) = schema {
         route.attr.output_schema = Some(Arc::new(schema));
     }
