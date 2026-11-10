@@ -641,6 +641,8 @@ impl Translator {
             .locations
             .into_iter()
             .map(|item| super::dto::ReferenceLocation {
+                symbol_target: None,
+                symbol_target_unavailable: None,
                 location: item.location,
                 source: None,
             })
@@ -770,6 +772,8 @@ impl Translator {
             .locations
             .into_iter()
             .map(|location| super::dto::ReferenceLocation {
+                symbol_target: None,
+                symbol_target_unavailable: None,
                 location,
                 source: None,
             })

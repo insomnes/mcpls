@@ -6660,7 +6660,7 @@
   {
     "name": "get_references",
     "title": "Find References",
-    "description": "References including duplicates. Address by absolute file_path with 1-based line/character, symbol_name, or portable target. mode:locations(default) returns locations; mode:files returns empty locations and file_summary: first-seen exact-URI groups with count,first example,file_path. Reuse file_path as lexical path_filter; unsupported paths:null+unsupported_uri. limit:10(1..10000) bounds locations/groups. Files scan caps:100000 locations,8388608 URI bytes,10000 matching URIs; whole-summary cap:65536 JSON bytes. counts_complete:false means lower bounds; output_truncated means known groups omitted. truncated never proves workspace coverage. include_source:false; true adds bounded text/unavailable. context:enclosing_symbol opts in. Snapshots are not atomic.",
+    "description": "References including duplicates. include_targets:true adds a portable symbol_target or symbol_target_unavailable to each retained location at its range.start; default false. Copy the complete target unchanged to definition or context navigation. Files mode has no target enrichment. Target acquisition reuses bounded portable-list budgets; targets do not guarantee analyzer freshness. Address by absolute file_path with 1-based line/character, symbol_name, or portable target. mode:locations(default) returns locations; mode:files returns empty locations and file_summary: first-seen exact-URI groups with count,first example,file_path. Reuse file_path as lexical path_filter; unsupported paths:null+unsupported_uri. limit:10(1..10000) bounds locations/groups. Files scan caps:100000 locations,8388608 URI bytes,10000 matching URIs; whole-summary cap:65536 JSON bytes. counts_complete:false means lower bounds; output_truncated means known groups omitted. truncated never proves workspace coverage. include_source:false; true adds bounded text/unavailable. context:enclosing_symbol opts in. Snapshots are not atomic.",
     "inputSchema": {
       "$defs": {
         "ReferenceMode": {
@@ -6736,6 +6736,10 @@
           "type": "boolean"
         },
         "include_source": {
+          "default": false,
+          "type": "boolean"
+        },
+        "include_targets": {
           "default": false,
           "type": "boolean"
         },
@@ -7223,6 +7227,26 @@
                 }
               ]
             },
+            "symbol_target": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolTargetEnvelope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "symbol_target_unavailable": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SymbolTargetUnavailable"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "uri": {
               "type": "string"
             }
@@ -7244,6 +7268,33 @@
               "type": "string"
             }
           ]
+        },
+        "SymbolTargetEnvelope": {
+          "additionalProperties": false,
+          "properties": {
+            "file_path": {
+              "type": "string"
+            },
+            "symbol_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file_path",
+            "symbol_ref"
+          ],
+          "type": "object"
+        },
+        "SymbolTargetUnavailable": {
+          "properties": {
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
         },
         "UnavailableReason": {
           "oneOf": [

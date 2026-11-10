@@ -217,10 +217,14 @@ atomic-snapshot guarantee.
 
 ## Copy a portable target
 
-`workspace_symbol_search`, `get_document_outline`, and `get_definition` accept
+`workspace_symbol_search`, `get_document_outline`, `get_definition`, and
+`get_references` accept
 `include_targets: true`. It defaults to false. Each retained entry then contains
 `symbol_target` or `symbol_target_unavailable.reason`. Workspace symbols and
-outline entries put these fields in `symbols[]`; definitions use `locations[]`.
+outline entries put these fields in `symbols[]`; definitions and references use
+`locations[]`. Reference targets bind each retained occurrence's `range.start`,
+not the queried declaration. Files mode accepts the flag but adds no target fields
+or acquisition; its empty `locations` and summary examples remain unchanged.
 `get_symbol_context` always adds the same envelope when it issues a trustworthy
 reference. Its descriptive `target` remains. Top-level `symbol_ref` and
 `symbol_ref_unavailable` are no longer emitted.
@@ -254,6 +258,10 @@ accept envelopes. Unchanged hierarchy items remain valid continuation inputs.
 A target binds the returned exact UTF-16 point and observed complete file bytes.
 Outline targets use hierarchical selection starts. Workspace symbols and
 definitions use their location starts, including destinations in another file.
+Reference targets use occurrence starts without identifying an identifier boundary.
+Copy `locations[i].symbol_target` unchanged into `get_definition` to resolve its
+declaration, or into `get_symbol_context` for direct occurrence context. Use an
+existing source excerpt when it already answers the question.
 The envelope does not certify analyzer freshness or an identifier-token boundary.
 Equal names never cause reselection. If reuse fails, perform discovery again.
 

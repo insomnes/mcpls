@@ -438,6 +438,9 @@ reusable_target_wire! {
         #[schemars(description = "Attach bounded source excerpts or explicit unavailable reasons; default false.")]
         #[serde(default)]
         include_source: bool,
+        #[schemars(description = "Attach portable targets to retained locations; default false. Files mode is unchanged.")]
+        #[serde(default)]
+        include_targets: bool,
         #[schemars(description = "Whether to include the declaration in the results.")]
         #[serde(default)]
         include_declaration: bool,
@@ -456,6 +459,8 @@ const fn reference_limit() -> usize {
 #[serde(try_from = "ReferencesWire")]
 #[schemars(with = "ReferencesWire")]
 pub struct ReferencesParams {
+    /// Attach portable targets to retained locations; default false.
+    pub include_targets: bool,
     /// The symbol to find references to.
     pub target: SymbolTargetParams,
     /// Selection and source options.
@@ -491,6 +496,7 @@ impl TryFrom<ReferencesWire> for ReferencesParams {
             },
             target: wire.take_target()?,
             include_declaration: wire.include_declaration,
+            include_targets: wire.include_targets,
             context: wire.context,
         })
     }

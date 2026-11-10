@@ -110,7 +110,15 @@ Returns references reported by the language server, in server order, including d
 Arguments: addressing as above, `mode` (`"locations"` by default, or `"files"`),
 `include_declaration` (default `false`), optional `context`,
 `limit` (default 10, integer 1 through 10000), optional absolute `path_filter`,
-and `include_source` (default `false`). Relative filters are rejected.
+`include_source` (default `false`), and `include_targets` (default `false`).
+Relative filters are rejected. Explicit null or non-boolean target flags fail.
+
+With `include_targets:true`, each retained location has `symbol_target` or
+`symbol_target_unavailable.reason`. Copy the complete envelope unchanged into
+`get_definition` or `get_symbol_context`; it addresses that occurrence's
+`range.start`. Existing source and enclosing context options remain independent.
+Files mode accepts the flag without target fields or target acquisition.
+See [portable target budgets, reasons, and lifecycle](symbol-context.md#copy-a-portable-target).
 
 ```json
 {

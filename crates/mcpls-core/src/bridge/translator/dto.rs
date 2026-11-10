@@ -1387,6 +1387,12 @@ pub enum SourceUnavailableReason {
 /// A reference location with optional source context.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReferenceLocation {
+    /// Portable address of this occurrence start, present only when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target: Option<SymbolTargetEnvelope>,
+    /// Why this occurrence has no portable target, present only when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
     /// Location and optional enclosing-symbol context.
     #[serde(flatten)]
     pub location: ContextualLocation,
@@ -2050,6 +2056,8 @@ impl ServerText for NavigationResult {
                     continue;
                 };
                 let mut reference = ReferenceLocation {
+                    symbol_target: None,
+                    symbol_target_unavailable: None,
                     location: item.location.clone(),
                     source: Some(ReferenceSource::Text {
                         text,

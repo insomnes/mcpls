@@ -71,8 +71,10 @@ async fn compact_targets_independent_known_context_wire() {
                 "textDocument/hover" => {
                     json!({"contents":format!("independent:{}:{}",p["line"],p["character"])})
                 }
-                "textDocument/definition" | "textDocument/references" => {
-                    json!([{"uri":fake_uri,"range":range}])
+                "textDocument/definition" => json!([{"uri":fake_uri,"range":range}]),
+                "textDocument/references" => {
+                    let occurrence = json!({"uri":fake_uri,"range":{"start":{"line":1,"character":3},"end":{"line":1,"character":7}}});
+                    json!(vec![occurrence; 17])
                 }
                 "textDocument/prepareCallHierarchy" => json!([item]),
                 "callHierarchy/incomingCalls" => {
@@ -86,6 +88,52 @@ async fn compact_targets_independent_known_context_wire() {
             write_response(&mut fake.read_half_stdin, &request["id"], result).await;
         }
     });
+    // The flag preserves every old field, source/context option and file summary.
+    for mode in ["locations", "files"] {
+        for enriched in [false, true] {
+            let mut baseline = None;
+            for enabled in [None, Some(false), Some(true)] {
+                let mut arguments = json!({"file_path":fixture.file,"line":1,"character":11,"mode":mode,"limit":17});
+                if enriched {
+                    arguments["include_source"] = json!(true);
+                    arguments["context"] = json!("enclosing_symbol");
+                }
+                if let Some(enabled) = enabled {
+                    arguments["include_targets"] = json!(enabled);
+                }
+                let response = tools_call_over_the_wire(fixture.server.for_new_session(), json!({"name":"get_references","arguments":arguments})).await;
+                assert!(response.get("error").is_none() && response["result"]["isError"] != true, "{response}");
+                let mut result = response["result"]["structuredContent"].clone();
+                if enabled == Some(true) && mode == "locations" {
+                    let locations = result["locations"].as_array_mut().unwrap();
+                    assert_eq!(locations.len(), 17);
+                    for (index, location) in locations.iter_mut().enumerate() {
+                        if index < 16 {
+                            assert!(location.get("symbol_target").is_some(), "{location}");
+                            assert!(location.get("symbol_target_unavailable").is_none());
+                        } else {
+                            assert_eq!(location["symbol_target_unavailable"]["reason"], "budget_exhausted");
+                            assert!(location.get("symbol_target").is_none());
+                        }
+                        location.as_object_mut().unwrap().remove("symbol_target");
+                        location.as_object_mut().unwrap().remove("symbol_target_unavailable");
+                    }
+                }
+                if let Some(expected) = &baseline {
+                    assert_eq!(&result, expected, "mode={mode}, targets={enabled:?}, enriched={enriched}");
+                } else {
+                    baseline = Some(result);
+                }
+            }
+        }
+    }
+    for invalid in [json!(null), json!("true"), json!(1), json!({})] {
+        let before = requests.lock().await.len();
+        let response = tools_call_over_the_wire(fixture.server.for_new_session(), json!({"name":"get_references","arguments":{"file_path":fixture.file,"line":1,"character":11,"include_targets":invalid}})).await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert!(response.to_string().contains("failed to deserialize parameters"), "{response}");
+        assert_eq!(requests.lock().await.len(), before);
+    }
     let consumers = [
         ("get_symbol_context", "textDocument/hover"),
         ("get_hover", "textDocument/hover"),
@@ -95,6 +143,11 @@ async fn compact_targets_independent_known_context_wire() {
         ("get_outgoing_calls", "textDocument/prepareCallHierarchy"),
     ];
     let producers = [
+        (
+            "get_references",
+            json!({"file_path":fixture.file,"line":1,"character":11,"include_targets":true}),
+            "/locations/0/symbol_target",
+        ),
         (
             "workspace_symbol_search",
             json!({"query":"same","include_targets":true}),
@@ -134,6 +187,25 @@ async fn compact_targets_independent_known_context_wire() {
         let target = result.pointer(pointer).expect("producer target").clone();
         assert_eq!(target.as_object().unwrap().len(), 2, "closed envelope");
         assert_eq!(target["file_path"], canonical_text);
+        if producer == "get_references" {
+            for consumer in ["get_definition", "get_symbol_context"] {
+                let before = requests.lock().await.len();
+                let mut arguments = json!({"symbol_target": target.clone()});
+                if consumer == "get_symbol_context" {
+                    arguments["sections"] = json!(["hover"]);
+                }
+                let reused = tools_call_over_the_wire(
+                    fixture.server.for_new_session(),
+                    json!({"name":consumer,"arguments":arguments}),
+                ).await;
+                assert!(reused.get("error").is_none() && reused["result"]["isError"] != true, "{reused}");
+                let recorded = requests.lock().await;
+                assert!(!recorded[before..].is_empty());
+                for request in &recorded[before..] {
+                    assert_eq!(request["params"]["position"], json!({"line":1,"character":3}));
+                }
+            }
+        }
         let emitted: Value = serde_json::from_str(target["symbol_ref"].as_str().unwrap()).unwrap();
         assert_eq!(
             emitted,

@@ -1201,7 +1201,7 @@ impl McplsServer {
 
     /// Find all references to a symbol.
     #[tool(
-        description = "References including duplicates. Address by absolute file_path with 1-based line/character, symbol_name, or portable target. mode:locations(default) returns locations; mode:files returns empty locations and file_summary: first-seen exact-URI groups with count,first example,file_path. Reuse file_path as lexical path_filter; unsupported paths:null+unsupported_uri. limit:10(1..10000) bounds locations/groups. Files scan caps:100000 locations,8388608 URI bytes,10000 matching URIs; whole-summary cap:65536 JSON bytes. counts_complete:false means lower bounds; output_truncated means known groups omitted. truncated never proves workspace coverage. include_source:false; true adds bounded text/unavailable. context:enclosing_symbol opts in. Snapshots are not atomic.",
+        description = "References including duplicates. include_targets:true adds a portable symbol_target or symbol_target_unavailable to each retained location at its range.start; default false. Copy the complete target unchanged to definition or context navigation. Files mode has no target enrichment. Target acquisition reuses bounded portable-list budgets; targets do not guarantee analyzer freshness. Address by absolute file_path with 1-based line/character, symbol_name, or portable target. mode:locations(default) returns locations; mode:files returns empty locations and file_summary: first-seen exact-URI groups with count,first example,file_path. Reuse file_path as lexical path_filter; unsupported paths:null+unsupported_uri. limit:10(1..10000) bounds locations/groups. Files scan caps:100000 locations,8388608 URI bytes,10000 matching URIs; whole-summary cap:65536 JSON bytes. counts_complete:false means lower bounds; output_truncated means known groups omitted. truncated never proves workspace coverage. include_source:false; true adds bounded text/unavailable. context:enclosing_symbol opts in. Snapshots are not atomic.",
         title = "Find References"
     )]
     async fn get_references(
@@ -1209,6 +1209,7 @@ impl McplsServer {
         Parameters(ReferencesParams {
             target,
             include_declaration,
+            include_targets,
             context,
             options,
         }): Parameters<ReferencesParams>,
@@ -1217,14 +1218,40 @@ impl McplsServer {
         self.addressed(
             target,
             AddressableTool::References,
-            |file_path, position| {
-                translator.handle_references_with_options(
-                    file_path,
-                    position,
-                    include_declaration,
-                    context,
-                    options,
-                )
+            |file_path, position| async move {
+                let mut result = translator
+                    .handle_references_with_options(
+                        file_path,
+                        position,
+                        include_declaration,
+                        context,
+                        options,
+                    )
+                    .await?;
+                if include_targets && !result.result.locations.is_empty() {
+                    let entries = result
+                        .result
+                        .locations
+                        .iter()
+                        .map(|entry| (entry.uri.clone(), entry.range.start.clone()))
+                        .collect::<Vec<_>>();
+                    let targets = translator
+                        .portable_targets(
+                            entries,
+                            result
+                                .result
+                                .positions_degraded
+                                .map(|_| "positions_degraded"),
+                        )
+                        .await;
+                    for (entry, target) in result.result.locations.iter_mut().zip(targets) {
+                        match target {
+                            Ok(target) => entry.symbol_target = Some(target),
+                            Err(reason) => entry.symbol_target_unavailable = Some(reason),
+                        }
+                    }
+                }
+                Ok(result)
             },
         )
         .await
@@ -4018,6 +4045,7 @@ mod tests {
                     .map(|_| ()),
                 server
                     .get_references(Parameters(ReferencesParams {
+                        include_targets: false,
                         options: crate::bridge::ReferenceOptions::default(),
                         target: position(line, character).into(),
                         include_declaration: false,
@@ -4337,6 +4365,7 @@ mod tests {
     async fn test_references_tool_with_params() {
         let (server, _temp_dir, test_file) = create_test_server_with_real_file();
         let params = Parameters(ReferencesParams {
+            include_targets: false,
             options: crate::bridge::ReferenceOptions::default(),
             target: PositionParams {
                 file_path: PathBuf::from(test_file.to_str().unwrap()),
@@ -9393,6 +9422,7 @@ sleep 0.3
                 .map(|_| ()),
             McpTool::GetReferences => server
                 .get_references(Parameters(ReferencesParams {
+                    include_targets: false,
                     options: crate::bridge::ReferenceOptions::default(),
                     target: position().into(),
                     include_declaration: false,
