@@ -3,17 +3,18 @@
 use std::sync::OnceLock;
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, JsonSchema)]
-#[schemars(inline)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(inline, extend("additionalProperties" = true))]
 pub(super) struct RuntimeProvenance {
     status: Status,
     revision: String,
     executable_sha256: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(inline)]
 enum Status {

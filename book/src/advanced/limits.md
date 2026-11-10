@@ -46,7 +46,7 @@ In this chapter you find every boundary mcpls enforces or cannot cross, in one p
 
 ## Behavioral constraints
 
-- **Source edits are proposals.** Refactoring and formatting tools return edits for the client to apply. `feedback_add` writes explicit reports to a private local JSONL file.
+- **Source edits are proposals.** Refactoring and formatting tools return edits for the client to apply. `feedback_add` writes explicit reports to a private local JSONL file; `feedback_resolve` and `feedback_reopen` update their local resolution state.
 - **Routing is by extension.** `file_patterns` cannot confine a server to a directory, and two servers that claim the same extension both receive every file with it unless `handles` separates them.
 - **`file_patterns` forms.** Only `*.EXT` (with an optional `**/` prefix) and bare extensionless names such as `Makefile` are accepted. Brace expansion, character classes, `?`, dotfiles, dotted names, single files and multi-part extensions such as `*.tar.gz` are rejected at startup.
 - **`workspace_symbol_search` has no document.** It asks every server that claims `workspace_symbols` or is a catch-all, and reports what each one did (see [Code Intelligence](../tools/code-intelligence.md#workspace_symbol_search)). It fails only if no server answers.

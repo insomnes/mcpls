@@ -2114,6 +2114,60 @@ impl McplsServer {
         super::feedback::add(input).await.map(Json)
     }
 
+    /// List local feedback without a workspace.
+    #[tool(
+        description = "List private local feedback, newest original append first. Defaults to open reports; state may be open/resolved/all. Copy opaque feedback_id values exactly for resolve/reopen. limit defaults to20 (1..100); offset defaults to0. No workspace or language server is needed.",
+        title = "List Feedback",
+        annotations(
+            title = "List Feedback",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true
+        )
+    )]
+    async fn feedback_list(
+        &self,
+        Parameters(input): Parameters<super::feedback::ListInput>,
+    ) -> Result<Json<super::feedback::Page>, McpError> {
+        super::feedback::list(input).await.map(Json)
+    }
+
+    /// Resolve local feedback without a workspace.
+    #[tool(
+        description = "Resolve one open feedback report using an exact feedback_id from feedback_list. Preserve explicit resolution and optional literal task_id/note_id; references cause no lookup or task/note changes and confer no authority. Already resolved reports conflict. After an ambiguous failure, list current state before retrying.",
+        title = "Resolve Feedback",
+        annotations(
+            title = "Resolve Feedback",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn feedback_resolve(
+        &self,
+        Parameters(input): Parameters<super::feedback::ResolveInput>,
+    ) -> Result<Json<super::feedback::Transition>, McpError> {
+        super::feedback::resolve(input).await.map(Json)
+    }
+
+    /// Reopen local feedback without a workspace.
+    #[tool(
+        description = "Reopen one resolved feedback report using an exact feedback_id from feedback_list. Clear its active resolution and task/note references. Already open reports conflict. After an ambiguous failure, list current state before retrying.",
+        title = "Reopen Feedback",
+        annotations(
+            title = "Reopen Feedback",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn feedback_reopen(
+        &self,
+        Parameters(input): Parameters<super::feedback::ReopenInput>,
+    ) -> Result<Json<super::feedback::Transition>, McpError> {
+        super::feedback::reopen(input).await.map(Json)
+    }
+
     /// Restart LSP servers.
     #[tool(
         description = "Restart LSP servers: stop the old process (graceful shutdown, then a kill of its whole process group) and start a fresh one, discarding its in-memory state. Use it when a server is wedged or serves a stale index (such as after a manifest edit). Give `servers` (ids) or `all: true`. Per server, `status` is `restarted` (with `indexing_state`; `coalesced: true` if another restart of the same server just finished; `push_notifications_degraded: true` means call it again), `failed` (with a typed `reason`; the server stays registered; `refused` means nothing was stopped and the old process keeps serving, any other reason means it was stopped and the next tool call retries), `throttled` (retry after `retry_in_ms`), `initializing` or `not_running`. Requests in flight on the old process fail with a retryable error. Processes that detach into their own session may survive; shared daemons the server started (e.g. Gradle) are killed. Destructive (it kills processes the server started, which other clients may share), not read-only and not idempotent.",
@@ -6356,6 +6410,9 @@ sleep 0.3
             ("go_to_declaration", true, false, true),
             ("restart_server", false, true, false),
             ("feedback_add", false, false, false),
+            ("feedback_list", true, false, true),
+            ("feedback_resolve", false, false, false),
+            ("feedback_reopen", false, false, false),
         ];
 
         assert_eq!(
@@ -7391,9 +7448,9 @@ sleep 0.3
                 assert_eq!(
                     tools.len(),
                     if profile == ToolProfile::Agent {
-                        31
-                    } else {
                         34
+                    } else {
+                        37
                     }
                 );
                 let supported = tools_call_over_the_wire(
@@ -7465,7 +7522,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 31);
+            assert_eq!(tools.len(), 34);
             assert!(
                 !tools
                     .iter()
@@ -7479,7 +7536,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 31);
+            assert_eq!(tools.len(), 34);
             assert!(
                 !tools
                     .iter()
@@ -9261,6 +9318,27 @@ sleep 0.3
                 ))
                 .await
                 .map(|_| ()),
+            McpTool::FeedbackList => server
+                .feedback_list(Parameters(
+                    serde_json::from_value(serde_json::json!({"limit":0})).unwrap(),
+                ))
+                .await
+                .map(|_| ()),
+            McpTool::FeedbackResolve => server
+                .feedback_resolve(Parameters(
+                    serde_json::from_value(
+                        serde_json::json!({"feedback_id":"", "resolution":"test"}),
+                    )
+                    .unwrap(),
+                ))
+                .await
+                .map(|_| ()),
+            McpTool::FeedbackReopen => server
+                .feedback_reopen(Parameters(
+                    serde_json::from_value(serde_json::json!({"feedback_id":""})).unwrap(),
+                ))
+                .await
+                .map(|_| ()),
             McpTool::RestartServer => server
                 .restart_server(Parameters(
                     serde_json::from_value(serde_json::json!({"servers": ["unconfigured"]}))
@@ -9378,7 +9456,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 31);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 34);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

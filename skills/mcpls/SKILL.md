@@ -6,7 +6,8 @@ description: >-
   rename). Use when setting up or registering mcpls as an MCP server, writing or debugging
   an mcpls.toml, choosing CLI flags or MCPLS_* environment variables, diagnosing why
   mcpls or one of its language servers fails to start, or choosing focused code-navigation
-  requests with existing mcpls tools.
+  requests with existing mcpls tools, or explicitly reporting and triaging local mcpls
+  feedback. Feedback guidance does not manage general project tasks.
 license: MIT OR Apache-2.0
 compatibility: >-
   Wraps the `mcpls` Rust binary (Rust 1.99+ / edition 2024 to build from source). Requires at
@@ -24,7 +25,7 @@ metadata:
 mcpls is a single Rust binary that bridges the Model Context Protocol (MCP) to the
 Language Server Protocol (LSP). It spawns and speaks LSP to real language servers
 (rust-analyzer, pyright, gopls, clangd, …) and exposes their capabilities to an AI
-agent as 31 default MCP tools (34 with the full profile) — hover, go-to-definition, references, diagnostics, rename with internal preparation, completions, symbols, formatting (document and range), call and type
+agent as 34 default MCP tools (37 with the full profile) — hover, go-to-definition, references, diagnostics, rename with internal preparation, completions, symbols, formatting (document and range), call and type
 hierarchy, document highlights, a `get_tool_support` report of which tools work for which
 languages, and more.
 
@@ -39,7 +40,7 @@ For the complete MCP tool and parameter reference, see
 If the bridge is configured with `mcp.tool_prefix`, every tool name listed there gains
 that prefix (`{tool_prefix}_{tool}`).
 
-The default `[mcp].tool_profile = "agent"` exposes 31 tools. Set `tool_profile = "full"` to restore all 34 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 34 tools. Set `tool_profile = "full"` to restore all 37 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 `rename_symbol` resolves a name or position and prepares on the rename server when supported.
 Its `proposed` result includes the queried `position`, `preparation`, and `changes`.
@@ -71,6 +72,34 @@ Batch output retains at most 100 diagnostics per file, 256 overall, 8192 compact
 Completion labels, details, and documentation are clipped at 512, 2048, and 4096 UTF-8 bytes after existing display redaction. Labels retain identifier-payload redaction semantics. Clipping keeps a Unicode-scalar prefix without an ellipsis; a clipped label is partial, not an exact source replacement. Each item lists clipped fields in `truncated_fields`, in label/detail/documentation order.
 
 The compact structured JSON is at most 65536 bytes, including escaping and metadata; the legacy text encodes the same result. The longest fitting ranked prefix is returned. `omitted_count` counts excluded candidates. `truncated` means candidates were omitted or retained fields clipped; disabled documentation alone does not set it. `provider_is_incomplete` is the provider's explicit boolean, or null for bare arrays/null responses. Empty responses preserve this distinction. Provider incompleteness and local truncation are independent; false does not prove complete API coverage. Existing `positions_degraded` behavior is unchanged. Output bounds do not bound the original LSP response, provider work, process memory, or whole MCP envelope. The existing completion timeout remains 10 seconds.
+
+## Local feedback
+
+Use `feedback_add` for concrete mcpls failures, missing capabilities, or useful
+workarounds once per distinct observation. Skip routine success and duplicates.
+Verify the observed `runtime_provenance` before attributing a report to a build;
+use its verified full revision when available. If provenance is unknown, say so.
+Never guess `build_sha` from a checkout's HEAD. Preserve the original trigger and
+observation; do not include secrets or source code.
+
+Use `feedback_list` to investigate unresolved reports. Its default state is
+`open`; request `resolved` or `all` explicitly when needed. Copy opaque
+`feedback_id` values exactly. Skip resolved reports unless new evidence requires
+investigation.
+
+Resolve only feedback addressed by the current task, after verifying its original
+trigger against the relevant build. Use `feedback_resolve` with a resolution that
+states the fix, verification evidence, and full verified Git SHA. Optional
+`task_id` and `note_id` are literal context only; they cause no lookup and confer
+no completion, acceptance, or verification authority.
+
+Use `feedback_reopen` when contradictory evidence invalidates a resolution.
+After an ambiguous failure, inspect current state before retrying. Never edit raw
+feedback JSONL files. Feedback failures must not block the user's task; do not
+report feedback-tool failures recursively.
+
+See [Local feedback](https://bug-ops.github.io/mcpls/tools/overview.html#local-feedback)
+for schemas, pagination, privacy, and durability limits.
 
 ## Choose a navigation request
 
