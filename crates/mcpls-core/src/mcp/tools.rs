@@ -1035,7 +1035,7 @@ struct CallHierarchyCallsWire {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct FilteredCallHierarchyCallsWire {
-    /// Optional lexical peer source paths; exclusions win.
+    /// Optional lexical peer filter.
     call_path_filter: Option<crate::bridge::CallPathFilter>,
     /// Portable target instead of item or legacy addressing.
     symbol_target: Option<crate::bridge::SymbolTargetEnvelope>,
@@ -1115,7 +1115,7 @@ pub struct CallGraphParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CallGraphWire {
-    /// Optional lexical peer source paths; rejected branches are pruned.
+    /// Optional lexical peer filter.
     call_path_filter: Option<crate::bridge::CallPathFilter>,
     /// Follow callers or callees.
     direction: crate::bridge::CallGraphDirection,
@@ -1920,7 +1920,7 @@ mod tests {
 reusable_target_wire! {
     /// Wire form of a symbol context request.
     SymbolContextWire {
-        /// Optional lexical filter for `outgoing_calls` only.
+        /// Filter `outgoing_calls` only.
         call_path_filter: Option<crate::bridge::CallPathFilter>,
         #[serde(default)]
         resolve: ContextResolve,
@@ -1950,7 +1950,7 @@ pub enum ContextResolve {
 #[serde(try_from = "SymbolContextWire")]
 #[schemars(with = "SymbolContextWire")]
 pub struct SymbolContextParams {
-    /// Optional lexical filter for `outgoing_calls` only.
+    /// Filter `outgoing_calls` only.
     pub call_path_filter: Option<crate::bridge::CallPathFilter>,
     /// Context selection policy.
     pub resolve: ContextResolve,
