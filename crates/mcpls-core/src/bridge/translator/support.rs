@@ -268,6 +268,32 @@ impl ToolSupportSnapshot {
             .map_or_default(|members| self.member_supports(tool, &members))
     }
 
+    /// Each configured provider can be selected directly for workspace diagnostics.
+    pub(crate) fn workspace_diagnostic_members(&self) -> Vec<MemberSupport> {
+        let capability = Capability::WorkspaceDiagnostics;
+        self.configured_router
+            .server_ids()
+            .iter()
+            .filter(|server| !self.refused.contains(*server))
+            .map(|server| {
+                let status = if self.dead.contains(server) {
+                    MemberStatus::Unavailable
+                } else if let Some(running) = self.running.get(server) {
+                    if running.caps.contains(capability) {
+                        MemberStatus::Supported
+                    } else {
+                        MemberStatus::CapabilityNotAdvertised { capability }
+                    }
+                } else if self.expected.contains(server) {
+                    MemberStatus::Initializing
+                } else {
+                    MemberStatus::Unavailable
+                };
+                MemberSupport::new(server.clone(), status)
+            })
+            .collect()
+    }
+
     fn fan_out_members(&self, tool: ToolKind) -> Option<FanOutMembers> {
         workspace_fan_out_members(
             &self.configured_router,

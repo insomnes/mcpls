@@ -153,7 +153,7 @@ async fn lazy_catalog_and_worktree_isolation() {
     let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
     let (client, task) = connect(fixture.server(dispatcher.clone())).await;
     let before = client.peer().list_all_tools().await.unwrap();
-    assert_eq!(before.len(), 36);
+    assert_eq!(before.len(), 37);
     let support = call(&client, "get_tool_support", json!({})).await.unwrap();
     assert_eq!(support["basis"], "configured");
     let status = call(
@@ -771,9 +771,9 @@ async fn dispatcher_catalog_budget_and_static_null_support() {
         );
         let tools = client.peer().list_all_tools().await.unwrap();
         let expected = if profile == crate::config::ToolProfile::Full {
-            39
+            40
         } else {
-            36
+            37
         };
         assert_eq!(tools.len(), expected);
         let size = serde_json::to_vec(&tools).unwrap().len();
@@ -794,6 +794,109 @@ async fn dispatcher_catalog_budget_and_static_null_support() {
         client.cancel().await.unwrap();
         task.await.unwrap();
     }
+}
+
+/// Workspace pulls reach only the named provider and return only authorized files.
+#[tokio::test]
+async fn workspace_diagnostics_selects_one_provider_and_filters_its_report() {
+    let fixture = Fixture::new(4);
+    let profile = std::fs::read_to_string(&fixture.profile).unwrap();
+    let unrelated = profile.replace("language_id='python'", "language_id='rust'");
+    let selected = profile.replace(
+        "language_id='python'",
+        "name='ty-fixture'\nlanguage_id='python'",
+    );
+    std::fs::write(&fixture.profile, format!("{unrelated}\n{selected}")).unwrap();
+    let allowed = fixture.main.join("file.py");
+    let foreign = fixture.linked.join("file.py");
+    let escape = fixture.main.join("escape.py");
+    std::os::unix::fs::symlink(&foreign, &escape).unwrap();
+    let uri = |path: &Path| crate::bridge::path_to_uri(path).unwrap();
+    let range = json!({"start":{"line":0,"character":0},"end":{"line":0,"character":1}});
+    let diagnostic = |message: &str| json!({"range":range,"message":message,"code":11});
+    let mut allowed_diagnostic = diagnostic("in scope");
+    allowed_diagnostic["relatedInformation"] = json!([{
+        "location":{"uri":uri(&foreign),"range":range},"message":"foreign related text"
+    }]);
+    let item = |uri: lsp_types::Uri, diagnostics: Value| json!({"uri":uri,"version":null,"kind":"full","items":diagnostics});
+    let report = json!({"items":[
+        item(uri(&allowed), json!([allowed_diagnostic])),
+        item(uri(&foreign), json!([diagnostic("foreign diagnostic")])),
+        item(uri(&escape), json!([diagnostic("escaped diagnostic")])),
+        item(lsp_types::Uri::from("untitled:foreign".to_owned()), json!([diagnostic("virtual diagnostic")])),
+    ]});
+    let report_path = fixture.main.join(".workspace-diagnostics.json");
+    std::fs::write(&report_path, report.to_string()).unwrap();
+
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let tool = "get_workspace_diagnostics";
+    let unauthorized = tempfile::tempdir().unwrap();
+    assert!(
+        call(
+            &client,
+            tool,
+            json!({"server":"ty-fixture","workspace_path":unauthorized.path()}),
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(fixture.events(), [] as [Value; 0]);
+
+    let args = json!({"server":"ty-fixture","workspace_path":fixture.main});
+    let result = call(&client, tool, args.clone()).await.unwrap();
+    assert_eq!(
+        result,
+        json!({
+            "server":"ty-fixture", "status":"complete","truncated":false,
+            "position_encoding":"utf-8",
+            "diagnostics":[{"file_path":allowed,"message":"in scope","range":range,"code":11}]
+        })
+    );
+    let events = fixture.events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "initialize")
+            .count(),
+        1
+    );
+    let requests: Vec<_> = events
+        .iter()
+        .filter(|event| event["method"] == "workspace/diagnostic")
+        .collect();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["params"],
+        json!({"identifier":"fixture","previousResultIds":[]})
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event["method"] != "textDocument/didOpen")
+    );
+
+    for diagnostics in [
+        vec![diagnostic("small"); 257],
+        vec![diagnostic(&"🦀".repeat(32_768)), diagnostic("small")],
+    ] {
+        let report = json!({"items":[item(uri(&allowed), json!(diagnostics))]});
+        std::fs::write(&report_path, report.to_string()).unwrap();
+        let result = call(&client, tool, args.clone()).await.unwrap();
+        assert_eq!(result["status"], "partial");
+        assert_eq!(result["truncated"], true);
+        let retained = result["diagnostics"].as_array().unwrap();
+        assert_eq!(
+            retained.len(),
+            if diagnostics.len() > 256 { 256 } else { 1 }
+        );
+        assert!(retained.iter().all(|d| d["message"] == "small"));
+        assert!(result.to_string().len() <= 131_072);
+    }
+
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
 }
 
 /// Effective marker filtering and settled fallback apply to lazy demand too.

@@ -12,7 +12,7 @@ pub mod resources;
 mod signals;
 mod state;
 mod translator;
-pub(crate) use translator::MAX_NORMALIZED_LOCATIONS;
+pub(crate) use translator::{MAX_NORMALIZED_LOCATIONS, WorkspaceDiagnosticsReport};
 mod workspace_roots;
 
 pub use client_path::{ClientPath, InvalidClientPath};

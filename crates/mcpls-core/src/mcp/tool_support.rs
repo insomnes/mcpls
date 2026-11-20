@@ -20,6 +20,8 @@ pub(super) enum ToolBackend {
     Document(ToolKind),
     /// Routed workspace-wide, without a language.
     Workspace(ToolKind),
+    /// Routed directly to one configured provider, independently of file routes.
+    WorkspaceDiagnostics,
     /// Answered by mcpls itself; needs no language server.
     Local,
 }
@@ -42,6 +44,7 @@ pub(super) enum McpTool {
     GetDefinition,
     GetReferences,
     GetDiagnostics,
+    GetWorkspaceDiagnostics,
     DiagnosticsDelta,
     RenameSymbol,
     PreviewFileMove,
@@ -79,12 +82,13 @@ pub(super) enum McpTool {
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 38] = [
+    pub(super) const ALL: [Self; 39] = [
         Self::GetSymbolContext,
         Self::GetHover,
         Self::GetDefinition,
         Self::GetReferences,
         Self::GetDiagnostics,
+        Self::GetWorkspaceDiagnostics,
         Self::DiagnosticsDelta,
         Self::RenameSymbol,
         Self::PreviewFileMove,
@@ -156,6 +160,10 @@ impl McpTool {
             Self::GetDefinition => ("get_definition", Document(ToolKind::Definition)),
             Self::GetReferences => ("get_references", Document(ToolKind::References)),
             Self::GetDiagnostics => ("get_diagnostics", Document(ToolKind::Diagnostics)),
+            Self::GetWorkspaceDiagnostics => (
+                "get_workspace_diagnostics",
+                ToolBackend::WorkspaceDiagnostics,
+            ),
             Self::DiagnosticsDelta => ("diagnostics_delta", Document(ToolKind::Diagnostics)),
             Self::RenameSymbol => ("rename_symbol", Document(ToolKind::Rename)),
             Self::PreviewFileMove => ("preview_file_move", Document(ToolKind::FileMove)),
@@ -223,6 +231,7 @@ impl McpTool {
             ToolBackend::Document(kind) | ToolBackend::Workspace(kind) => {
                 Capability::for_tool(kind)
             }
+            ToolBackend::WorkspaceDiagnostics => Some(Capability::WorkspaceDiagnostics),
             ToolBackend::Local => None,
         }
     }
@@ -504,6 +513,28 @@ impl ToolSupportReport {
                             Some(ToolRoutes::FanOut(members))
                         };
                         (coverage, routes)
+                    }
+                    ToolBackend::WorkspaceDiagnostics => {
+                        let members = snapshot.workspace_diagnostic_members();
+                        let supported = members
+                            .iter()
+                            .filter(|member| matches!(member.status(), MemberStatus::Supported))
+                            .count();
+                        let coverage = if members.is_empty() {
+                            ToolCoverage::Unsupported
+                        } else if supported == members.len() {
+                            ToolCoverage::All
+                        } else if supported > 0 {
+                            ToolCoverage::Partial
+                        } else if members
+                            .iter()
+                            .any(|member| matches!(member.status(), MemberStatus::Initializing))
+                        {
+                            ToolCoverage::Unknown
+                        } else {
+                            ToolCoverage::Unsupported
+                        };
+                        (coverage, Some(ToolRoutes::FanOut(members)))
                     }
                 };
                 ToolEntry {

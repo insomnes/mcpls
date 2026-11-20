@@ -39,6 +39,8 @@ pub use call_path_filter::CallPathFilter;
 mod characterization;
 mod clock;
 mod diagnostics;
+mod workspace_diagnostics;
+pub use workspace_diagnostics::WorkspaceDiagnosticsReport;
 mod dto;
 mod edits;
 mod enclosing;

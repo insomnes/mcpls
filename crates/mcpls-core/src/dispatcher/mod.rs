@@ -1227,10 +1227,6 @@ impl Resident {
             self.selection.config.mcp.clone(),
         ))
     }
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one demand path preserves backend errors before server startup and recovery backoff"
-    )]
     pub(crate) async fn demand(
         self: &Arc<Self>,
         dispatcher: &Arc<Dispatcher>,
@@ -1244,14 +1240,32 @@ impl Resident {
         }
         let language = Self::demand_language(runtime, file).await?;
         let selected = Self::demand_route(runtime, language.as_ref(), tool);
+        self.demand_selected(runtime, |config| {
+            (tool.is_none() || selected.as_ref() == Some(&config.id()))
+                && language
+                    .as_ref()
+                    .is_none_or(|language| &config.language_id == language)
+        })
+        .await
+    }
+
+    pub(crate) async fn demand_named(
+        self: &Arc<Self>,
+        dispatcher: &Arc<Dispatcher>,
+        server: &crate::config::ServerId,
+    ) -> Result<()> {
+        let runtime = self.prepare(dispatcher).await?;
+        self.demand_selected(runtime, |config| config.id() == *server)
+            .await
+    }
+
+    async fn demand_selected(
+        self: &Arc<Self>,
+        runtime: &WorkspaceRuntime,
+        selected: impl Fn(&crate::config::LspServerConfig) -> bool,
+    ) -> Result<()> {
         for start in self.servers.get().into_iter().flatten() {
-            if tool.is_some() && selected.as_ref() != Some(&start.config.server_config().id()) {
-                continue;
-            }
-            if language
-                .as_ref()
-                .is_some_and(|language| &start.config.server_config().language_id != language)
-            {
+            if !selected(start.config.server_config()) {
                 continue;
             }
             let id = start.config.server_config().id();

@@ -68,6 +68,11 @@ while True:
                                    "workspaceSymbolProvider": True, "callHierarchyProvider": True, "typeHierarchyProvider": True}}
         if (root / ".publish-aliases").exists():
             result["capabilities"]["textDocumentSync"] = 1
+        if (root / ".workspace-diagnostics.json").exists():
+            result["capabilities"]["diagnosticProvider"] = {
+                "identifier": "fixture", "interFileDependencies": True, "workspaceDiagnostics": True
+            }
+            result["capabilities"]["positionEncoding"] = "utf-8"
     elif method == "textDocument/diagnostic":
         if (root / ".diagnostics-error.json").exists():
             send({"jsonrpc": "2.0", "id": request["id"], "error": {"code": json.loads((root / ".diagnostics-error.json").read_text()), "message": "authored diagnostic failure"}})
@@ -101,6 +106,8 @@ while True:
         result = [params["item"]]
     elif method == "workspace/symbol":
         result = []
+    elif method == "workspace/diagnostic":
+        result = json.loads((root / ".workspace-diagnostics.json").read_text())
     else:
         result = None
     send({"jsonrpc": "2.0", "id": request["id"], "result": result})

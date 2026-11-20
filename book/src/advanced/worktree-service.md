@@ -84,6 +84,7 @@ Automatic contexts share the normal resident capacity, startup limits, backoff, 
 File tools keep their absolute `file_path` parameter. These fileless tools require an absolute `workspace_path` directory in dispatcher mode:
 
 - `workspace_symbol_search`
+- `get_workspace_diagnostics`
 - `get_server_logs`
 - `get_server_messages`
 - `restart_server`
@@ -98,7 +99,7 @@ File tools keep their absolute `file_path` parameter. These fileless tools requi
 
 No operation selects a workspace from the daemon's current directory, the previous request, or MCP roots. MCP roots are optional hints and grant no approval. A returned external dependency location remains marked according to the normal `out_of_workspace` behavior. That result does not authorize a later standalone source request outside approved roots.
 
-The catalog is fixed by daemon mode, tool profile, and prefix. Dispatcher mode adds `get_workspace_status`: 36 agent tools or 39 full tools. Static mode exposes 35 agent tools or 38 full tools. Discovery and eviction do not alter these catalogs.
+The catalog is fixed by daemon mode, tool profile, and prefix. Dispatcher mode adds `get_workspace_status`: 37 agent tools or 40 full tools. Static mode exposes 36 agent tools or 39 full tools. Discovery and eviction do not alter these catalogs.
 
 ## Status and lifecycle
 

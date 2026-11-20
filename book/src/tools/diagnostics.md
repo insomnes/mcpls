@@ -108,6 +108,73 @@ Silence does not establish a clean report.
 The same cache backs the `lsp-diagnostics://` resource; see
 [Diagnostics and Resources](../advanced/diagnostics.md).
 
+## get_workspace_diagnostics
+
+Pull a fresh diagnostic report from one configured server. Use the configured
+server name, or its language ID if the server has no name. The call does not
+open documents or use the document diagnostic cache.
+
+```json
+{ "server": "ty", "workspace_path": "/work/app" }
+```
+
+Dispatcher mode requires an absolute, approved `workspace_path`. In standalone
+mode the call uses the configured roots. You can omit `workspace_path` in that
+mode or supply an existing directory within those roots.
+
+```json
+{
+  "server": "ty",
+  "status": "complete",
+  "truncated": false,
+  "position_encoding": "utf-8",
+  "diagnostics": [
+    {
+      "file_path": "/work/app/bad.py",
+      "message": "Object of type `Literal[1]` is not assignable to `str`",
+      "range": {
+        "start": { "line": 0, "character": 11 },
+        "end": { "line": 0, "character": 12 }
+      },
+      "severity": 1,
+      "code": "invalid-assignment"
+    }
+  ]
+}
+```
+
+Ranges use zero-based LSP coordinates and the reported column encoding.
+Optional severity is the LSP number from 1 (error) to 4 (hint). The optional
+code can be a string or integer. mcpls returns canonical workspace file paths
+and omits related locations and opaque diagnostic data.
+
+| Status | Meaning |
+| --- | --- |
+| `complete` | The provider supplied a complete report for its current settings. An empty array describes that report only. |
+| `partial` | Some diagnostic information was unavailable. `truncated: true` indicates that output limits omitted diagnostics. |
+| `unsupported` | The live provider lacks the workspace diagnostic capability. |
+| `failed` | The provider was unavailable or the request produced no usable report. Failures can also return an MCP error. |
+
+The structured response retains at most 256 diagnostics and 131072 compact
+UTF-8 JSON bytes. A diagnostic that exceeds the remaining byte budget is omitted.
+
+For ty 0.0.106, set its initialization option to enable workspace analysis:
+
+```toml
+[[lsp_servers]]
+name = "ty"
+language_id = "python"
+command = "ty"
+args = ["server"]
+file_patterns = ["*.py"]
+
+[lsp_servers.initialization_options]
+diagnosticMode = "workspace"
+```
+
+Capability advertisement alone does not confirm that ty is configured to run
+workspace analysis. The call uses the provider's configured request timeout.
+
 ## format_document
 
 Returns a one-document `changes` array with a readable diff against observed source.

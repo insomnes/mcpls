@@ -9,14 +9,14 @@
 
 **Give your AI coding agent a compiler's understanding of your code.**
 
-mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 35 default MCP tools (38 with the full profile), so an AI client reasons about code the way an IDE does.
+mcpls is a bridge between the Model Context Protocol (MCP) and the Language Server Protocol (LSP). It runs the language servers for your project (rust-analyzer, pyright, gopls, and others) and exposes their type information, references, diagnostics and refactoring as 36 default MCP tools (39 with the full profile), so an AI client reasons about code the way an IDE does.
 
 ```mermaid
 flowchart LR
     C["AI client"] <-->|MCP| M["mcpls"] <-->|LSP| S["rust-analyzer / pyright / gopls / ..."]
 ```
 
-The default `[mcp].tool_profile = "agent"` exposes 35 tools. Set `tool_profile = "full"` to restore all 38 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 36 tools. Set `tool_profile = "full"` to restore all 39 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; tools remain visible when a selected server lacks the required capability. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 `get_tool_support` also returns `runtime_provenance` for the running service, without requiring a language backend. It contains `status` (`verified` or `unknown`), `revision` (a lowercase 40-digit Git revision or `unknown`), and `executable_sha256` (a measured lowercase 64-digit SHA-256 digest or `unknown`). On Linux, mcpls measures `/proc/self/exe` and checks the adjacent `build.json` receipt. The receipt must contain string fields `revision` and `sha256`; additional fields are permitted. A matching digest verifies the local installation claim, not a reproducible source build or a signature. An operator who can replace the receipt can change that claim.
 

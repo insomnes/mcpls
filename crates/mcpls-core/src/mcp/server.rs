@@ -48,7 +48,7 @@ use super::tools::{
     InlayHintsParams, NavigationParams, PositionParams, PreviewFileMoveParams, RangeParams,
     ReferencesParams, RenameParams, RestartServerParams, ServerLogsParams, ServerMessagesParams,
     SymbolTargetInput, SymbolTargetParams, ToolSupportParams, TypeHierarchyWalkParams,
-    WorkspaceSymbolParams,
+    WorkspaceDiagnosticsParams, WorkspaceSymbolParams,
 };
 use crate::bridge::resources::{
     DiagnosticsResourceUri, MAX_SUBSCRIPTIONS, ResolvedResource, make_uri, parse_uri,
@@ -1340,6 +1340,33 @@ impl McplsServer {
             origin: answer.origin,
             signals,
         }))
+    }
+
+    /// Pull diagnostics for one workspace provider.
+    #[tool(
+        description = "Pull fresh diagnostics from one configured workspace server without opening documents. Dispatcher mode requires workspace_path. Results use zero-based LSP ranges in position_encoding. Complete covers the provider's report under its current settings. Partial indicates incomplete results, including truncation at 256 diagnostics or 131072 JSON bytes.",
+        title = "Workspace Diagnostics"
+    )]
+    async fn get_workspace_diagnostics(
+        &self,
+        Parameters(WorkspaceDiagnosticsParams { server }): Parameters<WorkspaceDiagnosticsParams>,
+    ) -> Result<Json<crate::bridge::WorkspaceDiagnosticsReport>, McpError> {
+        if !self
+            .context
+            .translator
+            .has_workspace_diagnostic_server(&server)
+        {
+            return Err(McpError::invalid_params(
+                "server must be a configured server ID",
+                None,
+            ));
+        }
+        self.context
+            .translator
+            .workspace_diagnostics(server)
+            .await
+            .map(Json)
+            .ok_or_else(|| McpError::internal_error("workspace diagnostics unavailable", None))
     }
 
     /// Capture or compare a bounded caller-held diagnostic observation.
@@ -6525,6 +6552,7 @@ sleep 0.3
             ("get_document_outline", true, false, true),
             ("format_document", true, false, true),
             ("workspace_symbol_search", true, false, true),
+            ("get_workspace_diagnostics", true, false, true),
             ("get_code_actions", true, false, true),
             ("get_incoming_calls", true, false, true),
             ("get_outgoing_calls", true, false, true),
@@ -7837,9 +7865,9 @@ sleep 0.3
                 assert_eq!(
                     tools.len(),
                     if profile == ToolProfile::Agent {
-                        35
+                        36
                     } else {
-                        38
+                        39
                     }
                 );
                 let supported = tools_call_over_the_wire(
@@ -7911,7 +7939,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 35);
+            assert_eq!(tools.len(), 36);
             assert!(
                 !tools
                     .iter()
@@ -7925,7 +7953,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 35);
+            assert_eq!(tools.len(), 36);
             assert!(
                 !tools
                     .iter()
@@ -9400,6 +9428,9 @@ sleep 0.3
             Capability::PrepareRename => {
                 serde_json::json!({ "renameProvider": { "prepareProvider": true } })
             }
+            Capability::WorkspaceDiagnostics => serde_json::json!({
+                "diagnosticProvider": {"interFileDependencies": true, "workspaceDiagnostics": true}
+            }),
             Capability::FileMove => serde_json::json!({
                 "workspace": {"fileOperations": {"willRename": {"filters": [
                     {"scheme": "file", "pattern": {"glob": "**/*.{RS,TS}", "matches": "file", "options": {"ignoreCase": true}}}
@@ -9742,6 +9773,12 @@ sleep 0.3
                 }))
                 .await
                 .map(|_| ()),
+            McpTool::GetWorkspaceDiagnostics => server
+                .get_workspace_diagnostics(Parameters(WorkspaceDiagnosticsParams {
+                    server: crate::config::ServerId::from_static("rust"),
+                }))
+                .await
+                .map(|_| ()),
             McpTool::DiagnosticsDelta => server
                 .diagnostics_delta(Parameters(
                     serde_json::json!({"file_path":file_path,"action":"capture"})
@@ -10011,6 +10048,8 @@ sleep 0.3
                         tool.capability()
                             .is_some_and(|cap| !cap.is_supported(&caps)),
                     ),
+                    // The named workspace pull reports unsupported in its typed response.
+                    ToolBackend::WorkspaceDiagnostics => continue,
                 };
                 let report_says_refused =
                     matches!(reported, Some(RouteSupport::CapabilityNotAdvertised { .. }));
@@ -10072,7 +10111,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 35);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 36);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");
@@ -10276,7 +10315,7 @@ sleep 0.3
                     .await
                     .is_err_and(|e| e.message.contains(CAPABILITY_REFUSAL));
                 let reported = match tool.spec().backend {
-                    ToolBackend::Local => continue,
+                    ToolBackend::Local | ToolBackend::WorkspaceDiagnostics => continue,
                     ToolBackend::Document(kind) => snapshot.document_support_gated(
                         &LanguageId::from_static("rust"),
                         kind,
@@ -10314,7 +10353,7 @@ sleep 0.3
                             }
                         }
                     ),
-                    ToolBackend::Local => {}
+                    ToolBackend::Local | ToolBackend::WorkspaceDiagnostics => {}
                 }
             }
         }

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `get_workspace_diagnostics` to pull a fresh, bounded diagnostic report
+  from one configured server, including diagnostics for unopened files.
+
 ## [0.10.0+insomnes.1]
 
 - Merge the complete upstream v0.10.0 release. Preserve fork navigation, edit

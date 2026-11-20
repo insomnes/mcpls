@@ -876,6 +876,14 @@ const fn default_insert_spaces() -> bool {
     true
 }
 
+/// Parameters for `get_workspace_diagnostics`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceDiagnosticsParams {
+    /// Configured server name, or its language ID when unnamed.
+    pub server: crate::config::ServerId,
+}
+
 /// Parameters for the `workspace_symbol_search` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

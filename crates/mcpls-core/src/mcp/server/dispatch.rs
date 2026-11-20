@@ -35,6 +35,25 @@ fn completed(value: Value) -> CallToolResponse {
     rmcp::model::CallToolResult::structured(value).into()
 }
 
+fn workspace_diagnostics_server(
+    arguments: &serde_json::Map<String, Value>,
+) -> Result<crate::config::ServerId, McpError> {
+    if arguments
+        .keys()
+        .any(|key| !matches!(key.as_str(), "server" | "workspace_path"))
+    {
+        return Err(McpError::invalid_params(
+            "workspace diagnostics accepts only server and workspace_path",
+            None,
+        ));
+    }
+    arguments
+        .get("server")
+        .and_then(Value::as_str)
+        .and_then(|id| crate::config::ServerId::new(id.to_owned()).ok())
+        .ok_or_else(|| McpError::invalid_params("server must be a configured server ID", None))
+}
+
 async fn canonical_move_endpoint(path: &Path) -> Result<PathBuf, McpError> {
     let (parent, name) = file_move_parent(path).map_err(|_| DispatchError::invalid(path).wire())?;
     let canonical = tokio::fs::canonicalize(parent)
@@ -72,6 +91,7 @@ pub(super) fn shape_workspace_schemas(router: &mut ToolRouter<McplsServer>) {
         if matches!(
             name,
             "workspace_symbol_search"
+                | "get_workspace_diagnostics"
                 | "get_server_logs"
                 | "get_server_messages"
                 | "restart_server"
@@ -231,12 +251,16 @@ impl McplsServer {
         let scoped = matches!(
             name.as_str(),
             "workspace_symbol_search"
+                | "get_workspace_diagnostics"
                 | "get_server_logs"
                 | "get_server_messages"
                 | "restart_server"
                 | "get_tool_support"
         );
         let arguments = request.arguments.get_or_insert_default();
+        if name == "get_workspace_diagnostics" {
+            workspace_diagnostics_server(arguments)?;
+        }
         if name == "get_references"
             && arguments.get("mode").and_then(Value::as_str) == Some("files")
             && arguments.get("context").and_then(Value::as_str) == Some("symbol_source")
@@ -476,12 +500,26 @@ impl McplsServer {
             .and_then(|tool| match tool.spec().backend {
                 super::super::tool_support::ToolBackend::Document(kind)
                 | super::super::tool_support::ToolBackend::Workspace(kind) => Some(kind),
-                super::super::tool_support::ToolBackend::Local => None,
+                super::super::tool_support::ToolBackend::Local
+                | super::super::tool_support::ToolBackend::WorkspaceDiagnostics => None,
             });
-        resident
-            .demand(dispatcher, file.as_deref(), local_only, tool)
-            .await
-            .map_err(DispatchError::wire)?;
+        if name == "get_workspace_diagnostics" {
+            let arguments = request.arguments.as_ref().ok_or_else(|| {
+                McpError::invalid_params("server must be a configured server ID", None)
+            })?;
+            let server_id = workspace_diagnostics_server(arguments)?;
+            resident
+                .demand_named(dispatcher, &server_id)
+                .await
+                .map_err(|_| {
+                    McpError::internal_error("workspace diagnostics provider unavailable", None)
+                })?;
+        } else {
+            resident
+                .demand(dispatcher, file.as_deref(), local_only, tool)
+                .await
+                .map_err(DispatchError::wire)?;
+        }
         let server = self.runtime_session(&lease).await?;
         // Keep the token-checked connection through every dispatch await.
         let continuation = origin.is_some();

@@ -226,6 +226,8 @@ spelled_enum! {
         DocumentSymbols => "documentSymbolProvider",
         /// `workspaceSymbolProvider` (`workspace/symbol`).
         WorkspaceSymbols => "workspaceSymbolProvider",
+        /// `diagnosticProvider.workspaceDiagnostics` (`workspace/diagnostic`).
+        WorkspaceDiagnostics => "diagnosticProvider.workspaceDiagnostics",
         /// `declarationProvider` (`textDocument/declaration`).
         Declaration => "declarationProvider",
         /// `typeHierarchyProvider` (`textDocument/prepareTypeHierarchy`,
@@ -268,6 +270,7 @@ impl Capability {
             Self::CodeActions => ToolKind::CodeActions,
             Self::DocumentSymbols => ToolKind::DocumentSymbols,
             Self::WorkspaceSymbols => ToolKind::WorkspaceSymbols,
+            Self::WorkspaceDiagnostics => ToolKind::Diagnostics,
             Self::Declaration => ToolKind::Declaration,
             Self::TypeHierarchy => ToolKind::TypeHierarchy,
             Self::DocumentHighlights => ToolKind::DocumentHighlights,
@@ -278,10 +281,10 @@ impl Capability {
     }
 
     /// Whether this is the capability [`Self::for_tool`] returns for its
-    /// [`ToolKind`]. Only [`Self::PrepareRename`] is not: it shares the
-    /// `Rename` route, and `Rename` precedes it in [`Self::ALL`].
+    /// [`ToolKind`]. Prepare rename and workspace diagnostics have separate
+    /// capability checks from the document tools that share their kind.
     pub(crate) const fn is_primary(self) -> bool {
-        !matches!(self, Self::PrepareRename)
+        !matches!(self, Self::PrepareRename | Self::WorkspaceDiagnostics)
     }
 
     /// The primary capability gating `tool` (the first match in
@@ -424,6 +427,10 @@ impl Capability {
                         | lsp_types::WorkspaceSymbolProvider::WorkspaceSymbolOptions(_)
                 )
             ),
+            Self::WorkspaceDiagnostics => {
+                super::workspace_diagnostics::workspace_options(caps.diagnostic_provider.as_ref())
+                    .is_some()
+            }
             Self::Declaration => matches!(
                 caps.declaration_provider,
                 Some(

@@ -40,7 +40,7 @@ For the complete MCP tool and parameter reference, see
 If the bridge is configured with `mcp.tool_prefix`, every tool name listed there gains
 that prefix (`{tool_prefix}_{tool}`).
 
-The default `[mcp].tool_profile = "agent"` exposes 35 tools. Set `tool_profile = "full"` to restore all 38 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 36 tools. Set `tool_profile = "full"` to restore all 39 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; tools remain visible when a selected server lacks the required capability. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 `rename_symbol` resolves a name or position and prepares on the rename server when supported.
 Its `proposed` result includes the queried `position`, `preparation`, and `changes`.

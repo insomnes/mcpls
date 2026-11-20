@@ -9396,6 +9396,7 @@
             "codeActionProvider",
             "documentSymbolProvider",
             "workspaceSymbolProvider",
+            "diagnosticProvider.workspaceDiagnostics",
             "declarationProvider",
             "typeHierarchyProvider",
             "renameProvider.prepareProvider",
@@ -9667,6 +9668,170 @@
     },
     "annotations": {
       "title": "Tool Support",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "get_workspace_diagnostics",
+    "title": "Workspace Diagnostics",
+    "description": "Pull fresh diagnostics from one configured workspace server without opening documents. Dispatcher mode requires workspace_path. Results use zero-based LSP ranges in position_encoding. Complete covers the provider's report under its current settings. Partial indicates incomplete results, including truncation at 256 diagnostics or 131072 JSON bytes.",
+    "inputSchema": {
+      "$defs": {
+        "ServerId": {
+          "description": "Unique identity of a configured LSP server within a workspace.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "server": {
+          "$ref": "#/$defs/ServerId",
+          "description": "Configured server name, or its language ID when unnamed."
+        },
+        "workspace_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "server"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "DiagnosticCode": {
+          "anyOf": [
+            {
+              "format": "int32",
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        },
+        "ServerId": {
+          "description": "Unique identity of a configured LSP server within a workspace.",
+          "type": "string"
+        },
+        "Status": {
+          "enum": [
+            "complete",
+            "partial",
+            "unsupported",
+            "failed"
+          ],
+          "type": "string"
+        },
+        "WorkspaceDiagnostic": {
+          "properties": {
+            "code": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DiagnosticCode"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "file_path": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/WorkspaceRange"
+            },
+            "severity": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "file_path",
+            "message",
+            "range"
+          ],
+          "type": "object"
+        },
+        "WorkspacePosition": {
+          "properties": {
+            "character": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "line": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "line",
+            "character"
+          ],
+          "type": "object"
+        },
+        "WorkspaceRange": {
+          "properties": {
+            "end": {
+              "$ref": "#/$defs/WorkspacePosition"
+            },
+            "start": {
+              "$ref": "#/$defs/WorkspacePosition"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "diagnostics": {
+          "items": {
+            "$ref": "#/$defs/WorkspaceDiagnostic"
+          },
+          "type": "array"
+        },
+        "position_encoding": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "server": {
+          "$ref": "#/$defs/ServerId"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "server",
+        "status",
+        "truncated",
+        "diagnostics"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Workspace Diagnostics",
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true

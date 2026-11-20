@@ -697,6 +697,10 @@ impl ToolRouter {
             .collect()
     }
 
+    pub(crate) fn server_ids(&self) -> &[ServerId] {
+        &self.order
+    }
+
     fn claims_explicitly(&self, id: &ServerId, tool: ToolKind) -> bool {
         self.by_language
             .values()
