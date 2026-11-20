@@ -755,7 +755,7 @@ pub struct PreviewSource {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SuppliedVersion {
     /// Server-supplied integer or explicit null, without freshness verification.
-    #[schemars(required)]
+    #[schemars(required, extend("type" = ["integer", "null"]))]
     pub version: Option<i32>,
 }
 

@@ -1543,6 +1543,7 @@ mod tests {
                                 | "get_incoming_calls"
                                 | "get_outgoing_calls"
                                 | "rename_symbol"
+                                | "preview_file_move"
                                 | "format_document"
                                 | "format_range"
                                 | "get_code_actions"

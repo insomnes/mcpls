@@ -127,8 +127,8 @@ const SHUTDOWN_ABORT_SETTLE: Duration = Duration::from_millis(50);
 /// an edit for content the caller no longer expects (e.g. renaming a
 /// different symbol than the one originally at that position).
 ///
-/// This list only gates `-32801`. `-32802` (`ServerCancelled`) retry is
-/// unaffected and keeps retrying unconditionally for every method, as before.
+/// This list only gates `-32801`. The separate `-32802` policy excludes
+/// file-move previews, which must surface provider errors after one request.
 pub const CONTENT_MODIFIED_RETRY_METHODS: &[LspRequestMethod<'static>] = &[
     LspRequestMethod::TextDocumentSignatureHelp,
     LspRequestMethod::TextDocumentInlayHint,
@@ -698,7 +698,7 @@ impl LspClient {
     /// Send request and wait for response with timeout.
     ///
     /// Automatically retries up to 3 times when the server returns error code
-    /// -32802 (`ServerCancelled`, any method) or -32801 (`ContentModified`,
+    /// -32802 (`ServerCancelled`, except file-move previews) or -32801 (`ContentModified`,
     /// only for methods in `CONTENT_MODIFIED_RETRY_METHODS`) -- gated by
     /// `data.retriggerRequest` when present -- using exponential backoff
     /// starting at 500 ms. Both codes share the same attempt budget: a
@@ -860,16 +860,14 @@ impl LspClient {
         Err(UnclassifiedError::logged(Error::ServerTerminated))
     }
 
-    /// Whether `response` to `method` is one the client sends again: a
-    /// cancelled request always, a modified document only for the methods in
-    /// [`CONTENT_MODIFIED_RETRY_METHODS`], and both only when the server asks
-    /// to retrigger.
+    /// Whether `response` permits a retry. A cancellation stops a file-move
+    /// preview. A modified document permits retry only for methods in
+    /// [`CONTENT_MODIFIED_RETRY_METHODS`]. A server can disable either retry.
     fn retries(response: &JsonRpcError, method: &str) -> bool {
+        let method = LspRequestMethod::from(method);
         let retryable = match LspErrorCodes::from(response.code) {
-            LspErrorCodes::ServerCancelled => true,
-            LspErrorCodes::ContentModified => {
-                CONTENT_MODIFIED_RETRY_METHODS.contains(&LspRequestMethod::from(method))
-            }
+            LspErrorCodes::ServerCancelled => method != LspRequestMethod::WorkspaceWillRenameFiles,
+            LspErrorCodes::ContentModified => CONTENT_MODIFIED_RETRY_METHODS.contains(&method),
             _ => false,
         };
         retryable && Self::should_retrigger(response.data.as_ref())

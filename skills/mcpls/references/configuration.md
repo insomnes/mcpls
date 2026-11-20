@@ -68,6 +68,7 @@ a few map many-to-one:
 | `references` | `get_references` |
 | `diagnostics` | `get_diagnostics` (pull) **and** `get_cached_diagnostics` (same route serves both) |
 | `rename` | `rename_symbol` |
+| `file_move` | `preview_file_move` |
 | `completions` | `get_completions` |
 | `signature_help` | `get_signature_help` |
 | `document_symbols` | `get_document_symbols` |

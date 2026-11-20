@@ -1296,7 +1296,10 @@
           "properties": {
             "version": {
               "format": "int32",
-              "type": "integer"
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -1603,7 +1606,10 @@
           "properties": {
             "version": {
               "format": "int32",
-              "type": "integer"
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -2918,7 +2924,10 @@
           "properties": {
             "version": {
               "format": "int32",
-              "type": "integer"
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -11710,7 +11719,10 @@
           "properties": {
             "version": {
               "format": "int32",
-              "type": "integer"
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -12193,7 +12205,10 @@
           "properties": {
             "version": {
               "format": "int32",
-              "type": "integer"
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [

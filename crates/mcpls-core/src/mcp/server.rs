@@ -7837,9 +7837,9 @@ sleep 0.3
                 assert_eq!(
                     tools.len(),
                     if profile == ToolProfile::Agent {
-                        34
+                        35
                     } else {
-                        37
+                        38
                     }
                 );
                 let supported = tools_call_over_the_wire(
@@ -9417,8 +9417,11 @@ sleep 0.3
         fake_servers: Vec<crate::test_lsp::FakeServer>,
     }
 
+    #[rstest::rstest]
+    #[case(None)]
+    #[case(Some(27))]
     #[tokio::test]
-    async fn file_move_preview_returns_the_provider_edit_over_mcp() {
+    async fn file_move_preview_returns_the_provider_edit_over_mcp(#[case] version: Option<i32>) {
         use serde_json::json;
 
         use crate::test_lsp::{read_framed_message, write_response};
@@ -9434,6 +9437,21 @@ sleep 0.3
                 ..Default::default()
             },
         );
+        let (listed, _) =
+            request_over_the_wire(fixture.server.for_new_session(), "tools/list", json!({})).await;
+        let tool = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "local_preview_file_move")
+            .unwrap();
+        let version_schema = &tool["outputSchema"]["$defs"]["SuppliedVersion"];
+        assert_eq!(version_schema["required"], json!(["version"]));
+        assert_eq!(
+            version_schema["properties"]["version"]["type"],
+            json!(["integer", "null"])
+        );
+
         let canonical_root = dunce::canonicalize(fixture.dir.path()).unwrap();
         let original = std::fs::read(&fixture.file).unwrap();
         let destination = canonical_root.join("moved #1.txt");
@@ -9468,10 +9486,13 @@ sleep 0.3
             write_response(
                 &mut fake.read_half_stdin,
                 &request["id"],
-                json!({"changes": {(importer_uri.as_ref()): [{
-                    "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 5}},
-                    "newText": "moved"
-                }]}}),
+                json!({"documentChanges": [{
+                    "textDocument": {"uri": importer_uri, "version": version},
+                    "edits": [{
+                        "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 5}},
+                        "newText": "moved"
+                    }]
+                }]}),
             ).await;
         };
         let (reply, ()) = tokio::join!(call, response);
@@ -9479,6 +9500,10 @@ sleep 0.3
         assert_eq!(proposal["changes"][0]["uri"], importer_uri.as_ref());
         assert_eq!(proposal["changes"][0]["edit_count"], 1);
         assert_eq!(proposal["changes"][0]["analysis_freshness"], "unknown");
+        assert_eq!(
+            proposal["changes"][0]["supplied_version"],
+            json!({"version": version})
+        );
         assert_eq!(proposal["changes"][0]["preview"]["status"], "complete");
         assert_eq!(
             proposal["changes"][0]["edits"][0],
@@ -9491,6 +9516,65 @@ sleep 0.3
         assert_eq!(std::fs::read(&fixture.file).unwrap(), original);
         assert_eq!(std::fs::read_to_string(importer).unwrap(), importer_source);
         assert!(!destination.exists());
+    }
+
+    #[tokio::test]
+    async fn file_move_preview_surfaces_provider_cancellation_over_mcp() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use serde_json::json;
+
+        use crate::test_lsp::{read_framed_message, write_error_response, write_response};
+
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                capabilities_advertising(Capability::FileMove),
+            )],
+            McpConfig::default(),
+        );
+        let mut fake = fixture.fake_servers.pop().unwrap();
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = count.clone();
+        let responder = tokio::spawn(async move {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            loop {
+                let message = read_framed_message(&mut wire).await;
+                if message["method"] != "workspace/willRenameFiles" {
+                    continue;
+                }
+                let id = &message["id"];
+                if observed.fetch_add(1, Ordering::Relaxed) == 0 {
+                    write_error_response(
+                        &mut fake.read_half_stdin,
+                        id,
+                        -32802,
+                        "provider cancelled move",
+                    )
+                    .await;
+                } else {
+                    write_response(&mut fake.read_half_stdin, id, serde_json::Value::Null).await;
+                    break;
+                }
+            }
+        });
+        let reply = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            json!({"name": "preview_file_move", "arguments": {
+                "file_path": fixture.file,
+                "new_file_path": fixture.file.with_file_name("moved.rs")
+            }}),
+        )
+        .await;
+        responder.abort();
+        assert_eq!(count.load(Ordering::Relaxed), 1, "{reply}");
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("provider cancelled move")),
+            "{reply}"
+        );
     }
 
     /// One live (registered, non-dead) catch-all server per `(id, language,

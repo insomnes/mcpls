@@ -47,7 +47,10 @@ Its `proposed` result includes the queried `position`, `preparation`, and `chang
 A `not_renameable` result has no edits. The standalone MCP `prepare_rename` tool was removed.
 Request a proposal, inspect it, then apply complete edits through the client.
 
-Edit tools (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) default to bounded readable previews.
+`preview_file_move` uses absolute `file_path` and `new_file_path` in one workspace. For example, preview moving `/work/app/lib.ts` to `/work/app/users.ts` before applying any import edits.
+The source must be a regular file, and the destination must be absent in an existing directory. The server selected by the `file_move` route must statically register `workspace/willRenameFiles` for the source.
+
+Edit tools (`rename_symbol`, `preview_file_move`, `format_document`, `format_range`, `get_code_actions`) default to bounded readable previews.
 Set `full: true` to include exact normalized raw `edits`; previews never change raw replacement text.
 Each edit document has `uri`, `edit_count`, `preview`, optional `preview_source` and `supplied_version`, and `analysis_freshness: "unknown"`.
 Formatting returns one document in `changes`, including empty successful edit sets. Command-only actions have no preview and require execution outside this MCP interface; mcpls provides no command execution API.
