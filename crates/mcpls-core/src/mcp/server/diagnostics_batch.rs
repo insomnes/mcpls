@@ -126,6 +126,7 @@ impl McplsServer {
                     .select(existing, false)
                     .await
                     .map_err(DispatchError::wire)?;
+                crate::usage::observe_selection(selection.root());
                 if selected
                     .as_ref()
                     .is_some_and(|first: &crate::dispatcher::Selection| {

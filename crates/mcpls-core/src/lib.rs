@@ -52,6 +52,7 @@ mod redaction;
 pub(crate) mod runtime;
 mod spelling;
 pub mod transport;
+mod usage;
 mod util;
 
 #[cfg(test)]
@@ -242,6 +243,7 @@ async fn serve_with_inner(config: ServerConfig, transport: Transport) -> Result<
 
     // A programmatic `ServerConfig` skips the allowlist check the `load_*` functions run.
     config.validate()?;
+    let usage = usage::UsageRuntime::start();
 
     if config.dispatcher.as_ref().is_some_and(|d| d.enabled) {
         let dispatcher = dispatcher::Dispatcher::new(config.clone())
@@ -255,12 +257,16 @@ async fn serve_with_inner(config: ServerConfig, transport: Transport) -> Result<
             config.project_config_status,
             config.mcp,
         )
-        .with_dispatcher(dispatcher.clone());
+        .with_dispatcher(dispatcher.clone())
+        .with_usage(usage.as_ref().map(usage::UsageRuntime::collector));
         let result = match transport {
             Transport::Stdio => run_stdio(server, shutdown_signal).await,
             #[cfg(feature = "transport-http")]
             Transport::Http(config) => run_http(server, config, shutdown_signal).await,
         };
+        if let Some(usage) = usage {
+            usage.finish().await;
+        }
         dispatcher.shutdown().await;
         reconciler.abort();
         let _ = reconciler.await;
@@ -333,7 +339,8 @@ async fn serve_with_inner(config: ServerConfig, transport: Transport) -> Result<
         subscription_registry,
         project_config_status,
         mcp,
-    );
+    )
+    .with_usage(usage.as_ref().map(usage::UsageRuntime::collector));
     info!("MCPLS server initialized successfully");
 
     let result = match transport {
@@ -345,6 +352,9 @@ async fn serve_with_inner(config: ServerConfig, transport: Transport) -> Result<
         Transport::Http(cfg) => run_http(mcp_server, cfg, shutdown_signal).await,
     };
 
+    if let Some(usage) = usage {
+        usage.finish().await;
+    }
     stop_disk_sweep(disk_sweep).await;
     shutdown(&cancel, &translator, lsp_init_handle).await;
 

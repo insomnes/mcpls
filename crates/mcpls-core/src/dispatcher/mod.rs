@@ -868,6 +868,7 @@ impl Dispatcher {
     pub(crate) async fn status(self: &Arc<Self>, path: Option<PathBuf>) -> Result<Value> {
         let selected = if let Some(path) = path {
             let selection = self.select(path, true).await?;
+            crate::usage::observe_selection(selection.root());
             let key = selection.identity.root.clone();
             let mut entries = self.entries.lock().await;
             if selection.temporary && !entries.contains_key(&key) {

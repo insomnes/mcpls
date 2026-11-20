@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Record local aggregate MCP tool usage in SQLite across stdio and HTTP
+  sessions. Set `MCPLS_USAGE=0` to disable collection.
 - Add `get_workspace_diagnostics` to pull a fresh, bounded diagnostic report
   from one configured server, including diagnostics for unopened files.
 

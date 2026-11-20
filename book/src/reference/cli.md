@@ -1,6 +1,6 @@
 # Command Line and Environment
 
-In this chapter you find every command-line flag of the `mcpls` binary and its environment variable. The flags are the same ones `mcpls --help` prints. Options marked HTTP exist only in builds with the `transport-http` feature ([enabling it](../advanced/transports.md#enabling-the-http-transport)).
+In this chapter you find every command-line flag of the `mcpls` binary and its environment variable. The flags are the same ones `mcpls --help` prints. Options marked HTTP exist only in builds with the `transport-http` feature ([enabling it](../advanced/transports.md#enabling-the-http-transport)). See [Local MCP Tool Usage](tool-usage.md) for the `MCPLS_USAGE` environment variable.
 
 ## Usage
 

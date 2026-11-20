@@ -760,12 +760,14 @@ impl WorkspaceRoots {
         self.lexical_gate(path)?;
         let roots = self.clone();
         let path = path.clone();
-        tokio::task::spawn_blocking(move || roots.canonical_gate(&path))
+        let validated = tokio::task::spawn_blocking(move || roots.canonical_gate(&path))
             .await
             .map_err(|source| Error::TaskFailed {
                 task: BackgroundTask::PathValidation,
                 source,
-            })?
+            })??;
+        crate::usage::observe_validation(self, validated.as_path());
+        Ok(validated)
     }
 
     pub(crate) async fn validate_file_move(
@@ -774,7 +776,7 @@ impl WorkspaceRoots {
         destination: ClientPath,
     ) -> Result<(WorkspacePath, PathBuf), Error> {
         let roots = self.clone();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(crate::usage::carry_observation(move || {
             file_move_parent(source.as_path())?;
             let (parent, name) = file_move_parent(destination.as_path())?;
             let old = roots.validate_blocking(&source)?;
@@ -796,15 +798,10 @@ impl WorkspaceRoots {
 
             // Prefer the most specific root for both endpoints when the
             // configuration contains nested roots.
-            let root_of = |path: &Path| {
-                roots
-                    .canonical
-                    .iter()
-                    .filter(|root| is_within(path, root, CaseRule::Exact))
-                    .max_by_key(|root| root.components().count())
-            };
             let new = parent.as_path().join(name);
-            if root_of(old.as_path()) != root_of(&new) {
+            if roots.most_specific_canonical_root(old.as_path())
+                != roots.most_specific_canonical_root(&new)
+            {
                 return Err(malformed_move_path(
                     destination.as_path(),
                     "source and destination select different workspace roots",
@@ -819,7 +816,7 @@ impl WorkspaceRoots {
                     "destination already exists",
                 )),
             }
-        })
+        }))
         .await
         .map_err(|source| Error::TaskFailed {
             task: BackgroundTask::PathValidation,
@@ -850,7 +847,9 @@ impl WorkspaceRoots {
     /// (it runs through a regular file, or has an invalid or over-long name).
     pub fn validate_blocking(&self, path: &ClientPath) -> Result<WorkspacePath, Error> {
         self.lexical_gate(path)?;
-        self.canonical_gate(path)
+        let validated = self.canonical_gate(path)?;
+        crate::usage::observe_validation(self, validated.as_path());
+        Ok(validated)
     }
 
     fn lexical_gate(&self, path: &ClientPath) -> Result<(), Error> {
@@ -971,6 +970,15 @@ impl WorkspaceRoots {
     /// The canonical root the canonical `path` lies under, if any.
     pub(crate) fn canonical_root_of(&self, path: &Path) -> Option<&Path> {
         self.split_under_root(path).map(|(root, _)| root)
+    }
+
+    /// The most specific configured root containing a canonical path.
+    pub(crate) fn most_specific_canonical_root(&self, path: &Path) -> Option<&Path> {
+        self.canonical
+            .iter()
+            .map(PathBuf::as_path)
+            .filter(|root| is_within(path, root, CaseRule::Exact))
+            .max_by_key(|root| root.components().count())
     }
 
     /// The canonical root the canonical `path` lies under and the remainder

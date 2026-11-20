@@ -29,6 +29,9 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rusqlite = { workspace = true }
+
 [features]
 default = []
 transport-http = ["mcpls-core/transport-http"]

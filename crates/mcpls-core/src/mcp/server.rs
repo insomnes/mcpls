@@ -69,6 +69,7 @@ use crate::bridge::{
 };
 use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix, ToolProfile};
 use crate::redaction::{Redactions, ServerText};
+use crate::usage::{self, Collector, Outcome};
 use crate::util::{MAX_ECHOED_NAME_BYTES, escape_bounded, lock_std};
 
 /// Built-in `serverInfo.title`, used when `[mcp].title` is not configured.
@@ -351,6 +352,7 @@ pub struct McplsServer {
     /// stopped by the serve loop can report shutdown instead of a client
     /// cancellation. Shared by every session of one server.
     stop: CancellationToken,
+    usage: Option<Collector>,
 }
 
 /// Maps an [`crate::error::Error`] onto the wire-level MCP error, via
@@ -737,6 +739,7 @@ impl McplsServer {
             context,
             tool_router,
             stop: CancellationToken::new(),
+            usage: None,
         }
     }
 
@@ -871,6 +874,26 @@ impl McplsServer {
             .unwrap_or(name)
     }
 
+    fn usage_tool(&self, name: &str) -> &'static str {
+        if !self.tool_router.has_route(name) {
+            return "unknown_tool";
+        }
+        let name = self.unprefixed(name);
+        if name == "get_workspace_status" {
+            return "get_workspace_status";
+        }
+        McpTool::ALL
+            .into_iter()
+            .map(McpTool::name)
+            .find(|registered| *registered == name)
+            .unwrap_or("unknown_tool")
+    }
+
+    pub(crate) fn with_usage(mut self, usage: Option<Collector>) -> Self {
+        self.usage = usage;
+        self
+    }
+
     /// This server reporting `stop` as its shutdown signal: a tool call that
     /// is stopped after `stop` was cancelled answers "mcpls is shutting down"
     /// instead of reporting a client cancellation.
@@ -964,6 +987,7 @@ impl McplsServer {
             context,
             tool_router: Arc::clone(&self.tool_router),
             stop: self.stop.clone(),
+            usage: self.usage.clone(),
         }
     }
 
@@ -1366,6 +1390,7 @@ impl McplsServer {
                 None,
             ));
         }
+        usage::observe_runtime(&self.context.workspace_roots);
         self.context
             .translator
             .workspace_diagnostics(server)
@@ -1685,6 +1710,7 @@ impl McplsServer {
     ) -> Result<Json<WorkspaceSymbolResult>, McpError> {
         let kind_filter = parse_kind_filter(kind_filter, KindFilterField::KindFilter)?;
         let query = crate::bridge::WorkspaceQuery::new(query).map_err(client_input_error)?;
+        usage::observe_runtime(&self.context.workspace_roots);
         let translator = &self.context.translator;
         let mut result = translator
             .handle_workspace_symbol(query, kind_filter, limit)
@@ -2108,6 +2134,7 @@ impl McplsServer {
         &self,
         Parameters(ServerLogsParams { limit, min_level }): Parameters<ServerLogsParams>,
     ) -> Result<Json<ServerLogsResult>, McpError> {
+        usage::observe_runtime(&self.context.workspace_roots);
         // Logs were redacted at ingestion (`ServerText` for `ServerLogsResult` is a no-op).
         let cache = self.context.notification_cache.lock().await;
         Ok(Json(Translator::handle_server_logs(
@@ -2124,6 +2151,7 @@ impl McplsServer {
         &self,
         Parameters(ServerMessagesParams { limit }): Parameters<ServerMessagesParams>,
     ) -> Result<Json<ServerMessagesResult>, McpError> {
+        usage::observe_runtime(&self.context.workspace_roots);
         self.structured_result({
             let cache = self.context.notification_cache.lock().await;
             Translator::handle_server_messages(&cache, limit)
@@ -2335,6 +2363,7 @@ impl McplsServer {
         &self,
         Parameters(RestartServerParams { target }): Parameters<RestartServerParams>,
     ) -> Result<Json<RestartServerResult>, ToolFailure> {
+        usage::observe_runtime(&self.context.workspace_roots);
         // Once begun, a restart must reach a defined end state per server, so it
         // is detached from this handler: a cancel after entry does not abandon
         // a server half-restarted.
@@ -2360,7 +2389,10 @@ impl McplsServer {
         let translator = &self.context.translator;
         let file_language = match file_path.as_ref() {
             Some(path) => translator.language_for_path(path).await.map(Some),
-            None => Ok(None),
+            None => {
+                usage::observe_runtime(&self.context.workspace_roots);
+                Ok(None)
+            }
         };
         let snapshot = translator.tool_support_snapshot();
         self.structured_result(file_language.map(|file_language| {
@@ -3049,10 +3081,31 @@ impl ServerHandler for McplsServer {
         request: CallToolRequestParams,
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let mut usage = self.usage.as_ref().and_then(|collector| {
+            collector.begin(self.usage_tool(&request.name), self.dispatcher.is_none())
+        });
         let tool = request.name.clone();
         let (request_token, peer) = (context.ct.clone(), context.peer.clone());
         let handler = contain_panic(Box::pin(self.dispatch_tool(request, context)), "tool call");
-        match run_cancellable(&request_token, &self.stop, peer_closed(&peer), handler).await {
+        let result = run_cancellable(
+            &request_token,
+            &self.stop,
+            peer_closed(&peer),
+            usage::Call::track(usage.as_ref(), handler),
+        )
+        .await;
+        if let Some(call) = &mut usage {
+            call.complete(match &result {
+                Ok(Ok(CallToolResponse::Complete(result))) if result.is_error == Some(true) => {
+                    Outcome::ToolError
+                }
+                Ok(Ok(_)) => Outcome::Success,
+                Ok(Err(_)) => Outcome::ProtocolError,
+                Err(_) => Outcome::Stopped,
+            });
+        }
+        drop(usage);
+        match result {
             Ok(result) => result,
             Err(stop) => {
                 tracing::debug!(%tool, %stop, "tool call stopped before it finished");

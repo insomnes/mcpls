@@ -733,6 +733,7 @@ impl McplsServer {
                 .existing(&generation)
                 .await
                 .map_err(DispatchError::wire)?;
+            crate::usage::observe_selection(lease.resident.root());
             dispatcher
                 .validate(&lease.resident)
                 .await
@@ -747,11 +748,13 @@ impl McplsServer {
                     .select(file.clone(), false)
                     .await
                     .map_err(DispatchError::wire)?;
+                crate::usage::observe_selection(selected.root());
                 if let Some(workspace) = workspace {
                     let other = dispatcher
                         .select(workspace.clone(), true)
                         .await
                         .map_err(DispatchError::wire)?;
+                    crate::usage::observe_selection(other.root());
                     if selected.root() != other.root() {
                         return Err(McpError::invalid_params(
                             "file_path and workspace_path select different workspaces",
@@ -766,6 +769,7 @@ impl McplsServer {
                         .select(parent.to_path_buf(), true)
                         .await
                         .map_err(DispatchError::wire)?;
+                    crate::usage::observe_selection(other.root());
                     if !selected.same_workspace(&other) {
                         return Err(McpError::invalid_params(
                             "file_path and new_file_path select different workspaces",
@@ -775,10 +779,12 @@ impl McplsServer {
                 }
                 selected
             } else if let Some(workspace) = workspace {
-                dispatcher
+                let selected = dispatcher
                     .select(workspace.clone(), true)
                     .await
-                    .map_err(DispatchError::wire)?
+                    .map_err(DispatchError::wire)?;
+                crate::usage::observe_selection(selected.root());
+                selected
             } else {
                 return Err(McpError::invalid_params(
                     "workspace_path is required for this operation in dispatcher mode",

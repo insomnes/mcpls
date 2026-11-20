@@ -42,4 +42,5 @@
 - [Command Line and Environment](reference/cli.md)
 - [Configuration Reference](reference/config.md)
 - [Example Configuration](reference/example-config.md)
+- [Local MCP Tool Usage](reference/tool-usage.md)
 - [Benchmarks](reference/benchmarks.md)

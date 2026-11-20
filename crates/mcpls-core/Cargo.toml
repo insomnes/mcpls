@@ -24,6 +24,7 @@ ignore = { workspace = true }
 lsp-types = { workspace = true }
 regex = { workspace = true }
 rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
+rusqlite = { workspace = true }
 schemars = { workspace = true, features = ["chrono04"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
