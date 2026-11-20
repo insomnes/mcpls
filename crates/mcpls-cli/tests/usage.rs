@@ -2,19 +2,21 @@
 
 #![cfg(target_os = "linux")]
 
-use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 
-use assert_cmd::Command;
+use anyhow::{Context as _, bail};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::process::Command;
 
-#[test]
-fn stdio_flushes_only_tool_calls_with_validated_scope() {
+#[tokio::test]
+async fn stdio_flushes_only_tool_calls_with_validated_scope() {
     let root = TempDir::new().unwrap();
     let workspace = root.path().join("workspace");
     let nested = workspace.join("nested");
@@ -50,36 +52,23 @@ fn stdio_flushes_only_tool_calls_with_validated_scope() {
             "name": "probe_unknown", "arguments": {}
         }}),
     ];
-    let mut stdin = String::new();
-    for request in requests {
-        writeln!(stdin, "{request}").unwrap();
-    }
     let state = root.path().join("state");
     let real_state = root.path().join("local-state");
     fs::create_dir(&real_state).unwrap();
     symlink(real_state, &state).unwrap();
-    let run = |usage| run_stdio(root.path(), &config, &state, &stdin, usage);
+    let run = |enabled| run_stdio(root.path(), &config, &state, &requests, enabled);
     let db = state.join("mcpls/usage.sqlite");
-    run(Some("0"));
+    run(false).await.unwrap();
     assert!(!db.exists());
-    let responses = run(None);
-    let responses: Vec<Value> = String::from_utf8(responses)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    for (id, key) in [
-        (1, "result"),
-        (2, "result"),
-        (3, "result"),
-        (4, "error"),
-        (5, "error"),
-    ] {
+    let responses = run(true).await.unwrap();
+    for (response, key) in responses
+        .iter()
+        .zip(["result", "result", "result", "error", "error"])
+    {
         assert!(
-            responses
-                .iter()
-                .any(|response| response["id"] == id && response.get(key).is_some()),
-            "{responses:?}"
+            response.get(key).is_some(),
+            "request {} expected {key}",
+            response["id"]
         );
     }
     let root_name = nested.to_str().unwrap();
@@ -104,36 +93,63 @@ fn stdio_flushes_only_tool_calls_with_validated_scope() {
         ),
     ];
     assert_eq!(history(&db).unwrap(), expected);
-    run(Some("0"));
+    run(false).await.unwrap();
     assert_eq!(history(&db).unwrap(), expected);
 }
 
-fn run_stdio(
+async fn run_stdio(
     root: &Path,
     config: &Path,
     state: &Path,
-    stdin: &str,
-    usage: Option<&str>,
-) -> Vec<u8> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mcpls"));
-    child
+    requests: &[Value],
+    enabled: bool,
+) -> anyhow::Result<Vec<Value>> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mcpls"));
+    command
         .arg("--config")
         .arg(config)
         .current_dir(root)
         .env("XDG_STATE_HOME", state)
         .env_remove("MCPLS_LISTEN")
-        .env_remove("MCPLS_USAGE");
-    if let Some(value) = usage {
-        child.env("MCPLS_USAGE", value);
+        .env_remove("MCPLS_USAGE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    if !enabled {
+        command.env("MCPLS_USAGE", "0");
     }
-    child
-        .timeout(Duration::from_secs(15))
-        .write_stdin(stdin)
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone()
+    let mut child = command.spawn()?;
+    let mut input = child.stdin.take().context("missing fixture stdin")?;
+    let output = child.stdout.take().context("missing fixture stdout")?;
+    let mut output = BufReader::new(output).lines();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut responses = Vec::new();
+        for request in requests {
+            input.write_all(format!("{request}\n").as_bytes()).await?;
+            if let Some(id) = request.get("id") {
+                loop {
+                    let line = output
+                        .next_line()
+                        .await?
+                        .context("MCP fixture closed stdout")?;
+                    let response: Value = serde_json::from_str(&line)?;
+                    if response.get("id") == Some(id) {
+                        responses.push(response);
+                        break;
+                    }
+                }
+            }
+        }
+        drop(input);
+        let status = child.wait().await?;
+        if !status.success() {
+            bail!("MCP fixture exited with {status}");
+        }
+        Ok(responses)
+    })
+    .await
+    .context("MCP fixture timed out")?
 }
 
 fn history(db: &Path) -> rusqlite::Result<Vec<(String, String, String, i64)>> {
