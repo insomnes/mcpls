@@ -10,6 +10,7 @@ use serde::Serialize;
 use super::Translator;
 use crate::bridge::{ClientPath, WorkspacePath, uri_to_path};
 use crate::config::ServerId;
+use crate::error::{Error, Result};
 use crate::redaction::Redactions;
 use crate::util::lock_std;
 
@@ -112,7 +113,7 @@ impl Translator {
     pub(crate) async fn workspace_diagnostics(
         &self,
         server: ServerId,
-    ) -> Option<WorkspaceDiagnosticsReport> {
+    ) -> Result<Option<WorkspaceDiagnosticsReport>> {
         let mut report = WorkspaceDiagnosticsReport {
             server,
             status: Status::Failed,
@@ -120,22 +121,27 @@ impl Translator {
             diagnostics: Vec::new(),
             position_encoding: None,
         };
-        if self.workspace_roots.is_empty() || serde_json::to_vec(&report).ok()?.len() > MAX_BYTES {
-            return None;
+        if self.workspace_roots.is_empty() || serde_json::to_vec(&report)?.len() > MAX_BYTES {
+            return Ok(None);
         }
         let (client, identifier, encoding) = {
             let mut servers = lock_std(&self.servers);
+            if servers.is_expected(&report.server) {
+                return Err(Error::ServerInitializing {
+                    server_id: report.server,
+                });
+            }
             let Some(server) = servers.server_mut(&report.server) else {
-                return Some(report);
+                return Ok(Some(report));
             };
             if server.is_dead().unwrap_or(true) {
-                return Some(report);
+                return Ok(Some(report));
             }
             let Some(options) =
                 workspace_options(server.capabilities().diagnostic_provider.as_ref())
             else {
                 report.status = Status::Unsupported;
-                return (serde_json::to_vec(&report).ok()?.len() <= MAX_BYTES).then_some(report);
+                return Ok((serde_json::to_vec(&report)?.len() <= MAX_BYTES).then_some(report));
             };
             let connection = (
                 server.client().clone(),
@@ -156,7 +162,7 @@ impl Translator {
             )
             .await
         else {
-            return Some(report);
+            return Ok(Some(report));
         };
 
         report.status = Status::Complete;
@@ -170,12 +176,12 @@ impl Translator {
         mut report: WorkspaceDiagnosticsReport,
         response: WorkspaceDiagnosticReport,
         redactions: &Redactions,
-    ) -> Option<WorkspaceDiagnosticsReport> {
+    ) -> Result<Option<WorkspaceDiagnosticsReport>> {
         // The complete envelope is the largest successful envelope.
         // Every retained item adds its JSON bytes and at most one comma.
-        let mut bytes = serde_json::to_vec(&report).ok()?.len();
+        let mut bytes = serde_json::to_vec(&report)?.len();
         if bytes > MAX_BYTES {
-            return None;
+            return Ok(None);
         }
         for document in response.items {
             let (uri, items) = match document {
@@ -207,7 +213,7 @@ impl Translator {
                     continue;
                 };
                 let next_bytes = bytes
-                    .saturating_add(serde_json::to_vec(&diagnostic).ok()?.len())
+                    .saturating_add(serde_json::to_vec(&diagnostic)?.len())
                     .saturating_add(usize::from(!report.diagnostics.is_empty()));
                 if next_bytes <= MAX_BYTES {
                     bytes = next_bytes;
@@ -223,7 +229,7 @@ impl Translator {
         if report.truncated {
             report.status = Status::Partial;
         }
-        Some(report)
+        Ok(Some(report))
     }
 
     async fn workspace_diagnostic_path(&self, uri: &Uri) -> Option<WorkspacePath> {

@@ -1365,6 +1365,7 @@ impl McplsServer {
             .translator
             .workspace_diagnostics(server)
             .await
+            .map_err(|error| self.render_error(error))?
             .map(Json)
             .ok_or_else(|| McpError::internal_error("workspace diagnostics unavailable", None))
     }
@@ -9071,6 +9072,25 @@ sleep 0.3
         for err in cache_reader_errors(&fx).await {
             assert_eq!(err.code, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn test_workspace_diagnostics_distinguishes_initializing_and_failed_servers() {
+        let call = || serde_json::json!({"name":"get_workspace_diagnostics","arguments":{"server":"rust"}});
+        let starting = startup_fixture(RustServerState::Starting);
+        let response = tools_call_over_the_wire(starting.server, call()).await;
+        assert_eq!(
+            response["error"]["code"],
+            crate::error::SERVER_INITIALIZING_ERROR_CODE
+        );
+        assert_eq!(response["error"]["data"]["server_id"], "rust");
+
+        let failed = startup_fixture(RustServerState::FailedToStart);
+        let response = tools_call_over_the_wire(failed.server, call()).await;
+        assert_eq!(
+            response["result"]["structuredContent"],
+            serde_json::json!({"server":"rust","status":"failed","truncated":false,"diagnostics":[]})
+        );
     }
 
     /// #535: a server that failed to start is reported by both cache readers

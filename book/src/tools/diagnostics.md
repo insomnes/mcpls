@@ -157,6 +157,8 @@ and omits related locations and opaque diagnostic data.
 
 The structured response retains at most 256 diagnostics and 131072 compact
 UTF-8 JSON bytes. A diagnostic that exceeds the remaining byte budget is omitted.
+In standalone mode, retry if the provider is still initializing
+(`-32051`, `ServerInitializing`).
 
 For ty 0.0.106, set its initialization option to enable workspace analysis:
 
