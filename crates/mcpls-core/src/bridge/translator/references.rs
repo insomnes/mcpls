@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use super::Translator;
 use super::dto::{
-    ReferenceLocation, ReferenceSource, SourceOrigin, SourceUnavailableReason as Missing,
+    LocationSource, ReferenceLocation, ReferenceSource, SourceOrigin,
+    SourceUnavailableReason as Missing,
 };
 use crate::bridge::{ClientPath, WorkspacePath};
-use crate::redaction::Redactions;
+use crate::redaction::{Redactions, ServerText};
 
 const FILE_BYTES: usize = 1024 * 1024;
 const SOURCE_BYTES: usize = 4 * FILE_BYTES;
@@ -39,6 +40,8 @@ pub struct ReferenceOptions {
     pub path_filter: Option<PathBuf>,
     /// Attach bounded source outcomes to retained locations or group examples.
     pub include_source: bool,
+    /// Attach bounded excerpts under `broader_context`.
+    pub broader_context: bool,
 }
 
 impl Default for ReferenceOptions {
@@ -48,6 +51,7 @@ impl Default for ReferenceOptions {
             limit: 10,
             path_filter: None,
             include_source: false,
+            broader_context: false,
         }
     }
 }
@@ -73,16 +77,11 @@ pub(super) fn lexical_path(path: &Path) -> Option<PathBuf> {
 impl ReferenceOptions {
     pub(super) fn validate(&mut self) -> crate::error::Result<()> {
         if !(1..=10_000).contains(&self.limit) {
-            return Err(crate::error::Error::InvalidToolParams(
-                "limit must be between 1 and 10000".into(),
-            ));
+            return Err(crate::error::Error::InvalidToolLimit { max: 10_000 });
         }
         if let Some(path) = &self.path_filter {
-            self.path_filter = Some(lexical_path(path).ok_or_else(|| {
-                crate::error::Error::InvalidToolParams(
-                    "path_filter must be an absolute path".into(),
-                )
-            })?);
+            self.path_filter =
+                Some(lexical_path(path).ok_or(crate::error::Error::InvalidReferencePathFilter)?);
         }
         Ok(())
     }
@@ -170,7 +169,7 @@ impl ReferenceFileSelection {
             .into_iter()
             .zip(self.details)
             .map(|(example, (count, file_path))| super::dto::ReferenceFile {
-                uri: example.uri.clone(),
+                uri: example.uri.to_string(),
                 path_filter_unavailable: file_path.is_none().then(|| "unsupported_uri".into()),
                 file_path,
                 count,
@@ -198,16 +197,13 @@ const fn unavailable(reason: Missing) -> ReferenceSource {
 }
 
 impl Translator {
-    pub(super) async fn reference_sources(&self, locations: &mut [ReferenceLocation]) {
-        self.source_excerpts(locations, false).await;
-    }
-
-    /// Reuse contained acquisition and excerpts; hash only navigation observations.
+    /// Read each requested excerpt once. Hash only navigation observations.
     pub(super) async fn source_excerpts(
         &self,
         locations: &mut [ReferenceLocation],
         hash: bool,
-    ) -> HashMap<String, String> {
+        broader: bool,
+    ) -> HashMap<lsp_types::Uri, String> {
         let mut hashes = HashMap::new();
         let mut identities = HashMap::new();
         let start = self.clock.now();
@@ -221,7 +217,7 @@ impl Translator {
                 unavailable(Missing::CandidateLimit)
             } else if self.clock.now() >= deadline {
                 unavailable(Missing::Deadline)
-            } else if let Some(path) = url::Url::parse(&location.uri)
+            } else if let Some(path) = url::Url::parse(location.uri.as_ref())
                 .ok()
                 .and_then(|uri| uri.to_file_path().ok())
             {
@@ -241,7 +237,7 @@ impl Translator {
                 };
                 if !sources.contains_key(&key) {
                     if sources.len() >= 16 {
-                        location.source = Some(unavailable(Missing::FileLimit));
+                        set_excerpt(location, unavailable(Missing::FileLimit), broader);
                         continue;
                     }
                     let (source, charge) = if let Some(validated) = validated {
@@ -277,7 +273,7 @@ impl Translator {
                     match sources.get(&key) {
                         Some(Ok((text, origin))) => excerpt(
                             text,
-                            location.range.start.line,
+                            location.range.start.line().get(),
                             *origin,
                             &mut output_left,
                             &redactions,
@@ -289,7 +285,7 @@ impl Translator {
             } else {
                 unavailable(Missing::AccessDenied)
             };
-            location.source = Some(outcome);
+            set_excerpt(location, outcome, broader);
         }
         #[cfg(test)]
         {
@@ -555,46 +551,77 @@ pub(super) fn redact_source(
     redactions: &Redactions,
     remaining: &mut usize,
 ) {
-    let Some(ReferenceSource::Text { .. }) = &item.source else {
-        return;
+    let target_line = item.range.start.line().get();
+    let excerpt = match &mut item.source {
+        Some(LocationSource::Symbol(body)) => {
+            body.redact_server_text(redactions);
+            &mut item.broader_context
+        }
+        Some(LocationSource::Excerpt(_)) => {
+            let Some(LocationSource::Excerpt(source)) = item.source.take() else {
+                return;
+            };
+            item.source = Some(LocationSource::Excerpt(redact_excerpt(
+                source,
+                target_line,
+                redactions,
+                remaining,
+            )));
+            return;
+        }
+        None => &mut item.broader_context,
     };
-    if let Some(ReferenceSource::Text {
+    if let Some(source) = excerpt.take() {
+        *excerpt = Some(redact_excerpt(source, target_line, redactions, remaining));
+    }
+}
+
+fn set_excerpt(location: &mut ReferenceLocation, excerpt: ReferenceSource, broader: bool) {
+    if broader {
+        location.broader_context = Some(excerpt);
+    } else {
+        location.source = Some(LocationSource::Excerpt(excerpt));
+    }
+}
+
+pub(super) fn redact_excerpt(
+    source: ReferenceSource,
+    target_line: u32,
+    redactions: &Redactions,
+    remaining: &mut usize,
+) -> ReferenceSource {
+    let ReferenceSource::Text {
         text,
         start_line,
         origin,
         shortened,
-    }) = item.source.take()
-    {
-        let mut final_text = text.clone();
-        redactions.redact_in_place(&mut final_text);
-        if final_text.len() <= EXCERPT_BYTES.min(*remaining) {
-            *remaining = remaining.saturating_sub(final_text.len());
-            item.source = Some(ReferenceSource::Text {
-                text: final_text,
-                start_line,
-                origin,
-                shortened,
-            });
-            return;
-        }
-        let relative_line = item
-            .range
-            .start
-            .line
-            .saturating_sub(start_line)
-            .saturating_add(1);
-        let mut source = excerpt(&text, relative_line, origin, remaining, redactions);
-        if let ReferenceSource::Text {
-            start_line: first,
-            shortened: short,
-            ..
-        } = &mut source
-        {
-            *first = first.saturating_add(start_line.saturating_sub(1));
-            *short |= shortened;
-        }
-        item.source = Some(source);
+    } = source
+    else {
+        return source;
+    };
+    let mut final_text = text.clone();
+    redactions.redact_in_place(&mut final_text);
+    if final_text.len() <= EXCERPT_BYTES.min(*remaining) {
+        *remaining = remaining.saturating_sub(final_text.len());
+        return ReferenceSource::Text {
+            text: final_text,
+            start_line,
+            origin,
+            shortened,
+        };
     }
+    let relative_line = target_line.saturating_sub(start_line).saturating_add(1);
+    let mut source = excerpt(&text, relative_line, origin, remaining, redactions);
+    if let ReferenceSource::Text {
+        start_line: first,
+        shortened: short,
+        ..
+    } = &mut source
+    {
+        *first = first.saturating_add(start_line.saturating_sub(1));
+        *short |= shortened;
+    }
+    source
 }
 
 #[cfg(test)]
@@ -607,7 +634,7 @@ mod tests {
 
     use super::*;
     use crate::bridge::translator::dto::ReferencesResult;
-    use crate::bridge::translator::enclosing::ResultContext;
+    use crate::bridge::translator::enclosing::LocationContext;
     use crate::bridge::translator::testing::*;
     use crate::config::ServerId;
     use crate::test_lsp::client_path;
@@ -655,7 +682,7 @@ mod tests {
                         client_path(path.to_string_lossy().to_string()),
                         pos(1, 1),
                         false,
-                        ResultContext::None,
+                        LocationContext::None,
                         options,
                     )
                     .await
@@ -713,7 +740,7 @@ mod tests {
         assert_eq!(summary.files[0].count, 10_002);
         assert_eq!(summary.files[0].file_path.as_ref(), Some(&a));
         assert_eq!(summary.files[1].file_path.as_ref(), Some(&b));
-        assert_eq!(summary.files[1].example.range.start.line, 3);
+        assert_eq!(summary.files[1].example.range.start.line().get(), 3);
         assert!(
             summary
                 .files
@@ -842,7 +869,7 @@ mod tests {
             );
             assert!(matches!(
                 file.example.source,
-                Some(ReferenceSource::Unavailable { .. })
+                Some(LocationSource::Excerpt(ReferenceSource::Unavailable { .. }))
             ));
         }
     }
@@ -877,8 +904,9 @@ mod tests {
                             .handle_definition_with_source(
                                 path,
                                 pos(1, 1),
-                                ResultContext::None,
+                                LocationContext::None,
                                 include_source,
+                                false,
                             )
                             .await
                     }
@@ -887,8 +915,9 @@ mod tests {
                             .handle_implementation_with_source(
                                 path,
                                 pos(1, 1),
-                                ResultContext::None,
+                                LocationContext::None,
                                 include_source,
+                                false,
                             )
                             .await
                     }
@@ -897,8 +926,9 @@ mod tests {
                             .handle_type_definition_with_source(
                                 path,
                                 pos(1, 1),
-                                ResultContext::None,
+                                LocationContext::None,
                                 include_source,
+                                false,
                             )
                             .await
                     }
@@ -907,8 +937,9 @@ mod tests {
                             .handle_declaration_with_source(
                                 path,
                                 pos(1, 1),
-                                ResultContext::None,
+                                LocationContext::None,
                                 include_source,
+                                false,
                             )
                             .await
                     }
@@ -1029,7 +1060,10 @@ mod tests {
         assert!(result.result.truncated);
         assert_eq!(result.result.locations.len(), 10);
         for (index, item) in result.result.locations.iter().enumerate() {
-            assert_eq!(item.range.start.line, u32::try_from(index).unwrap() + 1);
+            assert_eq!(
+                item.range.start.line().get(),
+                u32::try_from(index).unwrap() + 1
+            );
             assert!(item.source.is_none());
             assert!(item.enclosing_symbol.is_none());
         }
@@ -1062,6 +1096,7 @@ mod tests {
                 limit: 2,
                 path_filter: Some(wanted),
                 include_source: false,
+                broader_context: false,
             },
             None,
         )
@@ -1135,6 +1170,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
         )
@@ -1166,6 +1202,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
         )
@@ -1187,6 +1224,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
         )
@@ -1226,6 +1264,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             Some(clock),
         )
@@ -1257,6 +1296,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
         )
@@ -1282,6 +1322,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
         )
@@ -1310,6 +1351,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
         )
@@ -1342,6 +1384,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
             Some(setup),
@@ -1377,6 +1420,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
             Some(setup),
@@ -1417,6 +1461,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
             Some(setup),
@@ -1446,6 +1491,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
             Some(setup),
@@ -1489,6 +1535,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
             Some(setup),
@@ -1543,6 +1590,7 @@ mod tests {
                     limit: 100,
                     include_source: true,
                     path_filter: None,
+                    broader_context: false,
                 },
                 None,
                 Some(clock),
@@ -1573,6 +1621,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
             Some(setup),
@@ -1592,6 +1641,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
             Some(setup),
@@ -1630,6 +1680,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
         )
@@ -1681,6 +1732,7 @@ mod tests {
                 limit: 100,
                 include_source: true,
                 path_filter: None,
+                broader_context: false,
             },
             None,
             Some(setup),

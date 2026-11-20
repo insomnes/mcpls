@@ -785,7 +785,7 @@ fn needs_node(tsc: &Path) -> bool {
         .get(..read)
         .and_then(|bytes| bytes.split(|b| *b == b'\n').next())
         .unwrap_or_default();
-    first_line.starts_with(b"#!") && first_line.windows(4).any(|w| w == b"node")
+    first_line.starts_with(b"#!") && first_line.array_windows::<4>().any(|w| w == b"node")
 }
 
 /// `config` with the native TypeScript server substituted when
@@ -815,7 +815,8 @@ pub fn with_selected_typescript_server<'a>(
         Some(TypescriptServerChoice::Tsserver(reason)) => {
             tracing::info!(
                 server = %config.language_id,
-                "keeping typescript-language-server: {reason}"
+                %reason,
+                "keeping typescript-language-server"
             );
             Cow::Borrowed(config)
         }
@@ -1030,7 +1031,8 @@ impl TypescriptPlan {
             TsserverResolution::Unresolved(reason) => {
                 tracing::warn!(
                     %server,
-                    "tsserver not pinned: {reason}; a workspace-supplied tsserver may run"
+                    %reason,
+                    "tsserver not pinned; a workspace-supplied tsserver may run"
                 );
                 return (config, None);
             }

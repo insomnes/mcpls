@@ -8,13 +8,14 @@ use tokio::time::Instant;
 
 use super::Translator;
 use super::dto::{
-    HoverResult, IndexCoverage, Location, LocationsResult, Position, PositionDegradation,
-    ReferencesResult,
+    HoverResult, IndexCoverage, Location, LocationSource, LocationsResult, NavigationResult,
+    NavigationSource, Position, PositionDegradation, Range, ReferenceLocation, ReferencesResult,
 };
-use super::enclosing::{Contextualized, ResultContext};
+use super::enclosing::{Contextualized, LocationContext};
 use super::encoding_ctx::EncodingCtx;
 use super::positioned::{FromPosition, GotoRequest, Positioned};
 use super::routing::{Capability, IndexingGate};
+use super::source::SpanRule;
 use crate::bridge::indexing::{
     DEFAULT_INDEXING_READY_TIMEOUT_SECS, INDEXING_STALENESS_BOUND, PROGRESS_LATCH_IDLE,
     PROGRESS_SETTLE,
@@ -210,15 +211,56 @@ async fn lsp_locations_to_mcp(
     locs: Vec<lsp_types::Location>,
     ctx: &EncodingCtx,
 ) -> NormalizedLocations {
+    let locs = locs.into_iter().map(|location| (location, None)).collect();
+    normalize_locations(locs, ctx, TargetRanges::Skip).await
+}
+
+/// Whether a link's raw `targetRange` is normalized along with its location.
+///
+/// Only the source pass reads it, so the default output does no extra
+/// conversion work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetRanges {
+    /// Leave the target range out.
+    Skip,
+    /// Normalize it with the request's `ctx`.
+    Normalize,
+}
+
+impl From<LocationContext> for TargetRanges {
+    fn from(context: LocationContext) -> Self {
+        match context {
+            LocationContext::SymbolSource => Self::Normalize,
+            LocationContext::None | LocationContext::EnclosingSymbol => Self::Skip,
+        }
+    }
+}
+
+/// [`lsp_locations_to_mcp`] for locations that may carry a link's raw
+/// `targetRange`, normalized as `targets` says.
+async fn normalize_locations(
+    locs: Vec<(lsp_types::Location, Option<lsp_types::Range>)>,
+    ctx: &EncodingCtx,
+    targets: TargetRanges,
+) -> NormalizedLocations {
     let mut budget = ItemBudget::new();
     let locs = budget.admit(locs);
     let truncated = budget.truncated();
     let mut locations = Vec::with_capacity(locs.len());
-    for loc in locs {
-        locations.push(Location {
-            uri: loc.uri.to_string(),
-            range: ctx.normalize_range(&loc.uri, loc.range).await,
-            out_of_workspace: ctx.is_out_of_workspace(&loc.uri),
+    for (loc, target) in locs {
+        let target_range = match (targets, target) {
+            (TargetRanges::Normalize, Some(range)) => {
+                Some(ctx.normalize_range(&loc.uri, range).await)
+            }
+            (TargetRanges::Normalize | TargetRanges::Skip, _) => None,
+        };
+        locations.push(NormalizedLocation {
+            location: Location {
+                range: ctx.normalize_range(&loc.uri, loc.range).await,
+                out_of_workspace: ctx.is_out_of_workspace(&loc.uri),
+                uri: loc.uri,
+            },
+            target_range,
         });
     }
     NormalizedLocations {
@@ -226,6 +268,14 @@ async fn lsp_locations_to_mcp(
         truncated,
         positions_degraded: ctx.positions_degraded(),
     }
+}
+
+/// One normalized location with the link target range the source pass reads.
+pub(super) struct NormalizedLocation {
+    pub(super) location: Location,
+    /// The go-to link's `targetRange`; `None` without a link or under
+    /// [`TargetRanges::Skip`].
+    pub(super) target_range: Option<Range>,
 }
 
 /// [`lsp_locations_to_mcp`]'s result: the normalized locations plus whether
@@ -238,7 +288,7 @@ async fn lsp_locations_to_mcp(
 /// past EOF, or invalid UTF-8 -- see `ctx.positions_degraded()`), surfaced
 /// via each result DTO's `positions_degraded` field (#497).
 struct NormalizedLocations {
-    locations: Vec<Location>,
+    locations: Vec<NormalizedLocation>,
     truncated: bool,
     positions_degraded: Option<PositionDegradation>,
 }
@@ -307,19 +357,25 @@ impl GotoResponse for lsp_types::DeclarationResponse {
 /// Normalize a go-to-X response (`textDocument/definition`,
 /// `textDocument/implementation`, `textDocument/typeDefinition`, or
 /// `textDocument/declaration`) into a
-/// flat list of MCP `Location` values.
+/// flat list of MCP `Location` values, keeping a link's `targetRange` as
+/// `targets` says.
 async fn goto_response_to_locations<R: GotoResponse>(
     response: Option<R>,
     ctx: &EncodingCtx,
+    targets: TargetRanges,
 ) -> NormalizedLocations {
     let lsp_locs = match response.map(GotoResponse::into_kind) {
-        Some(GotoKind::Locations(locs)) => locs,
-        Some(GotoKind::Links(links)) => {
-            links.into_iter().map(definition_link_to_location).collect()
-        }
+        Some(GotoKind::Locations(locs)) => locs.into_iter().map(|loc| (loc, None)).collect(),
+        Some(GotoKind::Links(links)) => links
+            .into_iter()
+            .map(|link| {
+                let target_range = link.target_range;
+                (definition_link_to_location(link), Some(target_range))
+            })
+            .collect(),
         None => vec![],
     };
-    lsp_locations_to_mcp(lsp_locs, ctx).await
+    normalize_locations(lsp_locs, ctx, targets).await
 }
 
 /// Extracts hover contents as a plain string.
@@ -329,7 +385,6 @@ async fn goto_response_to_locations<R: GotoResponse>(
 /// support would silently discard hover text from those servers, so this
 /// (and `marked_string_to_string`) carry a narrow, scoped allow rather than
 /// rewriting to `MarkupContent`-only.
-#[allow(deprecated, reason = "LSP servers still send this deprecated field")]
 pub(super) fn extract_hover_contents(contents: lsp_types::Contents) -> String {
     match contents {
         lsp_types::Contents::MarkedString(marked_string) => marked_string_to_string(marked_string),
@@ -343,7 +398,7 @@ pub(super) fn extract_hover_contents(contents: lsp_types::Contents) -> String {
 }
 
 /// Convert a marked string to a plain string.
-#[allow(deprecated, reason = "LSP servers still send this deprecated field")]
+#[expect(deprecated, reason = "LSP servers still send this deprecated field")]
 fn marked_string_to_string(marked: lsp_types::MarkedString) -> String {
     match marked {
         lsp_types::MarkedString::String(s) => s,
@@ -411,7 +466,7 @@ impl Translator {
         };
 
         let start = Instant::now();
-        #[allow(
+        #[expect(
             clippy::arithmetic_side_effects,
             reason = "production passes the fixed INDEXING_READY_TIMEOUT"
         )]
@@ -485,7 +540,8 @@ impl Translator {
     async fn contextualize_into(
         &self,
         normalized: NormalizedLocations,
-        context: ResultContext,
+        context: LocationContext,
+        rule: SpanRule,
     ) -> LocationsResult {
         let truncated = normalized.truncated;
         let Contextualized {
@@ -493,7 +549,12 @@ impl Translator {
             enrichment,
             positions_degraded,
         } = self
-            .contextualize_locations(normalized.locations, context, normalized.positions_degraded)
+            .contextualize_locations(
+                normalized.locations,
+                context,
+                rule,
+                normalized.positions_degraded,
+            )
             .await;
         LocationsResult {
             locations,
@@ -520,6 +581,7 @@ impl Translator {
         &self,
         file_path: &ClientPath,
         position: Position,
+        targets: TargetRanges,
     ) -> Result<NormalizedLocations>
     where
         R: GotoRequest + lsp_types::Request<Result = Option<T>>,
@@ -539,7 +601,7 @@ impl Translator {
             )
             .await?;
 
-        Ok(goto_response_to_locations(response, &ctx).await)
+        Ok(goto_response_to_locations(response, &ctx, targets).await)
     }
 
     /// Handle definition request.
@@ -554,114 +616,129 @@ impl Translator {
         &self,
         file_path: ClientPath,
         position: Position,
-        context: ResultContext,
+        context: LocationContext,
     ) -> Result<LocationsResult> {
         let normalized = self
-            .handle_goto::<lsp_types::DefinitionRequest, _>(&file_path, position)
+            .handle_goto::<lsp_types::DefinitionRequest, _>(&file_path, position, context.into())
             .await?;
-        Ok(self.contextualize_into(normalized, context).await)
+        Ok(self
+            .contextualize_into(normalized, context, SpanRule::Definition)
+            .await)
     }
 
     /// Navigate with optional bounded source, without changing native defaults.
     ///
     /// # Errors
     /// Returns the existing navigation error if semantic navigation fails.
-    pub async fn handle_definition_with_source(
+    pub(crate) async fn handle_definition_with_source(
         &self,
         file_path: ClientPath,
         position: Position,
-        context: ResultContext,
+        context: LocationContext,
         include_source: bool,
+        broader_context: bool,
     ) -> Result<super::dto::NavigationResult> {
         let result = self.handle_definition(file_path, position, context).await?;
-        Ok(self.navigation_sources(result, include_source).await)
+        Ok(self
+            .navigation_sources(result, context, include_source, broader_context)
+            .await)
     }
 
     /// Navigate with optional bounded source, without changing native defaults.
     ///
     /// # Errors
     /// Returns the existing navigation error if semantic navigation fails.
-    pub async fn handle_implementation_with_source(
+    pub(crate) async fn handle_implementation_with_source(
         &self,
         file_path: ClientPath,
         position: Position,
-        context: ResultContext,
+        context: LocationContext,
         include_source: bool,
+        broader_context: bool,
     ) -> Result<super::dto::NavigationResult> {
         let result = self
             .handle_implementation(file_path, position, context)
             .await?;
-        Ok(self.navigation_sources(result, include_source).await)
+        Ok(self
+            .navigation_sources(result, context, include_source, broader_context)
+            .await)
     }
 
     /// Navigate with optional bounded source, without changing native defaults.
     ///
     /// # Errors
     /// Returns the existing navigation error if semantic navigation fails.
-    pub async fn handle_type_definition_with_source(
+    pub(crate) async fn handle_type_definition_with_source(
         &self,
         file_path: ClientPath,
         position: Position,
-        context: ResultContext,
+        context: LocationContext,
         include_source: bool,
+        broader_context: bool,
     ) -> Result<super::dto::NavigationResult> {
         let result = self
             .handle_type_definition(file_path, position, context)
             .await?;
-        Ok(self.navigation_sources(result, include_source).await)
+        Ok(self
+            .navigation_sources(result, context, include_source, broader_context)
+            .await)
     }
 
     /// Navigate with optional bounded source, without changing native defaults.
     ///
     /// # Errors
     /// Returns the existing navigation error if semantic navigation fails.
-    pub async fn handle_declaration_with_source(
+    pub(crate) async fn handle_declaration_with_source(
         &self,
         file_path: ClientPath,
         position: Position,
-        context: ResultContext,
+        context: LocationContext,
         include_source: bool,
+        broader_context: bool,
     ) -> Result<super::dto::NavigationResult> {
         let result = self
             .handle_declaration(file_path, position, context)
             .await?;
-        Ok(self.navigation_sources(result, include_source).await)
+        Ok(self
+            .navigation_sources(result, context, include_source, broader_context)
+            .await)
     }
 
     async fn navigation_sources(
         &self,
         result: LocationsResult,
+        context: LocationContext,
         include_source: bool,
-    ) -> super::dto::NavigationResult {
-        let mut result = super::dto::NavigationResult::from(result);
-        if !include_source {
+        broader_context: bool,
+    ) -> NavigationResult {
+        let mut result = NavigationResult::from(result);
+        if !include_source && !broader_context {
             return result;
         }
-        let mut locations: Vec<_> = result
+        let mut locations = result
             .locations
-            .into_iter()
-            .map(|item| super::dto::ReferenceLocation {
+            .iter()
+            .map(|item| ReferenceLocation {
                 symbol_target: None,
                 symbol_target_unavailable: None,
-                location: item.location,
+                location: item.location.clone(),
                 source: None,
+                broader_context: None,
             })
-            .collect();
-        let hashes = self.source_excerpts(&mut locations, true).await;
-        result.locations = locations
-            .into_iter()
-            .map(|item| {
-                let hash = hashes.get(&item.uri).cloned().unwrap_or_default();
-                super::dto::NavigationLocation {
-                    symbol_target: None,
-                    symbol_target_unavailable: None,
-                    location: item.location,
-                    source: item
-                        .source
-                        .map(|source| super::dto::NavigationSource::from_excerpt(source, hash)),
-                }
-            })
-            .collect();
+            .collect::<Vec<_>>();
+        let hashes = self.source_excerpts(&mut locations, true, true).await;
+        let broader = broader_context || context == LocationContext::SymbolSource;
+        for (item, location) in result.locations.iter_mut().zip(locations) {
+            let hash = hashes.get(&location.uri).cloned().unwrap_or_default();
+            let excerpt = location
+                .broader_context
+                .map(|source| NavigationSource::from_excerpt(source, hash));
+            if broader {
+                item.broader_context = excerpt;
+            } else {
+                item.source = excerpt.map(LocationSource::Excerpt);
+            }
+        }
         result
     }
 
@@ -678,7 +755,7 @@ impl Translator {
         file_path: ClientPath,
         position: Position,
         include_declaration: bool,
-        context: ResultContext,
+        context: LocationContext,
     ) -> Result<ReferencesResult> {
         self.handle_references_with_options(
             file_path,
@@ -699,10 +776,15 @@ impl Translator {
         file_path: ClientPath,
         position: Position,
         include_declaration: bool,
-        context: ResultContext,
+        context: LocationContext,
         mut options: super::ReferenceOptions,
     ) -> Result<ReferencesResult> {
         options.validate()?;
+        if matches!(options.mode, super::ReferenceMode::Files)
+            && context == LocationContext::SymbolSource
+        {
+            return Err(Error::SymbolSourceRequiresLocations);
+        }
         let Positioned {
             result: response,
             ctx,
@@ -749,37 +831,22 @@ impl Translator {
             }
             (retained, matched_count)
         };
-        let mut locations = Vec::with_capacity(retained.len());
-        for location in retained {
-            let range = ctx.normalize_range(&location.uri, location.range).await;
-            #[cfg(test)]
-            {
-                crate::util::lock_std(&self.reference_work).normalized += 1;
-            }
-            locations.push(Location {
-                out_of_workspace: ctx.is_out_of_workspace(&location.uri),
-                uri: location.uri.to_string(),
-                range,
-            });
+        let normalized = lsp_locations_to_mcp(retained, &ctx).await;
+        #[cfg(test)]
+        {
+            crate::util::lock_std(&self.reference_work).normalized += normalized.locations.len();
         }
-        let normalized = NormalizedLocations {
-            locations,
-            truncated: false,
-            positions_degraded: ctx.positions_degraded(),
-        };
-        let result = self.contextualize_into(normalized, context).await;
-        let mut locations: Vec<_> = result
+        let result = self
+            .contextualize_into(normalized, context, SpanRule::EnclosingBody)
+            .await;
+        let mut locations = result
             .locations
             .into_iter()
-            .map(|location| super::dto::ReferenceLocation {
-                symbol_target: None,
-                symbol_target_unavailable: None,
-                location,
-                source: None,
-            })
-            .collect();
-        if options.include_source {
-            self.reference_sources(&mut locations).await;
+            .map(ReferenceLocation::from)
+            .collect::<Vec<_>>();
+        if options.include_source || options.broader_context {
+            let broader = options.broader_context || context == LocationContext::SymbolSource;
+            self.source_excerpts(&mut locations, false, broader).await;
         }
         let file_summary =
             selection.map(|selection| selection.finish(std::mem::take(&mut locations)));
@@ -824,12 +891,18 @@ impl Translator {
         &self,
         file_path: ClientPath,
         position: Position,
-        context: ResultContext,
+        context: LocationContext,
     ) -> Result<LocationsResult> {
         let normalized = self
-            .handle_goto::<lsp_types::ImplementationRequest, _>(&file_path, position)
+            .handle_goto::<lsp_types::ImplementationRequest, _>(
+                &file_path,
+                position,
+                context.into(),
+            )
             .await?;
-        Ok(self.contextualize_into(normalized, context).await)
+        Ok(self
+            .contextualize_into(normalized, context, SpanRule::Definition)
+            .await)
     }
 
     /// Handle go-to-type-definition request (`textDocument/typeDefinition`).
@@ -847,12 +920,18 @@ impl Translator {
         &self,
         file_path: ClientPath,
         position: Position,
-        context: ResultContext,
+        context: LocationContext,
     ) -> Result<LocationsResult> {
         let normalized = self
-            .handle_goto::<lsp_types::TypeDefinitionRequest, _>(&file_path, position)
+            .handle_goto::<lsp_types::TypeDefinitionRequest, _>(
+                &file_path,
+                position,
+                context.into(),
+            )
             .await?;
-        Ok(self.contextualize_into(normalized, context).await)
+        Ok(self
+            .contextualize_into(normalized, context, SpanRule::Definition)
+            .await)
     }
 
     /// Handle go-to-declaration request (`textDocument/declaration`).
@@ -871,17 +950,19 @@ impl Translator {
         &self,
         file_path: ClientPath,
         position: Position,
-        context: ResultContext,
+        context: LocationContext,
     ) -> Result<LocationsResult> {
         let normalized = self
-            .handle_goto::<lsp_types::DeclarationRequest, _>(&file_path, position)
+            .handle_goto::<lsp_types::DeclarationRequest, _>(&file_path, position, context.into())
             .await?;
-        Ok(self.contextualize_into(normalized, context).await)
+        Ok(self
+            .contextualize_into(normalized, context, SpanRule::Definition)
+            .await)
     }
 }
 
 #[cfg(test)]
-#[allow(deprecated, reason = "LSP servers still send this deprecated field")]
+#[expect(deprecated, reason = "LSP servers still send this deprecated field")]
 mod tests {
     use std::sync::Arc;
     use std::time::Duration;
@@ -1213,7 +1294,7 @@ mod tests {
             .handle_definition(
                 client_path(path.to_string_lossy().into_owned()),
                 pos(1, 1),
-                ResultContext::None,
+                LocationContext::None,
             )
             .await
             .unwrap_err();
@@ -1252,7 +1333,7 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_definition(client_path(path), pos(1, 1), ResultContext::None)
+                    .handle_definition(client_path(path), pos(1, 1), LocationContext::None)
                     .await
             })
         };
@@ -1303,7 +1384,7 @@ mod tests {
                 client_path(path.to_string_lossy().into_owned()),
                 pos(1, 1),
                 true,
-                ResultContext::None,
+                LocationContext::None,
             )
             .await
             .unwrap_err();
@@ -1342,7 +1423,7 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_references(client_path(path), pos(1, 1), true, ResultContext::None)
+                    .handle_references(client_path(path), pos(1, 1), true, LocationContext::None)
                     .await
             })
         };
@@ -1414,7 +1495,7 @@ mod tests {
             .handle_implementation(
                 client_path(path.to_string_lossy().into_owned()),
                 pos(1, 1),
-                ResultContext::None,
+                LocationContext::None,
             )
             .await
             .unwrap_err();
@@ -1451,7 +1532,7 @@ mod tests {
             .handle_type_definition(
                 client_path(path.to_string_lossy().into_owned()),
                 pos(1, 1),
-                ResultContext::None,
+                LocationContext::None,
             )
             .await
             .unwrap_err();
@@ -1617,7 +1698,7 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_definition(client_path(path), Position::at(1, 1), ResultContext::None)
+                    .handle_definition(client_path(path), Position::at(1, 1), LocationContext::None)
                     .await
             })
         };
@@ -1648,9 +1729,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.locations.len(), 1);
-        assert_eq!(result.locations[0].uri, target_uri);
+        assert_eq!(result.locations[0].inner.location.uri.as_ref(), target_uri);
         assert!(
-            !result.locations[0].out_of_workspace,
+            !result.locations[0].inner.location.out_of_workspace,
             "a definition location inside the workspace root must not be marked out_of_workspace"
         );
     }
@@ -1682,7 +1763,7 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_definition(client_path(path), Position::at(1, 1), ResultContext::None)
+                    .handle_definition(client_path(path), Position::at(1, 1), LocationContext::None)
                     .await
             })
         };
@@ -1718,9 +1799,9 @@ mod tests {
             "an out-of-workspace definition location (e.g. stdlib/a dependency) must be \
              returned, not dropped"
         );
-        assert_eq!(result.locations[0].uri, outside_uri);
+        assert_eq!(result.locations[0].inner.location.uri.as_ref(), outside_uri);
         assert!(
-            result.locations[0].out_of_workspace,
+            result.locations[0].inner.location.out_of_workspace,
             "a definition location outside every workspace root must be marked out_of_workspace"
         );
     }
@@ -1751,7 +1832,7 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_references(client_path(path), pos(1, 1), true, ResultContext::None)
+                    .handle_references(client_path(path), pos(1, 1), true, LocationContext::None)
                     .await
             })
         };
@@ -1803,24 +1884,20 @@ mod tests {
             2,
             "both the in-workspace and out-of-workspace locations must survive"
         );
-        assert!(result.locations.iter().any(|l| l.uri == inside_uri));
-        assert!(result.locations.iter().any(|l| l.uri == outside_uri));
-        assert!(
-            !result
-                .locations
-                .iter()
-                .find(|l| l.uri == inside_uri)
-                .unwrap()
-                .out_of_workspace,
-            "an in-workspace reference location must not be marked out_of_workspace"
-        );
-        assert!(
+        let by_uri = |uri: &str| {
             result
                 .locations
                 .iter()
-                .find(|l| l.uri == outside_uri)
+                .map(|l| &l.inner)
+                .find(|l| l.uri.as_ref() == uri)
                 .unwrap()
-                .out_of_workspace,
+        };
+        assert!(
+            !by_uri(&inside_uri).out_of_workspace,
+            "an in-workspace reference location must not be marked out_of_workspace"
+        );
+        assert!(
+            by_uri(outside_uri).out_of_workspace,
             "an out-of-workspace reference location must be marked out_of_workspace"
         );
     }
@@ -1847,7 +1924,7 @@ mod tests {
             let path = path.to_string_lossy().to_string();
             tokio::spawn(async move {
                 translator
-                    .handle_references(client_path(path), pos(1, 1), true, ResultContext::None)
+                    .handle_references(client_path(path), pos(1, 1), true, LocationContext::None)
                     .await
             })
         };
@@ -1921,7 +1998,7 @@ mod tests {
                     .handle_implementation(
                         client_path(path),
                         Position::at(1, 1),
-                        ResultContext::None,
+                        LocationContext::None,
                     )
                     .await
             })
@@ -1962,8 +2039,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.locations.len(), 2);
-        assert_eq!(result.locations[0].uri, first_impl_uri);
-        assert_eq!(result.locations[1].uri, second_impl_uri);
+        assert_eq!(
+            result.locations[0].inner.location.uri.as_ref(),
+            first_impl_uri
+        );
+        assert_eq!(
+            result.locations[1].inner.location.uri.as_ref(),
+            second_impl_uri
+        );
     }
 
     /// `handle_declaration` flattens a plain `Declaration::LocationList` and
@@ -1990,7 +2073,7 @@ mod tests {
             let path = client_path(&path);
             tokio::spawn(async move {
                 translator
-                    .handle_declaration(path, pos(1, 1), ResultContext::None)
+                    .handle_declaration(path, pos(1, 1), LocationContext::None)
                     .await
             })
         };
@@ -2021,7 +2104,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.locations.len(), 1);
-        assert_eq!(result.locations[0].uri, decl_uri);
+        assert_eq!(result.locations[0].inner.location.uri.as_ref(), decl_uri);
     }
 
     /// `handle_declaration` maps `DeclarationLink[]` through `targetSelectionRange`.
@@ -2047,7 +2130,7 @@ mod tests {
             let path = client_path(&path);
             tokio::spawn(async move {
                 translator
-                    .handle_declaration(path, pos(1, 1), ResultContext::None)
+                    .handle_declaration(path, pos(1, 1), LocationContext::None)
                     .await
             })
         };
@@ -2081,7 +2164,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.locations.len(), 1);
-        assert_eq!(result.locations[0].range.start.character, 8);
+        assert_eq!(
+            result.locations[0]
+                .inner
+                .location
+                .range
+                .start
+                .character()
+                .get(),
+            8
+        );
     }
 
     /// An empty declaration answer is an empty result, not an error (FR-003).
@@ -2104,7 +2196,7 @@ mod tests {
             let path = client_path(&path);
             tokio::spawn(async move {
                 translator
-                    .handle_declaration(path, pos(1, 1), ResultContext::None)
+                    .handle_declaration(path, pos(1, 1), LocationContext::None)
                     .await
             })
         };
@@ -2150,7 +2242,7 @@ mod tests {
         fs::write(&path, "fn main() {}").unwrap();
 
         let err = translator
-            .handle_declaration(client_path(&path), pos(1, 1), ResultContext::None)
+            .handle_declaration(client_path(&path), pos(1, 1), LocationContext::None)
             .await
             .unwrap_err();
 
@@ -2190,7 +2282,7 @@ mod tests {
                     .handle_type_definition(
                         client_path(path),
                         Position::at(1, 1),
-                        ResultContext::None,
+                        LocationContext::None,
                     )
                     .await
             })
@@ -2226,8 +2318,64 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.locations.len(), 1);
-        assert_eq!(result.locations[0].uri, target_uri);
-        assert_eq!(result.locations[0].range.start.character, 8);
+        assert_eq!(result.locations[0].inner.location.uri.as_ref(), target_uri);
+        assert_eq!(
+            result.locations[0]
+                .inner
+                .location
+                .range
+                .start
+                .character()
+                .get(),
+            8
+        );
+    }
+
+    #[test]
+    fn test_target_ranges_are_normalized_only_for_symbol_source() {
+        assert_eq!(
+            TargetRanges::from(LocationContext::SymbolSource),
+            TargetRanges::Normalize
+        );
+        assert_eq!(
+            TargetRanges::from(LocationContext::None),
+            TargetRanges::Skip
+        );
+        assert_eq!(
+            TargetRanges::from(LocationContext::EnclosingSymbol),
+            TargetRanges::Skip
+        );
+    }
+
+    #[tokio::test]
+    async fn test_normalize_locations_keeps_each_link_target_with_its_location() {
+        let ctx = test_ctx_with(PositionEncoding::Utf8);
+        let at = |line| lsp_types::Range {
+            start: lsp_types::Position { line, character: 0 },
+            end: lsp_types::Position { line, character: 1 },
+        };
+        let uri = path_to_uri(std::path::Path::new("/nonexistent/a.rs")).unwrap();
+        let locs = vec![
+            (
+                lsp_types::Location {
+                    uri: uri.clone(),
+                    range: at(1),
+                },
+                Some(at(5)),
+            ),
+            (lsp_types::Location { uri, range: at(2) }, None),
+        ];
+
+        let kept = normalize_locations(locs.clone(), &ctx, TargetRanges::Normalize).await;
+        assert_eq!(
+            kept.locations
+                .iter()
+                .map(|l| l.target_range.is_some())
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+        let skipped = normalize_locations(locs, &ctx, TargetRanges::Skip).await;
+        assert!(skipped.locations.iter().all(|l| l.target_range.is_none()));
     }
 
     // -----------------------------------------------------------------
@@ -2274,7 +2422,10 @@ mod tests {
         assert_eq!(result.locations.len(), 300);
         assert!(!result.truncated);
         assert!(
-            result.locations.iter().all(|l| l.range.end.character == 4),
+            result
+                .locations
+                .iter()
+                .all(|l| l.location.range.end.character().get() == 4),
             "MCP columns are 1-based, so LSP byte offset 3 in all-ASCII \"hello\" must convert \
              to 4"
         );

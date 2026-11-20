@@ -140,7 +140,14 @@ macro_rules! name_addressing_note {
     };
 }
 
-/// Tool-description sentence for tools accepting `context: \"enclosing_symbol\"`.
+/// Shared description of location source options.
+macro_rules! location_source_note {
+    () => {
+        "context:enclosing_symbol adds enclosing metadata. context:symbol_source adds a bounded body to source. broader_context:true requests a location excerpt. include_source:true returns the excerpt in source when neither option claims it. Otherwise the excerpt appears once in broader_context. truncated marks omitted locations. positions_degraded request means uncertain query; response means inexact columns. out_of_workspace is advisory."
+    };
+}
+
+/// Tool-description sentence for tools accepting enclosing-symbol context.
 macro_rules! enclosing_symbol_note {
     () => {
         "Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`."
@@ -1045,7 +1052,7 @@ impl McplsServer {
                     .and_then(serde_json::Value::as_object_mut)
             {
                 if let Some(properties) = definitions
-                    .get_mut("NavigationLocation")
+                    .get_mut("NavigationObservation")
                     .and_then(|schema| schema.get_mut("properties"))
                     .and_then(serde_json::Value::as_object_mut)
                 {
@@ -1146,7 +1153,7 @@ impl McplsServer {
 
     /// Get the definition location of a symbol.
     #[tool(
-        description = concat!("Definition location of a symbol. include_targets:true adds portable symbol_target objects; default false. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Definition locations. Address by absolute file_path with 1-based UTF-16 coordinates, symbol_name or portable target. include_targets:true returns reusable targets. ", location_source_note!()),
         title = "Go to Definition"
     )]
     async fn get_definition(
@@ -1157,6 +1164,7 @@ impl McplsServer {
                     target,
                     context,
                     include_source,
+                    broader_context,
                 },
             include_targets,
         }): Parameters<DefinitionParams>,
@@ -1167,18 +1175,19 @@ impl McplsServer {
             AddressableTool::Definition,
             |file_path, position| async move {
                 let mut result = translator
-                    .handle_definition_with_source(file_path, position, context, include_source)
+                    .handle_definition_with_source(
+                        file_path,
+                        position,
+                        context,
+                        include_source,
+                        broader_context,
+                    )
                     .await?;
                 if include_targets {
                     let entries = result
                         .locations
                         .iter()
-                        .map(|entry| {
-                            (
-                                entry.location.uri.clone(),
-                                entry.location.range.start.clone(),
-                            )
-                        })
+                        .map(|entry| (entry.location.uri.clone(), entry.location.range.start))
                         .collect::<Vec<_>>();
                     let targets = translator
                         .portable_targets(
@@ -1201,7 +1210,7 @@ impl McplsServer {
 
     /// Find all references to a symbol.
     #[tool(
-        description = "References including duplicates. include_targets:true adds symbol_target or symbol_target_unavailable at each retained range.start; default false. Copy targets unchanged to definition or context tools. Files mode has no target enrichment. Acquisition is bounded; analysis freshness is unknown. Address by absolute file_path with 1-based line/character, symbol_name, or portable target. mode:locations(default) returns locations; mode:files returns empty locations and file_summary: first-seen exact-URI groups with count,first example,file_path. Reuse file_path as lexical path_filter; unsupported paths:null+unsupported_uri. limit:10(1..10000) bounds locations/groups. Files scan caps:100000 locations,8388608 URI bytes,10000 matching URIs; whole-summary cap:65536 JSON bytes. counts_complete:false means lower bounds; output_truncated means known groups omitted. truncated never proves workspace coverage. include_source:false; true adds bounded text/unavailable. context:enclosing_symbol opts in. Snapshots are not atomic.",
+        description = "References in server order with duplicates. Files mode groups exact URIs and retains first examples within 64 KiB. Reuse the group file_path as path_filter. include_targets adds portable location targets. context:symbol_source adds bodies to source and requires locations mode. broader_context adds excerpts. include_source adds excerpts under source, or broader_context when combined with symbol_source. truncated marks omitted results or incomplete counts. out_of_workspace is advisory. positions_degraded request means uncertain query; response means inexact columns.",
         title = "Find References"
     )]
     async fn get_references(
@@ -1233,7 +1242,7 @@ impl McplsServer {
                         .result
                         .locations
                         .iter()
-                        .map(|entry| (entry.uri.clone(), entry.range.start.clone()))
+                        .map(|entry| (entry.uri.clone(), entry.range.start))
                         .collect::<Vec<_>>();
                     let targets = translator
                         .portable_targets(
@@ -1513,7 +1522,7 @@ impl McplsServer {
             let entries = result
                 .symbols
                 .iter()
-                .map(|entry| (uri.to_string(), entry.position.clone()))
+                .map(|entry| (uri.clone(), entry.position))
                 .collect::<Vec<_>>();
             let targets = translator.portable_targets(entries, reason).await;
             for (entry, target) in result.symbols.iter_mut().zip(targets) {
@@ -1566,6 +1575,7 @@ impl McplsServer {
         }): Parameters<WorkspaceSymbolParams>,
     ) -> Result<Json<WorkspaceSymbolResult>, McpError> {
         let kind_filter = parse_kind_filter(kind_filter, KindFilterField::KindFilter)?;
+        let query = crate::bridge::WorkspaceQuery::new(query).map_err(client_input_error)?;
         let translator = &self.context.translator;
         let mut result = translator
             .handle_workspace_symbol(query, kind_filter, limit)
@@ -1575,12 +1585,7 @@ impl McplsServer {
             let entries = result
                 .symbols
                 .iter()
-                .map(|entry| {
-                    (
-                        entry.location.uri.clone(),
-                        entry.location.range.start.clone(),
-                    )
-                })
+                .map(|entry| (entry.location.uri.clone(), entry.location.range.start))
                 .collect::<Vec<_>>();
             let targets = translator
                 .portable_targets(
@@ -1987,7 +1992,7 @@ impl McplsServer {
 
     /// Get recent LSP server log messages.
     #[tool(
-        description = "Recent server log messages. Filter by level (error, warning, info, debug) for debugging.",
+        description = "Recent server log messages. Filter by level (error, warning, info, log, debug) for debugging.",
         title = "Server Logs"
     )]
     async fn get_server_logs(
@@ -2040,7 +2045,7 @@ impl McplsServer {
 
     /// Go to implementation locations.
     #[tool(
-        description = concat!("Implementation locations of a trait method or interface member. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Capped at a fixed maximum for an extremely common trait/interface; `truncated: true` on the result means more implementations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Trait or interface implementation locations. Address by absolute file_path with 1-based UTF-16 coordinates or symbol_name. ", location_source_note!()),
         title = "Go to Implementation"
     )]
     async fn go_to_implementation(
@@ -2049,6 +2054,7 @@ impl McplsServer {
             target,
             context,
             include_source,
+            broader_context,
         }): Parameters<NavigationParams>,
     ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
@@ -2061,6 +2067,7 @@ impl McplsServer {
                     position,
                     context,
                     include_source,
+                    broader_context,
                 )
             },
         )
@@ -2069,7 +2076,7 @@ impl McplsServer {
 
     /// Go to type definition location.
     #[tool(
-        description = concat!("Type definition location of an expression or symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Distinct from go-to-definition for variable bindings. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. ", name_addressing_note!(), " ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Type definition locations for an expression or symbol. Address by absolute file_path with 1-based UTF-16 coordinates or symbol_name. ", location_source_note!()),
         title = "Go to Type Definition"
     )]
     async fn go_to_type_definition(
@@ -2078,6 +2085,7 @@ impl McplsServer {
             target,
             context,
             include_source,
+            broader_context,
         }): Parameters<NavigationParams>,
     ) -> Result<Json<Addressed<crate::bridge::NavigationResult>>, McpError> {
         let translator = &self.context.translator;
@@ -2090,6 +2098,7 @@ impl McplsServer {
                     position,
                     context,
                     include_source,
+                    broader_context,
                 )
             },
         )
@@ -2098,7 +2107,7 @@ impl McplsServer {
 
     /// Go to declaration location.
     #[tool(
-        description = concat!("Declaration location of the symbol at position. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Differs from go-to-definition for languages that separate declaration from definition (C/C++ headers, interface members); servers without a declaration concept may return the definition. An empty result is valid. Capped at a fixed maximum; `truncated: true` on the result means more locations exist than are returned. ", positions_note_request!(), " ", enclosing_symbol_note!(), " ", out_of_workspace_note!()),
+        description = concat!("Declaration locations at absolute file_path with 1-based UTF-16 coordinates. Some providers return the definition. ", location_source_note!()),
         title = "Go to Declaration"
     )]
     async fn go_to_declaration(
@@ -2112,6 +2121,7 @@ impl McplsServer {
                 },
             context,
             include_source,
+            broader_context,
         }): Parameters<DeclarationParams>,
     ) -> Result<Json<crate::bridge::NavigationResult>, McpError> {
         let file_path = parse_client_path(file_path)?;
@@ -2123,6 +2133,7 @@ impl McplsServer {
                     parse_position(line, character)?,
                     context,
                     include_source,
+                    broader_context,
                 )
                 .await,
         )
@@ -2327,7 +2338,7 @@ impl McplsServer {
                     .map_err(|e| self.render_error(e.into()))?;
                 if !rollback.newly_created() {
                     tracing::debug!(
-                        "client re-subscribed to already-subscribed resource {canonical_uri}"
+                        %canonical_uri, "client re-subscribed to already-subscribed resource"
                     );
                 }
 
@@ -2366,7 +2377,7 @@ impl McplsServer {
                         ))
                         .await
                 {
-                    tracing::warn!("Failed to replay cached diagnostics for {canonical_uri}: {e}");
+                    tracing::warn!(%canonical_uri, error = %e, "Failed to replay cached diagnostics");
                 }
 
                 Ok(rollback)
@@ -2671,7 +2682,7 @@ async fn contain_panic<T>(
     match crate::util::catch_panic(handler).await {
         Ok(result) => result,
         Err(panicked) => {
-            tracing::error!("{operation} handler panicked: {}", panicked.message());
+            tracing::error!(%operation, panic = %panicked.message(), "handler panicked");
             Err(McpError::internal_error(
                 format!("{operation} handler panicked"),
                 None,
@@ -2876,8 +2887,9 @@ impl ServerHandler for McplsServer {
                         let uri = make_uri(path)
                             .inspect_err(|e| {
                                 tracing::warn!(
-                                    "Skipping path in list_resources (make_uri failed): {}: {e}",
-                                    path.display()
+                                    path = %path.display(),
+                                    error = %e,
+                                    "Skipping path in list_resources (make_uri failed)"
                                 );
                             })
                             .ok()?;
@@ -3042,8 +3054,8 @@ impl ServerHandler for McplsServer {
 
                 if !session.unsubscribe(canonical.as_ref(), &request.uri).await {
                     tracing::debug!(
-                        "client unsubscribed from resource with no matching subscription: {}",
-                        request.uri
+                        uri = %request.uri,
+                        "client unsubscribed from resource with no matching subscription"
                     );
                 }
                 Ok(())
@@ -3208,7 +3220,7 @@ mod tests {
     use super::*;
     use crate::bridge::resources::ResourceSubscriptions;
     use crate::bridge::{
-        Capability, IndexingSignal, LogLevel, NewName, ResultContext, RouteSignals,
+        Capability, IndexingSignal, LocationContext, LogLevel, NewName, ResultContext, RouteSignals,
     };
     use crate::config::{
         FileExtension, LanguageId, McpDescription, McpInstructions, McpTitle, ServerCommand,
@@ -3412,7 +3424,7 @@ mod tests {
     #[test]
     fn test_map_bridge_error_caller_fault_variants_use_invalid_params() {
         let caller_fault_errors = vec![
-            crate::error::Error::InvalidToolParams("bad params".to_string()),
+            crate::error::Error::NotFileUri(crate::error::EchoedUri::new("bad params")),
             crate::error::Error::PathOutsideWorkspace(PathBuf::from("/etc/passwd")),
             crate::error::Error::NotARegularFile(PathBuf::from("/dev/null")),
             crate::error::Error::NoResolvableListenUris,
@@ -3560,7 +3572,7 @@ mod tests {
         assert!(!data.contains("bravo-secret-222"), "{data}");
 
         let plain = render_error(
-            crate::error::Error::InvalidToolParams("nothing secret".into()),
+            crate::error::Error::NotFileUri(crate::error::EchoedUri::new("nothing secret")),
             &redactions,
         );
         assert!(
@@ -3584,8 +3596,8 @@ mod tests {
             ProjectConfigStatus::NotIgnored,
             McpConfig::default(),
         );
-        let rendered = server.render_error(crate::error::Error::InvalidToolParams(
-            "token bravo-secret-222".to_owned(),
+        let rendered = server.render_error(crate::error::Error::NotFileUri(
+            crate::error::EchoedUri::new("token bravo-secret-222"),
         ));
         assert!(
             !rendered.message.contains("bravo-secret-222"),
@@ -3760,7 +3772,7 @@ mod tests {
         }
     }
 
-    /// #636: a hierarchy item with a zero, oversized or reversed range is
+    /// #636: a hierarchy item with an oversized or reversed range is
     /// `-32602` for every walking tool, before any server is asked.
     #[tokio::test]
     async fn test_hierarchy_tools_reject_out_of_range_item_as_invalid_params() {
@@ -3775,11 +3787,7 @@ mod tests {
             .unwrap()
         };
         for (range, selection) in [
-            ((0, 1), (1, 1)),
-            ((1, 0), (1, 1)),
             ((1, 1_000_001), (1, 1)),
-            ((1, 1), (0, 1)),
-            ((1, 1), (1, 0)),
             ((1, 1), (1, 1_000_001)),
             ((1, 1), (4_294_967_295, 1)),
             ((1, 1), (1, 4_294_967_295)),
@@ -3837,6 +3845,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An over-long workspace symbol query is `-32602` naming `query`, before
+    /// any server is asked; an empty one is accepted by the boundary.
+    #[tokio::test]
+    async fn test_workspace_symbol_search_rejects_over_long_query_as_invalid_params() {
+        let server = create_test_server();
+        let params = |query: String| {
+            Parameters(WorkspaceSymbolParams {
+                include_targets: false,
+                query,
+                kind_filter: None,
+                limit: 10,
+            })
+        };
+        let err = server
+            .workspace_symbol_search(params(
+                "q".repeat(crate::bridge::MAX_WORKSPACE_QUERY_BYTES + 1),
+            ))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("query"), "{}", err.message);
+
+        let err = server
+            .workspace_symbol_search(params(String::new()))
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    /// The `-32602` text of a typed client-input error names its cause once,
+    /// not again as the error's source.
+    #[test]
+    fn test_typed_input_errors_state_their_message_once_on_the_wire() {
+        let too_long = crate::bridge::WorkspaceQuery::new("q".repeat(2_000)).unwrap_err();
+        assert_eq!(
+            map_bridge_error(too_long.into()).message,
+            "invalid tool parameters: `query` exceeds the maximum of 1000 bytes (2000 given)"
+        );
+
+        let unknown = crate::bridge::KindFilterInput::<crate::bridge::SymbolKindFilter>::from(
+            "nope".to_owned(),
+        )
+        .into_known(KindFilterField::KindFilter)
+        .unwrap_err();
+        let inner = unknown.to_string();
+        let message = map_bridge_error(unknown.into()).message;
+        assert_eq!(message, format!("invalid tool parameters: {inner}"));
+        assert_eq!(message.matches("Valid values").count(), 1, "{message}");
+
+        let uri = crate::error::Error::NotFileUri(crate::error::EchoedUri::new("untitled:x"));
+        assert_eq!(
+            map_bridge_error(uri).message,
+            "invalid tool parameters: Invalid URI, expected an absolute file:// URI but got: untitled:x"
+        );
     }
 
     /// An unknown `kind_filter` keeps its `-32602` class, in any case a known
@@ -4049,7 +4115,7 @@ mod tests {
                         options: crate::bridge::ReferenceOptions::default(),
                         target: position(line, character).into(),
                         include_declaration: false,
-                        context: crate::bridge::ResultContext::None,
+                        context: crate::bridge::LocationContext::None,
                     }))
                     .await
                     .map(|_| ()),
@@ -4374,7 +4440,7 @@ mod tests {
             }
             .into(),
             include_declaration: false,
-            context: ResultContext::None,
+            context: LocationContext::None,
         });
 
         let result = server.get_references(params).await;
@@ -5527,14 +5593,8 @@ mod tests {
                     analysis_freshness: crate::bridge::AnalysisFreshness::Unknown,
                     edits: Some(vec![TextEdit {
                         range: Range {
-                            start: Position2D {
-                                line: 1,
-                                character: 1,
-                            },
-                            end: Position2D {
-                                line: 1,
-                                character: 2,
-                            },
+                            start: Position2D::at(1, 1),
+                            end: Position2D::at(1, 2),
                         },
                         new_text: "SuperSecretValue123".to_owned(),
                     }]),
@@ -5599,16 +5659,17 @@ mod tests {
             &mut notification,
             &Redactions::new([("API_TOKEN".to_owned(), "SuperSecretValue123".to_owned())]),
         );
-        let LspNotification::PublishDiagnostics(params) = notification else {
+        let LspNotification::PublishDiagnostics(publish) = notification else {
             panic!("expected publishDiagnostics");
         };
+        let (uri, _, diagnostics) = publish.into_parts();
         {
             let mut cache = server.context.notification_cache.lock().await;
             cache.store_diagnostics(
                 &crate::config::ServerId::from_static("rust"),
-                &params.uri,
+                uri.uri(),
                 None,
-                params.diagnostics,
+                diagnostics,
             );
         }
 
@@ -6225,6 +6286,9 @@ sleep 0.3
         let parsed: ServerLogsParams =
             serde_json::from_value(serde_json::json!({"min_level": "warning"})).unwrap();
         assert_eq!(parsed.min_level, Some(LogLevel::Warning));
+        let parsed: ServerLogsParams =
+            serde_json::from_value(serde_json::json!({"min_level": "log"})).unwrap();
+        assert_eq!(parsed.min_level, Some(LogLevel::Log));
     }
 
     #[tokio::test]
@@ -9147,8 +9211,8 @@ sleep 0.3
         assert!(schema.contains("enclosing_symbol") && schema.contains("\"none\""));
     }
 
-    /// `context` accepts the two closed values, defaults to `none`, and
-    /// rejects anything else before a handler runs.
+    /// `context` accepts its closed values (`symbol_source` only on the location
+    /// tools), defaults to `none`, and rejects anything else before a handler runs.
     #[test]
     fn test_context_param_deserialization() {
         let base = |context: Option<&str>| {
@@ -9160,13 +9224,24 @@ sleep 0.3
         };
         let parse = |value| serde_json::from_value::<NavigationParams>(value);
 
-        assert_eq!(parse(base(None)).unwrap().context, ResultContext::None);
+        assert_eq!(parse(base(None)).unwrap().context, LocationContext::None);
         assert_eq!(
             parse(base(Some("enclosing_symbol"))).unwrap().context,
-            ResultContext::EnclosingSymbol
+            LocationContext::EnclosingSymbol
+        );
+        assert_eq!(
+            parse(base(Some("symbol_source"))).unwrap().context,
+            LocationContext::SymbolSource
         );
         assert!(parse(base(Some("bogus"))).is_err());
         assert!(serde_json::from_value::<ReferencesParams>(base(Some("bogus"))).is_err());
+        assert!(
+            serde_json::from_value::<DiagnosticsParams>(serde_json::json!({
+                "file_path": "/a.rs",
+                "context": "symbol_source",
+            }))
+            .is_err()
+        );
         assert!(
             serde_json::from_value::<DiagnosticsParams>(serde_json::json!({
                 "file_path": "/a.rs",
@@ -9349,7 +9424,7 @@ sleep 0.3
     /// Calls the real handler for `tool` with canned params against `file`,
     /// discarding the payload. The exhaustive match makes a new `McpTool`
     /// variant fail to compile until it is wired into the parity matrix.
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "one arm per tool; splitting would only scatter the exhaustive match"
     )]
@@ -9382,13 +9457,13 @@ sleep 0.3
         };
         let type_item = || {
             let uri = url::Url::from_file_path(file).unwrap().to_string();
-            let at = |character| crate::bridge::Position2D { line: 1, character };
+            let at = |character| crate::bridge::Position2D::at(1, character);
             TypeHierarchyWalkParams::Item {
                 item: crate::bridge::HierarchyItem {
                     name: "T".to_string(),
                     kind: 5,
                     detail: None,
-                    uri,
+                    uri: uri.into(),
                     range: crate::bridge::Range {
                         start: at(1),
                         end: at(11),
@@ -9426,7 +9501,7 @@ sleep 0.3
                     options: crate::bridge::ReferenceOptions::default(),
                     target: position().into(),
                     include_declaration: false,
-                    context: ResultContext::None,
+                    context: crate::bridge::LocationContext::None,
                 }))
                 .await
                 .map(|_| ()),

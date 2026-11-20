@@ -171,9 +171,7 @@ impl McplsServer {
         };
         let server = runtime_server.as_deref().unwrap_or(self);
         let resident = lease.as_ref().map(|lease| &lease.resident);
-        let invalidated = resident
-            .map(|resident| resident.cancel())
-            .unwrap_or_default();
+        let invalidated = resident.map_or_default(|resident| resident.cancel());
         let context = arguments.get("context").cloned();
         let input_count = paths.len();
         let reads = stream::iter(paths.into_iter().zip(read_paths).enumerate().map(

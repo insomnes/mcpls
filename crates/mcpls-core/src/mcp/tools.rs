@@ -7,15 +7,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
     CodeActionKindFilter, CompletionTrigger, FoldingKindFilter, HierarchyItem, InvalidTextField,
-    KindFilterField, KindFilterInput, LogLevel, MAX_RESTART_SERVER_IDS, MAX_SERVER_ID_BYTES,
-    NewName, Position, Position2D, Range, RestartTarget, ResultContext, ServerIds, ServerIdsError,
-    SymbolKindFilter, SymbolName, SymbolQuery, SymbolTarget, TabSize, TextField,
+    KindFilterField, KindFilterInput, LocationContext, LogLevel, MAX_RESTART_SERVER_IDS,
+    MAX_SERVER_ID_BYTES, NewName, Position, Position2D, Range, RestartTarget, ResultContext,
+    ServerIds, ServerIdsError, SymbolKindFilter, SymbolName, SymbolQuery, SymbolTarget, TabSize,
+    TextField,
 };
 use crate::error::Error;
 
 /// Schema description of the opt-in `context` input shared by every tool that
 /// can attach enclosing symbols.
 const CONTEXT_DESCRIPTION: &str = "Extra context: `none` (default) or `enclosing_symbol` (innermost symbol, one request per file).\n\nAttaches the name path, kind and range of the innermost containing symbol. Costs one documentSymbol request per distinct file, capped per call.";
+
+/// `context` description of the five location tools, which also accept `symbol_source`.
+const LOCATION_CONTEXT_DESCRIPTION: &str = "Extra context: `none` (default), `enclosing_symbol` (one request per file) or `symbol_source`.\n\nAttaches the name path, kind and range of the innermost containing symbol; `symbol_source` adds its bounded text as `source`. Costs one documentSymbol request per distinct file, capped per call.";
 
 /// Declares a wire struct whose first fields are a file path and a 1-based
 /// position, followed by the tool's own fields.
@@ -327,7 +331,7 @@ impl SymbolTargetInput {
     ///
     /// Returns [`Error::InvalidPositionInput`] for a position below 1 or above
     /// [`MAX_POSITION_VALUE`](crate::bridge::MAX_POSITION_VALUE), and
-    /// [`Error::InvalidToolParams`] for a `symbol_kind` that names no kind.
+    /// [`Error::InvalidKindFilter`] for a `symbol_kind` that names no kind.
     pub fn into_target(self) -> Result<SymbolTarget, Error> {
         match self {
             Self::Reference(reference) => Ok(SymbolTarget::Reference(reference)),
@@ -438,15 +442,18 @@ reusable_target_wire! {
         #[schemars(description = "Attach bounded source excerpts or explicit unavailable reasons; default false.")]
         #[serde(default)]
         include_source: bool,
+        #[schemars(description = "Attach the location excerpt as broader_context; default false.")]
+        #[serde(default)]
+        broader_context: bool,
         #[schemars(description = "Attach portable targets to retained locations; default false. Files mode is unchanged.")]
         #[serde(default)]
         include_targets: bool,
         #[schemars(description = "Whether to include the declaration in the results.")]
         #[serde(default)]
         include_declaration: bool,
-        #[schemars(description = CONTEXT_DESCRIPTION)]
+        #[schemars(description = LOCATION_CONTEXT_DESCRIPTION)]
         #[serde(default)]
-        context: ResultContext,
+        context: LocationContext,
     }
 }
 
@@ -468,7 +475,7 @@ pub struct ReferencesParams {
     /// Whether to include the declaration in the results.
     pub include_declaration: bool,
     /// Optional extra context for each returned item.
-    pub context: ResultContext,
+    pub context: LocationContext,
 }
 
 impl TryFrom<ReferencesWire> for ReferencesParams {
@@ -493,6 +500,7 @@ impl TryFrom<ReferencesWire> for ReferencesParams {
                 limit: wire.limit,
                 path_filter: wire.path_filter.clone(),
                 include_source: wire.include_source,
+                broader_context: wire.broader_context,
             },
             target: wire.take_target()?,
             include_declaration: wire.include_declaration,
@@ -506,14 +514,17 @@ reusable_target_wire! {
     /// Wire form of [`DefinitionParams`].
     #[schemars(description = "Parameters for navigating from a symbol to related locations.")]
     DefinitionWire {
-        #[schemars(description = CONTEXT_DESCRIPTION)]
+        #[schemars(description = LOCATION_CONTEXT_DESCRIPTION)]
         #[serde(default)]
-        context: ResultContext,
+        context: LocationContext,
         #[serde(default)]
         include_targets: bool,
         #[schemars(description = "Attach bounded source observations; default false.")]
         #[serde(default)]
         include_source: bool,
+        #[schemars(description = "Attach the location excerpt as broader_context; default false.")]
+        #[serde(default)]
+        broader_context: bool,
     }
 }
 
@@ -546,6 +557,7 @@ impl TryFrom<DefinitionWire> for DefinitionParams {
                 target: wire.take_target()?,
                 context: wire.context,
                 include_source: wire.include_source,
+                broader_context: wire.broader_context,
             },
             include_targets: wire.include_targets,
         })
@@ -556,12 +568,15 @@ target_wire! {
     /// Wire form of [`NavigationParams`].
     #[schemars(description = "Parameters for navigating from a symbol to related locations.")]
     NavigationWire {
-        #[schemars(description = CONTEXT_DESCRIPTION)]
+        #[schemars(description = LOCATION_CONTEXT_DESCRIPTION)]
         #[serde(default)]
-        context: ResultContext,
+        context: LocationContext,
         #[schemars(description = "Attach bounded source observations; default false.")]
         #[serde(default)]
         include_source: bool,
+        #[schemars(description = "Attach the location excerpt as broader_context; default false.")]
+        #[serde(default)]
+        broader_context: bool,
     }
 }
 
@@ -574,9 +589,11 @@ pub struct NavigationParams {
     /// The symbol to navigate from.
     pub target: SymbolTargetParams,
     /// Optional extra context for each returned item.
-    pub context: ResultContext,
+    pub context: LocationContext,
     /// Attach bounded source observations; default false.
     pub include_source: bool,
+    /// Attach the location excerpt as `broader_context`; default false.
+    pub broader_context: bool,
 }
 
 impl TryFrom<NavigationWire> for NavigationParams {
@@ -587,6 +604,7 @@ impl TryFrom<NavigationWire> for NavigationParams {
             target: wire.take_target()?,
             context: wire.context,
             include_source: wire.include_source,
+            broader_context: wire.broader_context,
         })
     }
 }
@@ -596,8 +614,9 @@ impl From<PositionParams> for NavigationParams {
     fn from(position: PositionParams) -> Self {
         Self {
             target: position.into(),
-            context: ResultContext::None,
+            context: LocationContext::None,
             include_source: false,
+            broader_context: false,
         }
     }
 }
@@ -606,12 +625,15 @@ position_wire! {
     /// Wire form of [`DeclarationParams`].
     #[schemars(description = "Parameters for navigating from a position to its declaration.")]
     DeclarationWire {
-        #[schemars(description = CONTEXT_DESCRIPTION)]
+        #[schemars(description = LOCATION_CONTEXT_DESCRIPTION)]
         #[serde(default)]
-        context: ResultContext,
+        context: LocationContext,
         #[schemars(description = "Attach bounded source observations; default false.")]
         #[serde(default)]
         include_source: bool,
+        #[schemars(description = "Attach the location excerpt as broader_context; default false.")]
+        #[serde(default)]
+        broader_context: bool,
     }
 }
 
@@ -623,9 +645,11 @@ pub struct DeclarationParams {
     /// The position to navigate from.
     pub position: PositionParams,
     /// Optional extra context for each returned item.
-    pub context: ResultContext,
+    pub context: LocationContext,
     /// Attach bounded source observations; default false.
     pub include_source: bool,
+    /// Attach the location excerpt as `broader_context`; default false.
+    pub broader_context: bool,
 }
 
 impl From<DeclarationWire> for DeclarationParams {
@@ -638,6 +662,7 @@ impl From<DeclarationWire> for DeclarationParams {
             },
             context: wire.context,
             include_source: wire.include_source,
+            broader_context: wire.broader_context,
         }
     }
 }
@@ -647,8 +672,9 @@ impl From<PositionParams> for DeclarationParams {
     fn from(position: PositionParams) -> Self {
         Self {
             position,
-            context: ResultContext::None,
+            context: LocationContext::None,
             include_source: false,
+            broader_context: false,
         }
     }
 }
@@ -845,7 +871,7 @@ pub struct WorkspaceSymbolParams {
     /// Attach portable targets to retained entries; default false.
     #[serde(default)]
     pub include_targets: bool,
-    /// Search query for symbol names (supports partial matching).
+    /// Search query for symbol names (supports partial matching), at most 1000 bytes.
     #[schemars(description = "Search query for symbol names (supports partial matching).")]
     pub query: String,
     /// Optional filter by symbol kind: a name (function, class, variable,
@@ -932,9 +958,9 @@ fn without_default(schema: &mut schemars::Schema) {
 )]
 struct Position2DInput {
     /// Line number (1-based).
-    line: u32,
+    line: std::num::NonZeroU32,
     /// Character offset (1-based).
-    character: u32,
+    character: std::num::NonZeroU32,
 }
 
 /// Input form of [`Range`]: the same schema under the same name, closed to
@@ -985,10 +1011,7 @@ struct HierarchyItemInput {
 
 impl From<Position2DInput> for Position2D {
     fn from(position: Position2DInput) -> Self {
-        Self {
-            line: position.line,
-            character: position.character,
-        }
+        Self::from_mcp(position.line, position.character)
     }
 }
 
@@ -1007,7 +1030,7 @@ impl From<HierarchyItemInput> for HierarchyItem {
             name: item.name,
             kind: item.kind,
             detail: item.detail,
-            uri: item.uri,
+            uri: item.uri.into(),
             range: item.range.into(),
             selection_range: item.selection_range.into(),
             data: item.data,
@@ -1300,8 +1323,8 @@ pub struct ServerLogsParams {
     #[schemars(description = "Maximum number of log entries to return (default: 50).")]
     #[serde(default = "default_log_limit")]
     pub limit: usize,
-    /// Minimum log level to include: error, warning, info, debug.
-    #[schemars(description = "Minimum log level to include: error, warning, info, debug.")]
+    /// Minimum log level to include: error, warning, info, log, debug.
+    #[schemars(description = "Minimum log level to include: error, warning, info, log, debug.")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_level: Option<LogLevel>,
 }
@@ -1754,7 +1777,24 @@ mod tests {
         });
         let params: SymbolTargetParams = serde_json::from_value(json).unwrap();
         let error = params.target.into_target().unwrap_err();
-        assert_matches!(&error, Error::InvalidToolParams(message) if message.contains("Invalid symbol_kind: 'nope'"));
+        assert_matches!(&error, Error::InvalidKindFilter(invalid)
+            if invalid.field == KindFilterField::SymbolKind
+                && matches!(&invalid.rejection, crate::bridge::Rejection::Unknown(rejected) if rejected.as_str() == "nope"));
+    }
+
+    #[test]
+    fn the_workspace_query_schema_states_the_byte_bound() {
+        let schema = serde_json::to_value(schemars::schema_for!(WorkspaceSymbolParams)).unwrap();
+        let description = schema["properties"]["query"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            description.contains(&format!(
+                "{} bytes",
+                crate::bridge::MAX_WORKSPACE_QUERY_BYTES
+            )),
+            "{description}"
+        );
     }
 
     #[test]
@@ -1878,7 +1918,7 @@ mod tests {
     /// item must come back unchanged when a client passes it to a walking tool.
     #[test]
     fn hierarchy_item_input_round_trips_a_full_output_item() {
-        let at = |line, character| Position2D { line, character };
+        let at = |line, character| Position2D::at(line, character);
         let item = HierarchyItem {
             name: "Base".into(),
             kind: 5,

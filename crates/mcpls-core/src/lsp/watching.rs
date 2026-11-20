@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 use crate::lsp::types::JsonRpcError;
 
 pub(crate) fn unavailable(message: impl std::fmt::Display) -> Error {
-    tracing::warn!("File watching backend unavailable: {message}");
+    tracing::warn!(%message, "File watching backend unavailable");
     Error::FileWatchingUnavailable
 }
 
@@ -179,7 +179,7 @@ impl Backend {
     }
 
     #[cfg(target_os = "linux")]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "one resource-owning setup and subscription pump with bounded startup"
     )]

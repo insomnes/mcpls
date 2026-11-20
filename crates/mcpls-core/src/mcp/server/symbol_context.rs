@@ -88,10 +88,14 @@ fn point(value: &Value) -> Option<(u64, u64)> {
 fn inside(position: &Value, range: &Range) -> bool {
     point(position).is_some_and(|point| {
         (
-            u64::from(range.start.line),
-            u64::from(range.start.character),
+            u64::from(range.start.line().get()),
+            u64::from(range.start.character().get()),
         ) <= point
-            && point < (u64::from(range.end.line), u64::from(range.end.character))
+            && point
+                < (
+                    u64::from(range.end.line().get()),
+                    u64::from(range.end.character().get()),
+                )
     })
 }
 
@@ -106,10 +110,14 @@ fn intersects(value: &Value, range: &Range) -> bool {
         return value.get("start").is_some_and(|p| inside(p, range));
     }
     start < end
-        && start < (u64::from(range.end.line), u64::from(range.end.character))
+        && start
+            < (
+                u64::from(range.end.line().get()),
+                u64::from(range.end.character().get()),
+            )
         && (
-            u64::from(range.start.line),
-            u64::from(range.start.character),
+            u64::from(range.start.line().get()),
+            u64::from(range.start.character().get()),
         ) < end
 }
 
@@ -416,7 +424,7 @@ impl McplsServer {
             .await
             .map_err(|error| self.render_error(error))?;
         let mut position = resolved.position;
-        let mut query = json!({"file_path":path.as_path(),"position":Position2D{line:position.line().get(),character:position.character().get()}});
+        let mut query = json!({"file_path":path.as_path(),"position":Position2D::from_mcp(position.line(), position.character())});
         let definition = params.resolve == crate::mcp::tools::ContextResolve::Definition;
         let mut resolved = resolved;
         if definition && let Some(mut symbol) = resolved.resolved.take() {
@@ -425,7 +433,7 @@ impl McplsServer {
         }
         let resolution = if definition {
             let answer = translator
-                .handle_definition(path.clone(), position, ResultContext::None)
+                .handle_definition(path.clone(), position, crate::bridge::LocationContext::None)
                 .await;
             let mut evidence = json!({"status":"error","reason":"provider_error","candidates":[],"provider_truncated":false});
             let mut selected = None;
@@ -469,7 +477,7 @@ impl McplsServer {
             }
             let mut selected_target = Value::Null;
             if let Some((target_path, target_position)) = selected {
-                selected_target = json!({"file_path":target_path.as_path(),"position":Position2D{line:target_position.line().get(),character:target_position.character().get()},"range_fidelity":"unknown"});
+                selected_target = json!({"file_path":target_path.as_path(),"position":Position2D::from_mcp(target_position.line(), target_position.character()),"range_fidelity":"unknown"});
                 if translator
                     .context_target_authorized(&path, &target_path)
                     .await
@@ -535,7 +543,7 @@ impl McplsServer {
             degraded = resolved.positions_degraded;
             range = None;
         }
-        let mut target = json!({"file_path":path.as_path(),"position":Position2D{line:position.line().get(),character:position.character().get()},"range_fidelity":if range.is_some(){"symbol"}else{"unknown"}});
+        let mut target = json!({"file_path":path.as_path(),"position":Position2D::from_mcp(position.line(), position.character()),"range_fidelity":if range.is_some(){"symbol"}else{"unknown"}});
         if let Some(range) = &range {
             target["range"] = json!(range);
         }
@@ -597,8 +605,8 @@ impl McplsServer {
                         .as_ref()
                         .ok_or_else(|| McpError::internal_error("range disappeared", None))?;
                     match PositionRange::from_client(
-                        (range.start.line, range.start.character),
-                        (range.end.line, range.end.character),
+                        (range.start.line().get(), range.start.character().get()),
+                        (range.end.line().get(), range.end.character().get()),
                     ) {
                         Ok(range) => value(self.structured_result(
                             translator.handle_inlay_hints(path.clone(), range).await,

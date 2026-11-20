@@ -4,6 +4,8 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
+use crate::util::json_len;
+
 /// Key under which the `toml` crate encodes a datetime when deserializing
 /// into a self-describing format such as [`serde_json::Value`].
 const TOML_DATETIME_KEY: &str = "$__toml_private_datetime";
@@ -188,24 +190,74 @@ impl LspSettings {
     /// object when `section` is `None`. Missing sections yield `Null`.
     #[must_use]
     pub fn section(&self, section: Option<&str>) -> Value {
+        self.section_ref(section).into()
+    }
+
+    /// Borrows the section without cloning it, so a caller can bound the
+    /// reply size before paying for a copy.
+    pub(crate) fn section_ref(&self, section: Option<&str>) -> SectionRef<'_> {
         let Some(section) = section else {
-            return self.to_value();
+            return SectionRef::Whole(&self.0);
         };
         let mut segments = section.split('.');
         let Some(first) = segments.next() else {
-            return Value::Null;
+            return SectionRef::Missing;
         };
         let mut current = self.0.get(first);
         for segment in segments {
             current = current.and_then(|value| value.get(segment));
         }
-        current.cloned().unwrap_or(Value::Null)
+        current.map_or(SectionRef::Missing, SectionRef::Found)
+    }
+
+    /// The section of an item that selects nothing; serializes as `null`.
+    pub(crate) const fn missing_section() -> SectionRef<'static> {
+        SectionRef::Missing
     }
 
     /// Returns the whole settings object as a JSON value.
     #[must_use]
     pub fn to_value(&self) -> Value {
         Value::Object(self.0.clone())
+    }
+}
+
+/// A borrowed configuration section: the whole settings object, a subtree,
+/// or nothing (serialized as `null`).
+///
+/// Lets a caller measure and bound a `workspace/configuration` reply before
+/// paying for a deep clone of each section; convert with `Value::from`.
+#[derive(Debug, Clone, Copy)]
+pub enum SectionRef<'a> {
+    /// The whole settings object, selected by an item without a `section`.
+    Whole(&'a Map<String, Value>),
+    /// The subtree found by walking a dotted `section`.
+    Found(&'a Value),
+    /// An unknown section or an item that cannot be interpreted.
+    Missing,
+}
+
+/// Deep-clones the section into an owned JSON value.
+impl From<SectionRef<'_>> for Value {
+    fn from(section: SectionRef<'_>) -> Self {
+        match section {
+            SectionRef::Whole(map) => Self::Object(map.clone()),
+            SectionRef::Found(value) => value.clone(),
+            SectionRef::Missing => Self::Null,
+        }
+    }
+}
+
+impl SectionRef<'_> {
+    /// The serialized JSON length, measured without allocating the text.
+    pub(crate) fn serialized_len(self) -> usize {
+        let measured = match self {
+            Self::Whole(map) => json_len(map),
+            Self::Found(value) => json_len(value),
+            Self::Missing => json_len(&Value::Null),
+        };
+        // Serializing a `Value` cannot fail; saturate rather than undercount if it ever does.
+        measured.unwrap_or(usize::MAX)
     }
 }
 

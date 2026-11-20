@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::dto::{CheckedHierarchyItem, HierarchyItem, Position2D, PositionDegradation, Range};
+use super::dto::{CheckedHierarchyItem, PositionDegradation};
 use super::encoding_ctx::EncodingCtx;
 use super::hierarchy::{clamp_to_input_limit, hierarchy_item_to_lsp};
 use super::routing::{Capability, DisclosedCapability};
@@ -214,7 +214,7 @@ struct Graph {
     scope: PathBuf,
     origin: HierarchyOrigin,
     admissions: Vec<Admission>,
-    raw_ranges: Vec<Vec<Range>>,
+    raw_ranges: Vec<Vec<lsp_types::Range>>,
 }
 impl Graph {
     fn usage(&self, field: &str) -> usize {
@@ -311,22 +311,29 @@ fn empty(options: &CallGraphOptions) -> Value {
 }
 
 /// Normalize a canonical, authorized item. Keep original coordinates on failure.
-async fn normalized_item(
+async fn graph_item(
     translator: &Translator,
-    raw: lsp_types::CallHierarchyItem,
+    raw: &lsp_types::CallHierarchyItem,
+    data: Option<Value>,
     allowed: bool,
     origin: &HierarchyOrigin,
-) -> (HierarchyItem, bool, Option<PositionDegradation>) {
-    let mut item = HierarchyItem {
-        name: raw.name,
-        kind: u32::from(raw.kind),
-        detail: raw.detail,
-        uri: raw.uri.to_string(),
-        range: raw_range(raw.range),
-        selection_range: raw_range(raw.selection_range),
-        data: raw.data,
-        out_of_workspace: origin.encoding.is_out_of_workspace(&raw.uri),
-    };
+) -> (Value, bool, Option<PositionDegradation>) {
+    let mut item = json!({
+        "name": raw.name,
+        "kind": u32::from(raw.kind),
+        "uri": raw.uri,
+        "range": raw.range,
+        "selectionRange": raw.selection_range,
+    });
+    if let Some(detail) = &raw.detail {
+        item["detail"] = json!(detail);
+    }
+    if let Some(data) = data {
+        item["data"] = data;
+    }
+    if origin.encoding.is_out_of_workspace(&raw.uri) {
+        item["out_of_workspace"] = json!(true);
+    }
     if !allowed {
         return (item, false, None);
     }
@@ -339,22 +346,10 @@ async fn normalized_item(
     let selection_range = ctx.normalize_range(&raw.uri, raw.selection_range).await;
     let degraded = ctx.positions_degraded();
     if degraded.is_none() {
-        item.range = clamp_to_input_limit(range);
-        item.selection_range = clamp_to_input_limit(selection_range);
+        item["range"] = json!(clamp_to_input_limit(range));
+        item["selectionRange"] = json!(clamp_to_input_limit(selection_range));
     }
     (item, degraded.is_none(), degraded)
-}
-const fn raw_range(range: lsp_types::Range) -> Range {
-    Range {
-        start: Position2D {
-            line: range.start.line,
-            character: range.start.character,
-        },
-        end: Position2D {
-            line: range.end.line,
-            character: range.end.character,
-        },
-    }
 }
 
 impl Translator {
@@ -383,11 +378,9 @@ impl Translator {
     ) -> Result<Value> {
         let file = match &start {
             CallGraphStart::Target(file, _) => file.clone(),
-            CallGraphStart::Item(item) => ClientPath::try_from(
-                self.parse_file_uri(&lsp_types::Uri::from(item.uri()))
-                    .await?
-                    .into_path_buf(),
-            )?,
+            CallGraphStart::Item(item) => {
+                ClientPath::try_from(self.parse_file_uri(item.uri()).await?.into_path_buf())?
+            }
         };
         let validated = self.workspace_roots.validate(&file).await?;
         let scope = self
@@ -623,9 +616,9 @@ impl Translator {
         let values = if response.is_null() {
             &mut Vec::new()
         } else {
-            response.as_array_mut().ok_or_else(|| {
-                Error::InvalidToolParams("invalid hierarchy preparation response".into())
-            })?
+            response
+                .as_array_mut()
+                .ok_or(Error::InvalidHierarchyPreparation)?
         };
         let total = values.len();
         for raw in values {
@@ -656,13 +649,11 @@ impl Translator {
                 graph.reason("excluded_scope", false);
             }
             let data = raw.data.take();
-            let (mut item, normalized, degraded) =
-                normalized_item(self, raw.clone(), allowed, &graph.origin).await;
-            item.data = data;
+            let (item, normalized, degraded) =
+                graph_item(self, &raw, data, allowed, &graph.origin).await;
             if let Some(d) = degraded {
                 graph.degraded(d);
             }
-            let item = serde_json::to_value(item)?;
             graph.value["items"].as_array_mut().unwrap().push(item);
             graph.add("retained_data_bytes", bytes);
             if !graph.fits() {
@@ -700,9 +691,8 @@ impl Translator {
                     .iter_mut()
                     .zip(&graph.pending)
                 {
-                    item["range"] = serde_json::to_value(raw_range(pending.raw.range))?;
-                    item["selectionRange"] =
-                        serde_json::to_value(raw_range(pending.raw.selection_range))?;
+                    item["range"] = serde_json::to_value(pending.raw.range)?;
+                    item["selectionRange"] = serde_json::to_value(pending.raw.selection_range)?;
                 }
             }
             graph.pending.clear();
@@ -967,9 +957,8 @@ impl Translator {
         if new {
             let source = self.graph_source_identity(&raw, allowed);
             raw.data = None;
-            let (mut item, normalized, degraded) =
-                normalized_item(self, raw.clone(), allowed, &graph.origin).await;
-            item.data = opaque;
+            let (item, normalized, degraded) =
+                graph_item(self, &raw, opaque, allowed, &graph.origin).await;
             if let Some(d) = degraded {
                 graph.degraded(d);
             }
@@ -1009,7 +998,7 @@ impl Translator {
         let mut raw_ranges = Vec::with_capacity(decoded.len());
         let mut converted = Vec::with_capacity(decoded.len());
         for range in decoded {
-            raw_ranges.push(raw_range(range));
+            raw_ranges.push(range);
             if caller_allowed {
                 converted.push(ctx.normalize_range(&caller_uri, range).await);
             }
@@ -1060,17 +1049,17 @@ impl Translator {
             }
             graph.raw_ranges.push(distinct_raw);
             let ranges = if normalized {
-                converted
-            } else {
-                graph.raw_ranges[edges_before].clone()
-            };
-            let mut distinct = Vec::new();
-            for range in ranges {
-                if !distinct.contains(&range) {
-                    distinct.push(range);
+                let mut distinct = Vec::new();
+                for range in converted {
+                    if !distinct.contains(&range) {
+                        distinct.push(range);
+                    }
                 }
-            }
-            graph.value["edges"].as_array_mut().unwrap().push(json!({"caller":caller_id,"callee":callee_id,"from_ranges":distinct,
+                json!(distinct)
+            } else {
+                json!(graph.raw_ranges[edges_before])
+            };
+            graph.value["edges"].as_array_mut().unwrap().push(json!({"caller":caller_id,"callee":callee_id,"from_ranges":ranges,
                 "positions_encoding":if normalized {"utf-16"} else {graph.origin.encoding.encoding.as_str()},"positions_base":u8::from(normalized)}));
         }
         if !graph.fits() {

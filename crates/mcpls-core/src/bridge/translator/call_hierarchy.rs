@@ -298,26 +298,14 @@ mod tests {
             name: "queried_fn".to_string(),
             kind: 12,
             detail: None,
-            uri: uri.to_string(),
+            uri: uri.into(),
             range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             selection_range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             data: None,
             out_of_workspace: false,
@@ -407,7 +395,7 @@ mod tests {
     /// the real `handle_incoming_calls`/`handle_outgoing_calls` handlers, and
     /// pins the actual resulting error: `Error::FileIo` from
     /// `validate_path`'s `canonicalize()` call, not the old construction-time
-    /// `Error::InvalidToolParams`.
+    /// `Error::NotFileUri`.
     #[tokio::test]
     async fn test_handle_incoming_calls_with_nonexistent_file_uri_returns_file_io_not_invalid_uri()
     {
@@ -424,7 +412,7 @@ mod tests {
         );
         // `Url::to_file_path` on Windows requires a drive-letter first path
         // segment; a Unix-style path with none fails to convert at all
-        // (`uri_to_path` returns `None`, i.e. `Error::InvalidToolParams`)
+        // (`uri_to_path` returns `None`, i.e. `Error::NotFileUri`)
         // before ever reaching `canonicalize()`, trivially failing this
         // assertion for the wrong reason. Use a drive-letter path so the
         // test exercises the intended `FileIo` path on every platform.
@@ -483,9 +471,10 @@ mod tests {
             .handle_incoming_calls(checked_hierarchy_item(item))
             .await;
 
-        let Err(Error::InvalidToolParams(message)) = result else {
-            panic!("expected InvalidToolParams, got {result:?}");
+        let Err(Error::NotFileUri(echoed)) = result else {
+            panic!("expected NotFileUri, got {result:?}");
         };
+        let message = echoed.as_str();
         assert!(
             message.len() <= 2 * crate::util::MAX_ECHOED_PATH_BYTES,
             "{}",
@@ -603,26 +592,14 @@ mod tests {
             name: "queried_method".to_string(),
             kind: 6, // SymbolKind::Method
             detail: None,
-            uri: queried_uri,
+            uri: queried_uri.into(),
             range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             selection_range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             data: None,
             out_of_workspace: false,
@@ -702,26 +679,14 @@ mod tests {
             name: "queried_fn".to_string(),
             kind: 12,
             detail: None,
-            uri: queried_uri,
+            uri: queried_uri.into(),
             range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             selection_range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             data: None,
             out_of_workspace: false,
@@ -775,7 +740,8 @@ mod tests {
         assert_eq!(result.calls.len(), 1);
         let from_range = &result.calls[0].from_ranges[0];
         assert_eq!(
-            from_range.end.character, 3,
+            from_range.end.character().get(),
+            3,
             "fromRanges must convert against the caller's own file (\"aöb\"), not the queried \
              item's (\"abc\") -- a byte offset of 3 is UTF-16 column 3 in the former, 4 in the \
              latter"
@@ -816,26 +782,14 @@ mod tests {
             name: "queried_fn".to_string(),
             kind: 12,
             detail: None,
-            uri: queried_uri,
+            uri: queried_uri.into(),
             range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             selection_range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             data: None,
             out_of_workspace: false,
@@ -893,7 +847,8 @@ mod tests {
         assert_eq!(result.calls.len(), 1);
         let from_range = &result.calls[0].from_ranges[0];
         assert_eq!(
-            from_range.end.character, 3,
+            from_range.end.character().get(),
+            3,
             "fromRanges must convert against the queried item's own file (\"aöb\"), not the \
              callee's (\"abc\") -- a byte offset of 3 is UTF-16 column 3 in the former, 4 in \
              the latter"
@@ -926,26 +881,14 @@ mod tests {
             name: "queried_fn".to_string(),
             kind: 12,
             detail: None,
-            uri: queried_uri,
+            uri: queried_uri.into(),
             range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             selection_range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             data: None,
             out_of_workspace: false,
@@ -1005,7 +948,7 @@ mod tests {
             1,
             "an out-of-workspace caller must be returned, not dropped"
         );
-        assert_eq!(result.calls[0].from.uri, outside_uri);
+        assert_eq!(result.calls[0].from.uri.as_ref(), outside_uri);
         assert!(
             result.calls[0].from.out_of_workspace,
             "an out-of-workspace caller must be marked out_of_workspace"
@@ -1034,26 +977,14 @@ mod tests {
             name: "queried_fn".to_string(),
             kind: 12,
             detail: None,
-            uri: queried_uri,
+            uri: queried_uri.into(),
             range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             selection_range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 4,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 4),
             },
             data: None,
             out_of_workspace: false,
@@ -1113,7 +1044,7 @@ mod tests {
             1,
             "an out-of-workspace callee must be returned, not dropped"
         );
-        assert_eq!(result.calls[0].to.uri, outside_uri);
+        assert_eq!(result.calls[0].to.uri.as_ref(), outside_uri);
         assert!(
             result.calls[0].to.out_of_workspace,
             "an out-of-workspace callee must be marked out_of_workspace"
@@ -1193,7 +1124,7 @@ mod tests {
             .result;
         assert_eq!(prepare_result.items.len(), 1);
         let item = prepare_result.items[0].clone();
-        assert!(item.uri.contains("%20"));
+        assert!(item.uri.as_ref().contains("%20"));
 
         let incoming_handle = {
             let translator = Arc::clone(&translator);

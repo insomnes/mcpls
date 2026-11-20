@@ -164,12 +164,12 @@ mod tests {
     }
 
     fn item_dto(uri: &str) -> HierarchyItem {
-        let at = |line, character| Position2D { line, character };
+        let at = |line, character| Position2D::at(line, character);
         HierarchyItem {
             name: "Derived".to_string(),
             kind: 5,
             detail: None,
-            uri: uri.to_string(),
+            uri: uri.into(),
             range: Range {
                 start: at(1, 1),
                 end: at(1, 5),
@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].name, "Base");
         assert_eq!(result.items[0].kind, 5);
-        assert_eq!(result.items[0].range.end.character, 5);
+        assert_eq!(result.items[0].range.end.character().get(), 5);
         assert!(!result.truncated);
     }
 

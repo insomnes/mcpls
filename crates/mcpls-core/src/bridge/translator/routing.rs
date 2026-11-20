@@ -13,10 +13,10 @@ use crate::bridge::{
 use crate::config::{
     FileKey, LanguageId, NoServerReason, ServerId, ToolKind, ToolRouter, base_language_id,
 };
-use crate::error::{Error, ErrorChain, Result, ServerSpawnFailure, StartupFailure};
+use crate::error::{EchoedUri, Error, ErrorChain, Result, ServerSpawnFailure, StartupFailure};
 use crate::lsp::LspClient;
 use crate::spelling::spelled_enum;
-use crate::util::{MAX_ECHOED_PATH_BYTES, escape_bounded, lock_std};
+use crate::util::lock_std;
 
 /// Total time `Translator::flush_pending_closes` may spend per call.
 const FLUSH_PENDING_CLOSES_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -315,7 +315,7 @@ impl Capability {
     }
 
     /// Whether `caps` advertises support for this capability.
-    #[allow(clippy::too_many_lines, reason = "one match arm per capability")]
+    #[expect(clippy::too_many_lines, reason = "one match arm per capability")]
     pub(crate) const fn is_supported(self, caps: &lsp_types::ServerCapabilities) -> bool {
         match self {
             Self::Completions => caps.completion_provider.is_some(),
@@ -483,10 +483,12 @@ impl schemars::JsonSchema for Capability {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "description": "LSP server capability the tool is gated on."
-        })
+        let mut schema = crate::spelling::spelled_schema::<Self>();
+        schema.insert(
+            "description".to_owned(),
+            "LSP server capability the tool is gated on.".into(),
+        );
+        schema
     }
 }
 
@@ -864,8 +866,9 @@ impl Translator {
                 server_id,
             } => {
                 tracing::error!(
-                    "router route names server '{server_id}' for tool '{tool}' that is neither \
-                     registered nor expected"
+                    %server_id,
+                    %tool,
+                    "router route names a server that is neither registered nor expected"
                 );
                 Err(Error::NoServerForTool {
                     language_id: language,
@@ -952,8 +955,8 @@ impl Translator {
             RouteLookup::Failed(failure) => DiagnosticsRoute::FailedToStart(failure),
             RouteLookup::Dangling { server_id, .. } => {
                 tracing::error!(
-                    "router diagnostics route names server '{server_id}' that is neither \
-                     registered nor expected"
+                    %server_id,
+                    "router diagnostics route names a server that is neither registered nor expected"
                 );
                 DiagnosticsRoute::Unrouted
             }
@@ -1112,7 +1115,7 @@ impl Translator {
         let line = position.line();
         match self
             .document_tracker
-            .line_presence(doc.path(), line.get().saturating_sub(1))
+            .line_presence(doc.path(), position.lsp_line())
         {
             LinePresence::Present => Ok(()),
             LinePresence::Beyond { last_line } => {
@@ -1472,12 +1475,8 @@ impl Translator {
     ///   [`crate::bridge::state::uri_to_path`])
     /// - The path is outside workspace boundaries
     pub(super) async fn parse_file_uri(&self, uri: &lsp_types::Uri) -> Result<WorkspacePath> {
-        let path = crate::bridge::state::uri_to_path(uri).ok_or_else(|| {
-            Error::InvalidToolParams(format!(
-                "Invalid URI, expected an absolute file:// URI but got: {}",
-                escape_bounded(uri.as_ref(), MAX_ECHOED_PATH_BYTES)
-            ))
-        })?;
+        let path = crate::bridge::state::uri_to_path(uri)
+            .ok_or_else(|| Error::NotFileUri(EchoedUri::new(uri.as_ref())))?;
 
         self.validate_path(&ClientPath::try_from(path)?).await
     }
@@ -1496,9 +1495,9 @@ mod tests {
     use url::Url;
 
     use super::*;
-    use crate::bridge::translator::dto::Position;
+    use crate::bridge::translator::dto::{Position, WorkspaceQuery};
     use crate::bridge::translator::testing::*;
-    use crate::bridge::{NotificationCache, ResultContext, WorkspaceRoots};
+    use crate::bridge::{LocationContext, NotificationCache, ResultContext, WorkspaceRoots};
     use crate::config::{
         DocumentLimit, FileExtension, FilePattern, IndexingReadyTimeoutSecs, LanguageId,
         LanguageMap, LspServerConfig, PositionEncodings, SearchDepth, ServerCommand, SizeLimit,
@@ -1982,7 +1981,13 @@ mod tests {
         let translator = Translator::new();
         let uri: lsp_types::Uri = lsp_types::Uri::from("http://example.com/file.rs");
         let result = translator.parse_file_uri(&uri).await;
-        assert_matches!(result, Err(Error::InvalidToolParams(_)));
+        let Err(error @ Error::NotFileUri(_)) = result else {
+            panic!("expected NotFileUri, got {result:?}");
+        };
+        assert_eq!(
+            error.to_string(),
+            "invalid tool parameters: Invalid URI, expected an absolute file:// URI but got: http://example.com/file.rs"
+        );
     }
 
     #[tokio::test]
@@ -2034,7 +2039,7 @@ mod tests {
         let translator = Translator::new();
         let uri: lsp_types::Uri = lsp_types::Uri::from("file://host/some/path.rs");
         let result = translator.parse_file_uri(&uri).await;
-        assert_matches!(result, Err(Error::InvalidToolParams(_)));
+        assert_matches!(result, Err(Error::NotFileUri(_)));
     }
 
     #[test]
@@ -3612,7 +3617,7 @@ mod tests {
             .handle_definition(
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 1),
-                ResultContext::None,
+                LocationContext::None,
             )
             .await;
 
@@ -3643,7 +3648,7 @@ mod tests {
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 1),
                 false,
-                ResultContext::None,
+                LocationContext::None,
             )
             .await;
 
@@ -3725,7 +3730,7 @@ mod tests {
         );
 
         let result = translator
-            .handle_workspace_symbol("main".to_string(), None, 100)
+            .handle_workspace_symbol(WorkspaceQuery::new("main").unwrap(), None, 100)
             .await;
 
         assert_matches!(
@@ -3754,7 +3759,7 @@ mod tests {
             .handle_implementation(
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 1),
-                ResultContext::None,
+                LocationContext::None,
             )
             .await;
 
@@ -3784,7 +3789,7 @@ mod tests {
             .handle_type_definition(
                 client_path(path.to_string_lossy().into_owned()),
                 Position::at(1, 1),
-                ResultContext::None,
+                LocationContext::None,
             )
             .await;
 
@@ -3814,7 +3819,7 @@ mod tests {
             .handle_declaration(
                 client_path(&path),
                 Position::at(1, 1),
-                crate::bridge::ResultContext::None,
+                crate::bridge::LocationContext::None,
             )
             .await;
 

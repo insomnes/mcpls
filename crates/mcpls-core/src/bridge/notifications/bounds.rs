@@ -5,7 +5,7 @@ use lsp_types::{Diagnostic as LspDiagnostic, Uri};
 use tracing::warn;
 
 use super::{ReportedSeverity, message_as_str};
-use crate::util::{truncate_str, truncate_string};
+use crate::util::{json_len, truncate_str, truncate_string};
 
 /// Maximum size, in bytes, of a single cached log message, server message,
 /// or a single diagnostic's free-form `message` text.
@@ -155,7 +155,7 @@ fn largest_fitting_prefix(
     fits: impl Fn(&[LspDiagnostic]) -> bool,
 ) -> usize {
     let (mut lo, mut hi) = (0usize, diagnostics.len());
-    #[allow(
+    #[expect(
         clippy::arithmetic_side_effects,
         clippy::indexing_slicing,
         reason = "binary search over 0..=len: lo < hi gives mid in 1..=hi"
@@ -217,9 +217,7 @@ fn cheap_size_estimate(diagnostics: &[LspDiagnostic]) -> Option<usize> {
 
 /// The serialized length of `diagnostics`, or `None` if serialization fails.
 fn serialized_len(diagnostics: &[LspDiagnostic]) -> Option<usize> {
-    serde_json::to_vec(diagnostics)
-        .ok()
-        .map(|bytes| bytes.len())
+    json_len(&diagnostics)
 }
 
 /// Bounds `diagnostics`' serialized size to at most
@@ -308,17 +306,18 @@ pub(super) fn cap_diagnostics_entry_size(uri: &Uri, diagnostics: &mut Vec<LspDia
     diagnostics.truncate(keep);
     if diagnostics.len() < original_count {
         warn!(
-            "diagnostics for {} exceeded the {MAX_DIAGNOSTICS_ENTRY_BYTES}-byte cache cap; kept \
-             the {} highest-severity of {original_count} diagnostics",
-            uri.as_ref(),
-            diagnostics.len(),
+            uri = %uri.as_ref(),
+            cap_bytes = MAX_DIAGNOSTICS_ENTRY_BYTES,
+            kept = diagnostics.len(),
+            original_count,
+            "diagnostics exceeded the cache cap; kept the highest-severity ones"
         );
     }
 
     // Drop opaque/structured fields first -- cheap, and often enough on
     // its own (e.g. the single-huge-`data`-blob shape).
     if diagnostics.len() == 1 && !fits(diagnostics) {
-        #[allow(clippy::indexing_slicing, reason = "len == 1 checked above")]
+        #[expect(clippy::indexing_slicing, reason = "len == 1 checked above")]
         let diagnostic = &mut diagnostics[0];
         let had_data = diagnostic.data.is_some();
         diagnostic.data = None;
@@ -326,14 +325,10 @@ pub(super) fn cap_diagnostics_entry_size(uri: &Uri, diagnostics: &mut Vec<LspDia
         diagnostic.related_information = None;
         diagnostic.tags = None;
         warn!(
-            "diagnostic for {} exceeded the cache cap; dropped its data/code_description/\
-             related_information/tags fields{}",
-            uri.as_ref(),
-            if had_data {
-                " (a later code-action request for this diagnostic may not resolve its quick fix)"
-            } else {
-                ""
-            },
+            uri = %uri.as_ref(),
+            quick_fix_may_not_resolve = had_data,
+            "diagnostic exceeded the cache cap; dropped its data/code_description/\
+             related_information/tags fields"
         );
     }
 
@@ -341,7 +336,7 @@ pub(super) fn cap_diagnostics_entry_size(uri: &Uri, diagnostics: &mut Vec<LspDia
     // fields above) are truncated rather than dropped, to preserve some
     // content.
     if diagnostics.len() == 1 && !fits(diagnostics) {
-        #[allow(clippy::indexing_slicing, reason = "len == 1 checked above")]
+        #[expect(clippy::indexing_slicing, reason = "len == 1 checked above")]
         let diagnostic = &mut diagnostics[0];
         if let Some(source) = &diagnostic.source {
             diagnostic.source = Some(truncate_str(source, MAX_ENTRY_TEXT_BYTES));
@@ -375,10 +370,10 @@ pub(super) fn cap_diagnostics_entry_size(uri: &Uri, diagnostics: &mut Vec<LspDia
         diagnostic.data = None;
     }
     warn!(
-        "diagnostic for {} still exceeded the cache cap after every other mitigation; \
-         truncated its message to {DIAGNOSTIC_TERMINAL_FALLBACK_MESSAGE_BYTES} bytes and \
-         cleared all other fields",
-        uri.as_ref(),
+        uri = %uri.as_ref(),
+        message_bytes = DIAGNOSTIC_TERMINAL_FALLBACK_MESSAGE_BYTES,
+        "diagnostic still exceeded the cache cap after every other mitigation; \
+         truncated its message and cleared all other fields"
     );
     serialized_len(diagnostics).unwrap_or(MAX_DIAGNOSTICS_ENTRY_BYTES)
 }

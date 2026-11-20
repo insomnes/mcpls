@@ -177,7 +177,7 @@ impl<'a> Previews<'a> {
             )
         };
         DocumentChanges {
-            uri: uri.to_string(),
+            uri,
             edit_count: converted.len(),
             preview,
             preview_source: source.ok().map(|s| s.identity),
@@ -196,13 +196,16 @@ impl<'a> Previews<'a> {
             }
             let Some(start) = offset(
                 &source.text,
-                edit.range.start.line,
-                edit.range.start.character,
+                edit.range.start.line().get(),
+                edit.range.start.character().get(),
             ) else {
                 return unavailable("invalid_range");
             };
-            let Some(end) = offset(&source.text, edit.range.end.line, edit.range.end.character)
-            else {
+            let Some(end) = offset(
+                &source.text,
+                edit.range.end.line().get(),
+                edit.range.end.character().get(),
+            ) else {
                 return unavailable("invalid_range");
             };
             if start > end {

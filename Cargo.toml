@@ -3,16 +3,12 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.9.1+insomnes.1"
+version = "0.10.0+insomnes.1"
 edition = "2024"
 rust-version = "1.99"
 authors = ["Andrei G. <k05h31@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bug-ops/mcpls"
-homepage = "https://bug-ops.github.io/mcpls/"
-description = "Universal MCP to LSP bridge - expose Language Server Protocol capabilities as MCP tools"
-keywords = ["mcp", "lsp", "language-server", "ai", "claude"]
-categories = ["development-tools", "command-line-utilities"]
 
 [workspace.dependencies]
 # Sorted alphabetically
@@ -31,12 +27,12 @@ hyper-util = "0.1"
 ignore = "0.4"
 libc = "0.2"
 lsp-types = { package = "gen-lsp-types", version = "=0.11.0" }
-mcpls-core = { path = "crates/mcpls-core", version = "0.9.1+insomnes.1" }
-nix = { version = "0.31", default-features = false, features = ["user"] }
+mcpls-core = { path = "crates/mcpls-core", version = "0.10.0" }
+nix = { version = "0.32", default-features = false, features = ["user"] }
 predicates = "3.1"
-process-wrap = { version = "10.0.1", default-features = false }
+process-wrap = { version = "10.0", default-features = false }
 proptest = "1.12"
-rmcp = "3.9"
+rmcp = "3.10"
 rstest = "0.28"
 regex = "1.13"
 rustix = { version = "1.1", features = ["process"] }
@@ -50,7 +46,7 @@ tempfile = "3.27"
 thiserror = "2.0"
 tokio = "1.54"
 tokio-util = "0.7"
-toml = "1.1"
+toml = "1.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 url = "2.5"
@@ -60,12 +56,16 @@ winapi-util = "0.1.11"
 unsafe_code = "forbid"
 missing_docs = "warn"
 
+[workspace.lints.cargo]
+unused_dependencies = "deny"
+
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 expect_used = "warn"
+allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 
 [profile.release]

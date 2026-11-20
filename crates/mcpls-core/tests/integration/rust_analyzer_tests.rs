@@ -3,11 +3,10 @@
 //! These tests require rust-analyzer to be installed and available in PATH.
 //! Run with: cargo nextest run -- --ignored
 
-#![allow(
+#![expect(
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::uninlined_format_args,
-    clippy::unnecessary_unwrap,
     reason = "test code; a panic is the failure signal"
 )]
 
@@ -17,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use mcpls_core::bridge::{
     ClientPath, IndexingState, KindFilterField, KindFilterInput, NotificationCache, Position,
-    SymbolKindFilter, TabSize, Translator, WorkspaceRoots, apply_lifecycle_notification,
+    SymbolKindFilter, TabSize, Translator, WorkspaceQuery, WorkspaceRoots,
+    apply_lifecycle_notification,
 };
 use mcpls_core::config::{
     FileExtension, FilePattern, LanguageId, LspServerConfig, PositionEncodings, ServerCommand,
@@ -414,7 +414,7 @@ async fn test_definition_user_struct() {
         translator.lock().await.handle_definition(
             client_path(types_file.to_string_lossy().into_owned()),
             Position::from_client(9, 16).unwrap(),
-            mcpls_core::bridge::ResultContext::None,
+            mcpls_core::bridge::LocationContext::None,
         ),
     )
     .await;
@@ -435,10 +435,10 @@ async fn test_definition_user_struct() {
         def_json
             .locations
             .iter()
-            .any(|loc| loc.uri.ends_with("lib.rs")
-                && loc.range.start.line == 18
-                && loc.range.start.character == 12
-                && loc.range.end.character == 16),
+            .any(|loc| loc.inner.location.uri.as_ref().ends_with("lib.rs")
+                && loc.inner.location.range.start.line().get() == 18
+                && loc.inner.location.range.start.character().get() == 12
+                && loc.inner.location.range.end.character().get() == 16),
         "Definition should reference User struct in lib.rs, got: {:?}",
         def_json.locations
     );
@@ -462,7 +462,7 @@ async fn test_definition_across_files() {
         translator.lock().await.handle_definition(
             client_path(functions_file.to_string_lossy().into_owned()),
             Position::from_client(3, 24).unwrap(),
-            mcpls_core::bridge::ResultContext::None,
+            mcpls_core::bridge::LocationContext::None,
         ),
     )
     .await;
@@ -501,7 +501,7 @@ async fn test_references_create_repo_function() {
             client_path(functions_file.to_string_lossy().into_owned()),
             Position::from_client(7, 12).unwrap(),
             true, // Include declaration
-            mcpls_core::bridge::ResultContext::None,
+            mcpls_core::bridge::LocationContext::None,
         ),
     )
     .await;
@@ -542,7 +542,7 @@ async fn test_references_user_struct() {
             client_path(lib_file.to_string_lossy().into_owned()),
             Position::from_client(18, 15).unwrap(),
             true,
-            mcpls_core::bridge::ResultContext::None,
+            mcpls_core::bridge::LocationContext::None,
         ),
     )
     .await;
@@ -935,10 +935,11 @@ async fn test_workspace_symbol_search_basic() {
     // Search for "User" struct
     let result = timeout(
         Duration::from_secs(10),
-        translator
-            .lock()
-            .await
-            .handle_workspace_symbol("User".to_string(), None, 100),
+        translator.lock().await.handle_workspace_symbol(
+            WorkspaceQuery::new("User").unwrap(),
+            None,
+            100,
+        ),
     )
     .await;
 
@@ -978,7 +979,7 @@ async fn test_workspace_symbol_search_with_kind_filter() {
     let result = timeout(
         Duration::from_secs(10),
         translator.lock().await.handle_workspace_symbol(
-            String::new(), // Empty query to get all symbols
+            WorkspaceQuery::new("").unwrap(), // Empty query to get all symbols
             Some(symbol_kind_filter("Struct")),
             100,
         ),
@@ -1017,7 +1018,7 @@ async fn test_workspace_symbol_search_max_results() {
         translator
             .lock()
             .await
-            .handle_workspace_symbol(String::new(), None, 5),
+            .handle_workspace_symbol(WorkspaceQuery::new("").unwrap(), None, 5),
     )
     .await;
 
@@ -1046,7 +1047,7 @@ async fn test_workspace_symbol_search_function() {
     let result = timeout(
         Duration::from_secs(10),
         translator.lock().await.handle_workspace_symbol(
-            "create".to_string(),
+            WorkspaceQuery::new("create").unwrap(),
             Some(symbol_kind_filter("Function")),
             100,
         ),

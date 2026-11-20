@@ -109,12 +109,35 @@ pub fn lexically_normalize(path: &Path) -> PathBuf {
 /// or failing filesystem.
 pub type CanonicalizeFn = dyn Fn(&Path) -> io::Result<PathBuf> + Send + Sync;
 
+/// Outcome of [`WorkspaceRoots::edit_uri_verdict`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditUriVerdict {
+    /// The URI may be written through.
+    Admitted,
+    /// The URI is not provably inside a workspace root, or could not be
+    /// resolved.
+    OutOfWorkspace,
+    /// The path carries a name the filesystem rejects (too long, NUL byte),
+    /// so it can name no file regardless of the roots.
+    InvalidPath,
+}
+
 /// Why a path has no canonical form right now.
 #[derive(Debug, ThisError)]
 pub enum Unresolved {
     /// The filesystem failed in a way that may not repeat; never cached.
     #[error("transient filesystem error")]
     Transient(#[source] io::Error),
+    /// The path carries a name that can never exist (`InvalidFilename`, for
+    /// example `ENAMETOOLONG`, or a NUL byte); permanent, so never retried or
+    /// cached.
+    #[error("path contains a name the filesystem rejects")]
+    InvalidName(#[source] io::Error),
+    /// A symlink loop or a directory the process may not search; a retry
+    /// cannot fix it, so it is never retried or cached. A later publish of the
+    /// same path tries again.
+    #[error("path cannot be walked")]
+    Unwalkable(#[source] io::Error),
     /// Not even the root of the path could be canonicalized.
     #[error("no ancestor of the path exists")]
     NoExistingAncestor,
@@ -122,6 +145,21 @@ pub enum Unresolved {
     /// could step around a symlink, so the path is refused outright.
     #[error("path contains a `..` component")]
     ParentComponent,
+}
+
+/// Whether `error` is `ELOOP`; `io::ErrorKind::FilesystemLoop` is unstable, so
+/// the raw errno is compared. Windows reports its own code, which stays
+/// transient.
+fn is_symlink_loop(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 /// Canonicalizes `path` on disk. A dangling symlink is `NotFound` for
@@ -143,17 +181,30 @@ fn canonicalize_on_disk(path: &Path) -> io::Result<PathBuf> {
 ///
 /// The single canonicalization policy of the bridge. Falls back to the next
 /// ancestor only on [`io::ErrorKind::NotFound`] and
-/// [`io::ErrorKind::NotADirectory`]; every other error is
-/// [`Unresolved::Transient`]. A path with a `..` component is
-/// [`Unresolved::ParentComponent`]: a legitimate server publishes canonical
-/// paths, and the lexical join of the missing tail would otherwise bypass
-/// symlinks that `..` should have followed.
+/// [`io::ErrorKind::NotADirectory`]. A path with a `..` component is
+/// [`Unresolved::ParentComponent`] and an [`io::ErrorKind::InvalidFilename`]
+/// from any ancestor is [`Unresolved::InvalidName`]: both are permanent
+/// refusals, as is a NUL byte (refused before any syscall) or an
+/// [`io::ErrorKind::InvalidInput`] from the filesystem. A symlink loop
+/// (`ELOOP`) and a directory the process may not
+/// search ([`io::ErrorKind::PermissionDenied`]) are [`Unresolved::Unwalkable`],
+/// permanent for the publish. A legitimate server publishes canonical paths, so
+/// the lexical join of a missing tail would bypass symlinks that `..` should
+/// have followed; a name the kernel rejects can neither exist nor be walked
+/// past safely, since a symlink may sit deeper than the failing component.
+/// Every other error is [`Unresolved::Transient`].
 pub fn canonicalize_existing_prefix(
     path: &Path,
     canonicalize: &CanonicalizeFn,
 ) -> Result<PathBuf, Unresolved> {
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(Unresolved::ParentComponent);
+    }
+    if path.as_os_str().as_encoded_bytes().contains(&0) {
+        return Err(Unresolved::InvalidName(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains a NUL byte",
+        )));
     }
     for ancestor in path.ancestors() {
         match canonicalize(ancestor) {
@@ -168,6 +219,17 @@ pub fn canonicalize_existing_prefix(
                     e.kind(),
                     io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
                 ) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::InvalidFilename | io::ErrorKind::InvalidInput
+                ) =>
+            {
+                return Err(Unresolved::InvalidName(e));
+            }
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied || is_symlink_loop(&e) => {
+                return Err(Unresolved::Unwalkable(e));
+            }
             Err(e) => return Err(Unresolved::Transient(e)),
         }
     }
@@ -300,8 +362,9 @@ impl ResolvedRoot {
     fn from_absolute(root: &Path) -> Self {
         let canonical = dunce::canonicalize(root).unwrap_or_else(|source| {
             warn!(
-                "Failed to canonicalize absolute workspace root {}: {source}, using non-canonical path",
-                root.display()
+                path = %root.display(),
+                error = %source,
+                "Failed to canonicalize absolute workspace root, using non-canonical path"
             );
             canonicalize_existing_prefix(root, &canonicalize_on_disk)
                 .unwrap_or_else(|_| root.to_path_buf())
@@ -327,14 +390,15 @@ impl ResolvedRoot {
     fn from_cwd(cwd: &ProcessCwd) -> Self {
         let canonical = dunce::canonicalize(&cwd.physical).unwrap_or_else(|e| {
             warn!(
-                "Failed to canonicalize workspace base directory {}: {e}, using non-canonical absolute path",
-                cwd.physical.display()
+                path = %cwd.physical.display(),
+                error = %e,
+                "Failed to canonicalize workspace base directory, using non-canonical absolute path"
             );
             cwd.physical.clone()
         });
         info!(
-            "Using workspace base directory as root: {}",
-            canonical.display()
+            path = %canonical.display(),
+            "Using workspace base directory as root"
         );
         let mut aliases = vec![cwd.physical.clone()];
         aliases.extend(cwd.logical.clone());
@@ -354,9 +418,9 @@ impl ResolvedRoot {
                 Some(form)
             } else {
                 debug!(
-                    "dropping workspace root alias {} that does not resolve to {}",
-                    form.display(),
-                    self.canonical.display()
+                    alias = %form.display(),
+                    canonical = %self.canonical.display(),
+                    "dropping workspace root alias that does not resolve to the root"
                 );
                 None
             }
@@ -751,7 +815,7 @@ impl WorkspaceRoots {
     /// canonical check (the diagnostics pump, via
     /// `PublishedPathResolver::resolve_batch`) or only annotate (the advisory
     /// `out_of_workspace` flag). Anything that writes through a
-    /// server-supplied URI must use [`Self::admits_edit_uri`] instead.
+    /// server-supplied URI must use [`Self::edit_uri_verdict`] instead.
     /// Read-only navigation results are deliberately not filtered (standard
     /// library and dependency locations are legitimately outside); opening
     /// such a path still goes through the inbound [`Self::validate`] gate. Empty roots admit nothing.
@@ -766,23 +830,37 @@ impl WorkspaceRoots {
     /// its canonical form (longest existing prefix resolved, so a symlink
     /// pointing out of the workspace or a retargeted alias is seen through)
     /// must lie under a canonical root. Aliases are only a spelling aid here.
+    /// A path with a name the filesystem rejects is
+    /// [`EditUriVerdict::InvalidPath`], not outside the workspace.
     /// Canonicalization runs on the blocking pool.
-    pub(crate) async fn admits_edit_uri(&self, uri: &Uri) -> bool {
+    pub(crate) async fn edit_uri_verdict(&self, uri: &Uri) -> EditUriVerdict {
         let Some(path) = plain_absolute_path(uri) else {
-            return false;
+            return EditUriVerdict::OutOfWorkspace;
         };
         if !self.admits_with(&path, CaseRule::Exact) {
-            return false;
+            return EditUriVerdict::OutOfWorkspace;
         }
         match tokio::task::spawn_blocking(move || {
             canonicalize_existing_prefix(&path, &canonicalize_on_disk)
         })
         .await
         {
-            Ok(canonical) => canonical.is_ok_and(|canonical| self.contains_canonical(&canonical)),
+            Ok(Ok(canonical)) if self.contains_canonical(&canonical) => EditUriVerdict::Admitted,
+            Ok(Err(Unresolved::InvalidName(_))) => EditUriVerdict::InvalidPath,
+            Ok(_) => EditUriVerdict::OutOfWorkspace,
             Err(error) => {
-                tracing::warn!(%error, uri = uri.as_ref(), "edit URI canonicalization task failed; dropping the edit");
-                false
+                match crate::util::PanicMessage::from_join_error(error) {
+                    Some(panic) => {
+                        tracing::error!(%panic, uri = uri.as_ref(), "edit URI canonicalization task panicked; dropping the edit");
+                    }
+                    None => {
+                        tracing::warn!(
+                            uri = uri.as_ref(),
+                            "edit URI canonicalization task was cancelled; dropping the edit"
+                        );
+                    }
+                }
+                EditUriVerdict::OutOfWorkspace
             }
         }
     }
@@ -971,6 +1049,92 @@ mod tests {
             canonicalize_existing_prefix(&dir.path().join("gone/x.rs"), &canonicalize_on_disk)
                 .unwrap();
         assert_eq!(result, canonical.join("gone/x.rs"));
+    }
+
+    fn invalid_filename_from(
+        failing: usize,
+    ) -> (
+        Arc<std::sync::atomic::AtomicUsize>,
+        impl Fn(&Path) -> io::Result<PathBuf>,
+    ) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let canon = move |p: &Path| {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match n.cmp(&failing) {
+                std::cmp::Ordering::Less => Err(io::Error::from(io::ErrorKind::NotFound)),
+                std::cmp::Ordering::Equal => Err(io::Error::from(io::ErrorKind::InvalidFilename)),
+                std::cmp::Ordering::Greater => Ok(p.to_path_buf()),
+            }
+        };
+        (calls, canon)
+    }
+
+    #[test]
+    fn test_canonicalize_existing_prefix_stops_at_an_invalid_name_on_the_leaf() {
+        let (calls, canon) = invalid_filename_from(0);
+        assert_matches!(
+            canonicalize_existing_prefix(Path::new("/a/b/c.rs"), &canon),
+            Err(Unresolved::InvalidName(_))
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_canonicalize_existing_prefix_stops_at_an_invalid_name_on_an_ancestor() {
+        let (calls, canon) = invalid_filename_from(1);
+        assert_matches!(
+            canonicalize_existing_prefix(Path::new("/a/b/c.rs"), &canon),
+            Err(Unresolved::InvalidName(_))
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "no ancestor above the failing one is asked"
+        );
+    }
+
+    /// Security F1: a symlink below the failing ancestor must not be walked
+    /// past and joined lexically into the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn test_path_overflow_above_a_deeper_symlink_is_refused() {
+        let (_dir, base) = canonical_tempdir();
+        let outside = tempfile::tempdir().unwrap();
+        let deep = base.join("d".repeat(200));
+        std::fs::create_dir(&deep).unwrap();
+        std::os::unix::fs::symlink(outside.path(), deep.join("link")).unwrap();
+        let limit = deep.as_os_str().len();
+        let overflowing = move |p: &Path| {
+            if p.as_os_str().len() > limit {
+                Err(io::Error::from(io::ErrorKind::InvalidFilename))
+            } else {
+                dunce::canonicalize(p)
+            }
+        };
+
+        let result = canonicalize_existing_prefix(&deep.join("link/secret"), &overflowing);
+
+        assert_matches!(result, Err(Unresolved::InvalidName(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_a_300_byte_component_is_invalid_name_and_not_admitted() {
+        let (_dir, base) = canonical_tempdir();
+        let path = base.join("a".repeat(300)).join("x.rs");
+
+        assert_matches!(
+            canonicalize_existing_prefix(&path, &canonicalize_on_disk),
+            Err(Unresolved::InvalidName(_))
+        );
+        let roots = WorkspaceRoots::from_paths(std::slice::from_ref(&base)).unwrap();
+        let uri = Uri::from(format!("file://{}", path.display()).as_str());
+        assert_eq!(
+            roots.edit_uri_verdict(&uri).await,
+            EditUriVerdict::InvalidPath
+        );
+        assert!(roots.contains_resolved_prefix(&path));
     }
 
     #[test]
@@ -1439,13 +1603,17 @@ mod tests {
         std::fs::create_dir(&sealed).unwrap();
         let roots = WorkspaceRoots::from_paths(std::slice::from_ref(&base)).unwrap();
         let uri = Uri::from(format!("file://{}", sealed.join("new.rs").display()).as_str());
-        assert!(roots.admits_edit_uri(&uri).await);
+        assert_eq!(roots.edit_uri_verdict(&uri).await, EditUriVerdict::Admitted);
 
         std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let admitted = roots.admits_edit_uri(&uri).await;
+        let verdict = roots.edit_uri_verdict(&uri).await;
         std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(!admitted, "an unreadable ancestor must not be skipped over");
+        assert_eq!(
+            verdict,
+            EditUriVerdict::OutOfWorkspace,
+            "an unreadable ancestor must not be skipped over"
+        );
     }
 
     #[cfg(unix)]
@@ -1460,7 +1628,11 @@ mod tests {
 
         for name in ["evil.rs", "evil_dir/file.rs"] {
             let uri = Uri::from(format!("file://{}", base.join(name).display()).as_str());
-            assert!(!roots.admits_edit_uri(&uri).await, "{name}");
+            assert_eq!(
+                roots.edit_uri_verdict(&uri).await,
+                EditUriVerdict::OutOfWorkspace,
+                "{name}"
+            );
         }
         assert!(!target.exists());
     }

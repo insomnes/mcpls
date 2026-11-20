@@ -3,7 +3,9 @@
 //! Callers that pass [`ResultContext::EnclosingSymbol`] get, per item, the
 //! innermost symbol of the item's file that contains it. The default
 //! ([`ResultContext::None`]) issues no extra request and adds no field, so
-//! existing output stays byte-identical.
+//! existing output stays byte-identical. The location tools additionally
+//! accept [`LocationContext::SymbolSource`], which reuses this pass to cut
+//! each item's source text (see [`super::source`]).
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -15,8 +17,10 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use super::Translator;
-use super::dto::{Diagnostic, Location, Position2D, PositionDegradation, Range, Symbol};
+use super::dto::{Diagnostic, PositionDegradation, Range, Symbol};
+use super::navigation::NormalizedLocation;
 use super::routing::{FileLocalCapability, IndexingGate};
+use super::source::{NavigationLocation, SourceFile, SourceOutcome, SourcePass, SpanRule};
 use super::symbols::{DocumentSymbolTree, FetchedSymbols, FlatSymbol, symbol_tree};
 use crate::config::DocumentLimit;
 use crate::error::Error;
@@ -48,10 +52,37 @@ pub enum ResultContext {
     /// Return the plain result with no extra lookups.
     #[default]
     None,
-    /// Attach the innermost enclosing symbol (name path, kind, range) to each
-    /// item, at the cost of one `textDocument/documentSymbol` request per
-    /// distinct file, capped per call.
+    /// Attach the innermost enclosing symbol to each item, one documentSymbol request per file.
+    ///
+    /// The symbol carries its name path, kind and range; requests are capped per call.
     EnclosingSymbol,
+}
+
+/// What extra to attach to each returned location.
+///
+/// Superset of [`ResultContext`] for the location tools: additionally accepts
+/// `symbol_source`.
+///
+/// # Examples
+///
+/// ```
+/// use mcpls_core::bridge::LocationContext;
+///
+/// assert_eq!(LocationContext::default(), LocationContext::None);
+/// let parsed: LocationContext = serde_json::from_str("\"symbol_source\"").unwrap();
+/// assert_eq!(parsed, LocationContext::SymbolSource);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocationContext {
+    /// Return the plain result with no extra lookups.
+    #[default]
+    None,
+    /// Attach the innermost enclosing symbol to each location.
+    EnclosingSymbol,
+    /// Attach the source text of the symbol each location resolves to.
+    SymbolSource,
 }
 
 /// How much ancestry an [`EnclosingSymbol`] name path carries.
@@ -157,8 +188,8 @@ pub struct Contextual<T> {
     pub enclosing_symbol: Option<EnclosingSymbolOutcome>,
 }
 
-/// A [`Location`] optionally carrying its enclosing symbol.
-pub type ContextualLocation = Contextual<Location>;
+/// A location optionally carrying its enclosing symbol and source text.
+pub type ContextualLocation = Contextual<NavigationLocation>;
 
 /// A [`Diagnostic`] optionally carrying its enclosing symbol.
 pub type ContextualDiagnostic = Contextual<Diagnostic>;
@@ -187,6 +218,14 @@ pub(super) struct Contextualized<T> {
     pub(super) positions_degraded: Option<PositionDegradation>,
 }
 
+impl<T> Contextualized<T> {
+    /// Folds in the degradation the items' own normalization already found.
+    fn with_input_degradation(mut self, degraded: Option<PositionDegradation>) -> Self {
+        self.positions_degraded = degraded.max(self.positions_degraded);
+        self
+    }
+}
+
 /// Number of distinct files one call may enrich: 16 when the tracker limit is
 /// disabled, else a quarter of the limit clamped to `1..=16`, so one
 /// call cannot evict most of the documents other handlers depend on.
@@ -198,23 +237,19 @@ pub(super) fn enrichment_file_cap(max_documents: DocumentLimit) -> usize {
 
 /// How strictly a symbol must contain an item to enclose it.
 #[derive(Clone, Copy)]
-enum Containment {
+pub(super) enum Containment {
     /// The symbol contains the whole item range.
     Whole,
     /// The symbol contains the item's start; used when none contains it whole.
     Start,
 }
 
-const fn key(position: &Position2D) -> (u32, u32) {
-    (position.line, position.character)
-}
-
 impl Containment {
-    fn admits(self, symbol: &Range, item: &Range) -> bool {
-        let starts_inside = key(&symbol.start) <= key(&item.start);
+    pub(super) fn admits(self, symbol: &Range, item: &Range) -> bool {
+        let starts_inside = symbol.start <= item.start;
         match self {
-            Self::Whole => starts_inside && key(&item.end) <= key(&symbol.end),
-            Self::Start => starts_inside && key(&item.start) <= key(&symbol.end),
+            Self::Whole => starts_inside && item.end <= symbol.end,
+            Self::Start => starts_inside && item.start <= symbol.end,
         }
     }
 }
@@ -227,30 +262,49 @@ pub(super) fn innermost_hierarchical(symbols: &[Symbol], item: &Range) -> Option
         .find_map(|rule| descend(symbols, item, rule))
 }
 
-fn descend(symbols: &[Symbol], item: &Range, rule: Containment) -> Option<EnclosingSymbol> {
-    let mut name_path = Vec::new();
-    let mut level = symbols;
-    let mut found: Option<&Symbol> = None;
-    while let Some(symbol) = level
+/// Which of several siblings admitting an item is the innermost: the latest
+/// start, then the earliest end, then the name and kind, so the choice does
+/// not depend on the server's sibling order.
+fn sibling_order(symbol: &Symbol) -> impl Ord {
+    (
+        symbol.range.start,
+        Reverse(symbol.range.end),
+        Reverse(symbol.name.as_str()),
+        Reverse(symbol.kind),
+    )
+}
+
+fn innermost_sibling<'s>(
+    level: &'s [Symbol],
+    item: &Range,
+    rule: Containment,
+) -> Option<&'s Symbol> {
+    level
         .iter()
         .filter(|symbol| rule.admits(&symbol.range, item))
-        .max_by_key(|symbol| {
-            (
-                key(&symbol.range.start),
-                Reverse(key(&symbol.range.end)),
-                Reverse(symbol.name.as_str()),
-                Reverse(symbol.kind),
-            )
-        })
-    {
-        name_path.push(symbol.name.clone());
-        found = Some(symbol);
-        level = symbol.children.as_deref().unwrap_or_default();
-    }
-    found.map(|symbol| EnclosingSymbol {
-        name_path,
-        kind: symbol.kind,
-        range: symbol.range.clone(),
+        .max_by_key(|symbol| sibling_order(symbol))
+}
+
+/// The chain of nested symbols admitting `item` under `rule`, outermost first:
+/// the innermost admitting sibling at each level, then the same inside its
+/// children. Empty when no top-level symbol admits `item`.
+pub(super) fn descend_path(
+    symbols: &[Symbol],
+    item: Range,
+    rule: Containment,
+) -> impl Iterator<Item = &Symbol> {
+    std::iter::successors(innermost_sibling(symbols, &item, rule), move |symbol| {
+        innermost_sibling(symbol.children.as_deref().unwrap_or_default(), &item, rule)
+    })
+}
+
+fn descend(symbols: &[Symbol], item: &Range, rule: Containment) -> Option<EnclosingSymbol> {
+    let path: Vec<&Symbol> = descend_path(symbols, *item, rule).collect();
+    let innermost = path.last()?;
+    Some(EnclosingSymbol {
+        name_path: path.iter().map(|symbol| symbol.name.clone()).collect(),
+        kind: innermost.kind,
+        range: innermost.range,
         fidelity: SymbolFidelity::Hierarchical,
     })
 }
@@ -260,15 +314,7 @@ pub(super) fn innermost_flat(symbols: &[FlatSymbol], item: &Range) -> Option<Enc
         symbols
             .iter()
             .filter(|flat| rule.admits(&flat.symbol.range, item))
-            .max_by_key(|flat| {
-                let symbol = &flat.symbol;
-                (
-                    key(&symbol.range.start),
-                    Reverse(key(&symbol.range.end)),
-                    Reverse(symbol.name.as_str()),
-                    Reverse(symbol.kind),
-                )
-            })
+            .max_by_key(|flat| sibling_order(&flat.symbol))
             .map(|flat| EnclosingSymbol {
                 name_path: flat
                     .container_name
@@ -278,13 +324,13 @@ pub(super) fn innermost_flat(symbols: &[FlatSymbol], item: &Range) -> Option<Enc
                     .chain([flat.symbol.name.clone()])
                     .collect(),
                 kind: flat.symbol.kind,
-                range: flat.symbol.range.clone(),
+                range: flat.symbol.range,
                 fidelity: SymbolFidelity::Flat,
             })
     })
 }
 
-fn outcome_for(tree: &DocumentSymbolTree, item: &Range) -> EnclosingSymbolOutcome {
+pub(super) fn outcome_for(tree: &DocumentSymbolTree, item: &Range) -> EnclosingSymbolOutcome {
     let found = match tree {
         DocumentSymbolTree::Hierarchical(symbols) => innermost_hierarchical(symbols, item),
         DocumentSymbolTree::Flat(symbols) => innermost_flat(symbols, item),
@@ -295,10 +341,12 @@ fn outcome_for(tree: &DocumentSymbolTree, item: &Range) -> EnclosingSymbolOutcom
     )
 }
 
-/// An item to resolve: the URI string of its file and its normalized range.
-struct Hit<'a> {
-    uri: &'a str,
-    range: &'a Range,
+/// An item to resolve: the URI of its file and its normalized range.
+pub(super) struct Hit<'a> {
+    pub(super) uri: &'a lsp_types::Uri,
+    pub(super) range: &'a Range,
+    /// The link target range of a go-to answer, when the source pass needs it.
+    pub(super) target_range: Option<Range>,
 }
 
 /// What one file contributed to a call's enrichment.
@@ -307,9 +355,16 @@ enum FileResolution {
     Skipped(EnclosingSymbolOutcome),
 }
 
+/// What the pass found for one item: its enclosing symbol and, when the source
+/// pass ran, its source.
+struct ItemResolution {
+    enclosing: EnclosingSymbolOutcome,
+    source: Option<SourceOutcome>,
+}
+
 /// Outcomes for every hit, in input order, plus the call-level summary.
 struct Resolution {
-    outcomes: Vec<EnclosingSymbolOutcome>,
+    outcomes: Vec<ItemResolution>,
     summary: EnrichmentSummary,
     positions_degraded: Option<PositionDegradation>,
 }
@@ -336,31 +391,48 @@ const fn not_computed(reason: NotComputedReason) -> FileResolution {
 }
 
 impl Translator {
-    /// Attaches enclosing symbols to `locations` when `context` asks for it.
+    /// Attaches enclosing symbols, and for [`LocationContext::SymbolSource`]
+    /// source text, to `locations` when `context` asks for it.
+    ///
+    /// `rule` picks the span a source is cut from.
     pub(super) async fn contextualize_locations(
         &self,
-        locations: Vec<Location>,
-        context: ResultContext,
+        locations: Vec<NormalizedLocation>,
+        context: LocationContext,
+        rule: SpanRule,
         positions_degraded: Option<PositionDegradation>,
-    ) -> Contextualized<Location> {
+    ) -> Contextualized<NavigationLocation> {
+        let enclosing = match context {
+            LocationContext::None => ResultContext::None,
+            LocationContext::EnclosingSymbol | LocationContext::SymbolSource => {
+                ResultContext::EnclosingSymbol
+            }
+        };
+        let source_rule = (context == LocationContext::SymbolSource).then_some(rule);
         self.contextualize_items(
             locations,
             &(),
-            context,
-            positions_degraded,
-            |(), location| Hit {
-                uri: &location.uri,
-                range: &location.range,
+            enclosing,
+            source_rule,
+            |(), item| Hit {
+                uri: &item.location.uri,
+                range: &item.location.range,
+                target_range: item.target_range,
+            },
+            |item, source| NavigationLocation {
+                location: item.location,
+                source,
             },
         )
         .await
+        .with_input_degradation(positions_degraded)
     }
 
     /// Attaches enclosing symbols to the diagnostics of the file `uri` when
     /// `context` asks for it.
     pub(super) async fn contextualize_diagnostics(
         &self,
-        uri: &str,
+        uri: &lsp_types::Uri,
         diagnostics: Vec<Diagnostic>,
         context: ResultContext,
         positions_degraded: Option<PositionDegradation>,
@@ -369,80 +441,97 @@ impl Translator {
             diagnostics,
             uri,
             context,
-            positions_degraded,
+            None,
             |uri, diagnostic| Hit {
                 uri,
                 range: &diagnostic.range,
+                target_range: None,
             },
+            |diagnostic, _| diagnostic,
         )
         .await
+        .with_input_degradation(positions_degraded)
     }
 
     /// `shared` is data every hit borrows from besides its own item, such as
-    /// the one URI of a file's diagnostics.
-    async fn contextualize_items<T: Send, S: Sync + ?Sized>(
+    /// the one URI of a file's diagnostics. `finish` builds each output item
+    /// from its input and, when `source_rule` is set, its [`SourceOutcome`].
+    async fn contextualize_items<I: Send, T, S: Sync + ?Sized>(
         &self,
-        items: Vec<T>,
+        items: Vec<I>,
         shared: &S,
         context: ResultContext,
-        positions_degraded: Option<PositionDegradation>,
-        hit: impl for<'a> Fn(&'a S, &'a T) -> Hit<'a> + Sync,
+        source_rule: Option<SpanRule>,
+        hit: impl for<'a> Fn(&'a S, &'a I) -> Hit<'a> + Sync,
+        finish: impl Fn(I, Option<SourceOutcome>) -> T,
     ) -> Contextualized<T> {
         if context == ResultContext::None || items.is_empty() {
             return Contextualized {
-                items: items.into_iter().map(Contextual::from).collect(),
+                items: items
+                    .into_iter()
+                    .map(|item| Contextual::from(finish(item, None)))
+                    .collect(),
                 enrichment: None,
-                positions_degraded,
+                positions_degraded: None,
             };
         }
         let hits: Vec<Hit<'_>> = items.iter().map(|item| hit(shared, item)).collect();
-        let resolution = self.resolve_enclosing(&hits).await;
+        let resolution = self.resolve_enclosing(&hits, source_rule).await;
         let items = items
             .into_iter()
             .zip(resolution.outcomes)
-            .map(|(inner, outcome)| Contextual {
-                inner,
-                enclosing_symbol: Some(outcome),
+            .map(|(item, resolved)| Contextual {
+                inner: finish(item, resolved.source),
+                enclosing_symbol: Some(resolved.enclosing),
             })
             .collect();
         Contextualized {
             items,
             enrichment: Some(resolution.summary),
-            positions_degraded: positions_degraded.max(resolution.positions_degraded),
+            positions_degraded: resolution.positions_degraded,
         }
     }
 
-    async fn resolve_enclosing(&self, hits: &[Hit<'_>]) -> Resolution {
+    async fn resolve_enclosing<'a>(
+        &self,
+        hits: &'a [Hit<'a>],
+        source_rule: Option<SpanRule>,
+    ) -> Resolution {
         let cap = enrichment_file_cap(self.document_tracker.limits().max_documents);
         let started = Instant::now();
         let mut attempted = 0_usize;
         let mut positions_degraded = None;
-        let mut files: HashMap<&str, FileResolution> = HashMap::new();
+        let mut files: HashMap<&lsp_types::Uri, FileResolution> = HashMap::new();
+        let mut pass = source_rule.map(|rule| SourcePass::new(rule, hits.len()));
 
         for hit in hits {
             if files.contains_key(hit.uri) {
                 continue;
             }
-            let resolution = self
-                .resolve_file(
-                    hit.uri,
-                    cap,
-                    &mut attempted,
-                    started,
-                    &mut positions_degraded,
-                )
-                .await;
+            let resolution = self.resolve_file(
+                hit.uri,
+                cap,
+                &mut attempted,
+                started,
+                &mut positions_degraded,
+                pass.as_mut().map(|pass| (pass, hits)),
+            );
+            let resolution = Box::pin(resolution).await;
             files.insert(hit.uri, resolution);
         }
 
         let outcomes = hits
             .iter()
-            .map(|hit| match files.get(hit.uri) {
-                Some(FileResolution::Tree(tree)) => outcome_for(tree, hit.range),
-                Some(FileResolution::Skipped(outcome)) => outcome.clone(),
-                None => EnclosingSymbolOutcome::Unavailable {
-                    reason: UnavailableReason::RequestFailed,
+            .enumerate()
+            .map(|(index, hit)| ItemResolution {
+                enclosing: match files.get(hit.uri) {
+                    Some(FileResolution::Tree(tree)) => outcome_for(tree, hit.range),
+                    Some(FileResolution::Skipped(outcome)) => outcome.clone(),
+                    None => EnclosingSymbolOutcome::Unavailable {
+                        reason: UnavailableReason::RequestFailed,
+                    },
                 },
+                source: pass.as_mut().map(|pass| pass.take(index)),
             })
             .collect();
 
@@ -471,13 +560,14 @@ impl Translator {
 
     /// Resolves one file's symbol tree. The URI is the server's text, so it
     /// is validated against the workspace roots before the file is opened.
-    async fn resolve_file(
+    async fn resolve_file<'a>(
         &self,
-        uri: &str,
+        uri: &lsp_types::Uri,
         cap: usize,
         attempted: &mut usize,
         started: Instant,
         positions_degraded: &mut Option<PositionDegradation>,
+        mut source: Option<(&mut SourcePass<'a>, &'a [Hit<'a>])>,
     ) -> FileResolution {
         if *attempted >= cap {
             return not_computed(NotComputedReason::FileCap);
@@ -486,7 +576,7 @@ impl Translator {
         if remaining.is_zero() {
             return not_computed(NotComputedReason::Deadline);
         }
-        let Ok(path) = self.parse_file_uri(&lsp_types::Uri::from(uri)).await else {
+        let Ok(path) = self.parse_file_uri(uri).await else {
             return not_computed(NotComputedReason::OutOfWorkspace);
         };
         *attempted = attempted.saturating_add(1);
@@ -498,8 +588,19 @@ impl Translator {
                     IndexingGate::FileLocal(FileLocalCapability::DocumentSymbols),
                 )
                 .await?;
+            let stamp = self.document_tracker.stamp(doc.path(), doc.server_id());
             let FetchedSymbols { doc, ctx, response } = self.fetch_document_symbols(doc).await?;
             let tree = symbol_tree(response, &ctx, doc.uri()).await;
+            if let Some((pass, hits)) = source.as_mut() {
+                let file = SourceFile {
+                    tracker: &self.document_tracker,
+                    path: doc.path(),
+                    server: doc.server_id(),
+                    stamp,
+                };
+                let in_file = hits.iter().enumerate().filter(|(_, hit)| hit.uri == uri);
+                pass.fill_file(&file, &tree, in_file);
+            }
             Ok((tree, ctx.positions_degraded()))
         };
         match tokio::time::timeout(remaining, lookup).await {
@@ -590,6 +691,7 @@ mod tests {
 
 #[cfg(test)]
 mod server_text_tests {
+    use super::super::dto::Position2D;
     use super::*;
 
     #[test]
@@ -600,14 +702,8 @@ mod server_text_tests {
             name_path: vec![format!("mod_{secret}"), "f".to_owned()],
             kind: 12,
             range: Range {
-                start: Position2D {
-                    line: 1,
-                    character: 1,
-                },
-                end: Position2D {
-                    line: 1,
-                    character: 2,
-                },
+                start: Position2D::at(1, 1),
+                end: Position2D::at(1, 2),
             },
             fidelity: SymbolFidelity::Hierarchical,
         });

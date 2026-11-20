@@ -927,7 +927,7 @@ impl Dispatcher {
     }
 }
 
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "status combines existing lifecycle fields and current failure health in one observation"
 )]
@@ -1223,7 +1223,7 @@ impl Resident {
             self.selection.config.mcp.clone(),
         ))
     }
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "one demand path preserves backend errors before server startup and recovery backoff"
     )]

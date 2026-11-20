@@ -2,7 +2,7 @@
 // Setup seam only: Translator::symbol_ref_test_context() -> &str, cfg(test).
 // All behavioral assertions consume MCP responses or the external LSP boundary.
 #[tokio::test]
-#[allow(
+#[expect(
     clippy::too_many_lines,
     reason = "independent public-wire compatibility matrix"
 )]

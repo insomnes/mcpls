@@ -22,8 +22,9 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio::time::Instant;
 use url::Url;
 
+use super::encoding::ColumnBoundary;
 use super::notifications::DocumentStamp;
-use super::{WorkspacePath, WorkspaceRoots};
+use super::{LspLine, Utf16Column, WorkspacePath, WorkspaceRoots};
 use crate::config::{DocumentLimit, LanguageId, LanguageMap, ServerId, SizeLimit};
 use crate::error::{BackgroundTask, Error, Result};
 use crate::lsp::LspClient;
@@ -186,12 +187,29 @@ impl DocumentText {
     }
 
     pub(super) fn line_start(&self, n: u32) -> Option<usize> {
+        self.line_start_walked(n).0
+    }
+
+    /// The byte offset where the 0-based line `n` starts (`None` past the
+    /// last line), and the bytes read walking from the nearest checkpoint,
+    /// including a walk that ran to the end of the text without finding it.
+    fn line_start_walked(&self, n: u32) -> (Option<usize>, usize) {
         let n = n as usize;
-        let mut start = *self.checkpoints.get(n.checked_div(self.stride)?)?;
-        for _ in 0..n.checked_rem(self.stride)? {
-            start = line_bounds(&self.content, start).1?;
+        let checkpoint = n
+            .checked_div(self.stride)
+            .and_then(|index| self.checkpoints.get(index).copied());
+        let (Some(checkpoint), Some(steps)) = (checkpoint, n.checked_rem(self.stride)) else {
+            return (None, 0);
+        };
+        let mut start = checkpoint;
+        for _ in 0..steps {
+            let (end, after) = line_bounds(&self.content, start);
+            let Some(next) = after else {
+                return (None, end.saturating_sub(checkpoint));
+            };
+            start = next;
         }
-        Some(start)
+        (Some(start), start.saturating_sub(checkpoint))
     }
 
     /// The lines from the 0-based `n`'th on, without terminators; empty if
@@ -881,7 +899,7 @@ impl DocumentTracker {
         lock_std(&self.documents).get(path).cloned()
     }
 
-    /// Text of the 0-based `line`'th line of `path`'s currently tracked
+    /// Text of the 0-based `line` of `path`'s currently tracked
     /// content, or `None` if the document is not open or has no such line.
     ///
     /// Reads the in-memory content mcpls already sent the server via
@@ -889,9 +907,13 @@ impl DocumentTracker {
     /// re-scanning the whole file) and more correct when disk and server
     /// state have diverged (e.g. an edit not yet flushed to disk).
     #[must_use]
-    pub fn line_text(&self, path: &Path, line: u32) -> Option<String> {
+    pub fn line_text(&self, path: &Path, line: LspLine) -> Option<String> {
         let documents = lock_std(&self.documents);
-        documents.get(path)?.text.line(line).map(str::to_string)
+        documents
+            .get(path)?
+            .text
+            .line(line.get())
+            .map(str::to_string)
     }
 
     /// Validate context-range endpoints against borrowed tracked lines, without source copies.
@@ -904,19 +926,11 @@ impl DocumentTracker {
         let Some(document) = documents.get(path) else {
             return false;
         };
-        let converter =
-            super::encoding::EncodingConverter::new(super::encoding::PositionEncoding::Utf16);
         let valid = positions.iter().all(|position| {
-            position.line > 0
-                && position.character > 0
-                && document
-                    .text
-                    .line(position.line.saturating_sub(1))
-                    .is_some_and(|text| {
-                        converter
-                            .character_to_byte_offset(text, position.character.saturating_sub(1))
-                            .is_ok()
-                    })
+            document
+                .text
+                .line(position.lsp_line().get())
+                .is_some_and(|text| position.lsp_character().byte_offset_in(text).is_ok())
         });
         drop(documents);
         valid
@@ -967,10 +981,10 @@ impl DocumentTracker {
     ///
     /// Checked under the documents lock without copying any text.
     #[must_use]
-    pub(crate) fn line_presence(&self, path: &Path, line: u32) -> LinePresence {
+    pub(crate) fn line_presence(&self, path: &Path, line: LspLine) -> LinePresence {
         match lock_std(&self.documents).get(path) {
             None => LinePresence::Untracked,
-            Some(document) if document.text.line(line).is_some() => LinePresence::Present,
+            Some(document) if document.text.line(line.get()).is_some() => LinePresence::Present,
             Some(document) => LinePresence::Beyond {
                 last_line: document.text.last_line(),
             },
@@ -986,14 +1000,14 @@ impl DocumentTracker {
     pub(crate) fn line_window(
         &self,
         path: &Path,
-        start_line: u32,
+        start_line: LspLine,
         max_lines: usize,
     ) -> Option<String> {
         let documents = lock_std(&self.documents);
         let mut lines = documents
             .get(path)?
             .text
-            .lines_from(start_line)
+            .lines_from(start_line.get())
             .take(max_lines);
         let mut window = lines.next()?.to_string();
         for line in lines {
@@ -1958,7 +1972,7 @@ impl DocumentTracker {
 /// rather than returning a line the cap may have cut. A `\r` ending a skipped
 /// line at a chunk boundary is remembered, so a `\n` opening the next chunk
 /// still counts as part of the same `\r\n` terminator.
-#[allow(
+#[expect(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
     reason = "every index derives from `position()` over the same chunk and stays within `chunk.len()`"
@@ -2087,6 +2101,171 @@ impl Drop for PathLockGuard<'_> {
         if Arc::strong_count(&self.arc) <= 2 {
             locks.remove(&self.path);
         }
+    }
+}
+
+/// Bytes an excerpt reserves up front; the cap itself is usually far larger.
+const EXCERPT_INITIAL_CAPACITY: usize = 1024;
+
+/// Bounds on one source excerpt.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ExcerptLimits {
+    /// Most lines an excerpt may span.
+    pub(super) max_lines: NonZeroU32,
+    /// Most bytes an excerpt may hold.
+    pub(super) max_bytes: std::num::NonZeroUsize,
+}
+
+/// Text cut out of a tracked document.
+#[derive(Debug)]
+pub(super) struct Excerpt {
+    /// The excerpted text, lines joined with `\n`.
+    pub(super) text: String,
+    /// Whether a limit cut the text short.
+    pub(super) truncated: bool,
+    /// Bytes of document text examined to cut it: each line read up to its
+    /// terminator, plus the walk to the first line.
+    pub(super) scanned: usize,
+}
+
+/// Why no excerpt could be cut.
+#[derive(Debug)]
+pub(super) enum ExcerptError {
+    /// The document is not tracked.
+    Untracked,
+    /// The document is not the one the span was computed on.
+    Changed,
+}
+
+impl DocumentTracker {
+    /// Cuts `span` out of the pinned text of `path`, provided the document is
+    /// still the one `stamp` describes.
+    ///
+    /// In one lock acquisition it requires the same opening, the tracked
+    /// version to equal the stamped one, and `server` to have been told that
+    /// version, so a reload `server` has not seen never yields text its ranges
+    /// do not describe. A start column inside a character rounds down, an end
+    /// column inside one rounds up, and an end past the line end (or
+    /// `u32::MAX`) is the line end. Lines are joined with `\n`; at most
+    /// `limits.max_lines` lines and `limits.max_bytes` bytes are copied, cut
+    /// on a line boundary where one fits and on a character boundary else.
+    ///
+    /// # Errors
+    ///
+    /// [`ExcerptError::Untracked`] when `path` is not tracked and
+    /// [`ExcerptError::Changed`] when the stamp no longer matches.
+    pub(super) fn excerpt(
+        &self,
+        path: &Path,
+        server: &ServerId,
+        stamp: DocumentStamp,
+        span: &super::Range,
+        limits: ExcerptLimits,
+    ) -> std::result::Result<Excerpt, ExcerptError> {
+        let documents = lock_std(&self.documents);
+        let excerpt = match documents.get(path) {
+            None => Err(ExcerptError::Untracked),
+            Some(state)
+                if Some(state.opened) == stamp.opening()
+                    && state.version == stamp.version()
+                    && state.synced_version(server) == Some(stamp.version()) =>
+            {
+                Ok(cut_excerpt(&state.text, span, limits))
+            }
+            Some(_) => Err(ExcerptError::Changed),
+        };
+        drop(documents);
+        excerpt
+    }
+}
+
+/// Cuts `span` out of `text`, counting the bytes it examines in
+/// [`Excerpt::scanned`].
+///
+/// Every line is examined through a view of at most
+/// `3 * start column + max_bytes + 4` bytes, so a line is never scanned to its
+/// terminator beyond what the cut needs: the work is bounded by the start
+/// column and `max_bytes` per line, not by the line length.
+fn cut_excerpt(text: &DocumentText, span: &super::Range, limits: ExcerptLimits) -> Excerpt {
+    let first = span.start.lsp_line();
+    let wanted = first.lines_through(span.end.lsp_line());
+    let take = wanted.min(limits.max_lines.get());
+    let mut truncated = wanted > take;
+    let max_bytes = limits.max_bytes.get();
+    let mut out = String::with_capacity(max_bytes.min(EXCERPT_INITIAL_CAPACITY));
+    let content = text.as_str();
+    let (mut next_start, mut scanned) = text.line_start_walked(first.get());
+
+    for index in 0..take {
+        let Some(start) = next_start else {
+            break;
+        };
+        let is_first = index == 0;
+        let is_last = !truncated && index.saturating_add(1) == take;
+        let skip = if is_first {
+            span.start.lsp_character().max_utf8_prefix_bytes()
+        } else {
+            0
+        };
+        let reach = skip.saturating_add(max_bytes).saturating_add(4);
+        let view_end = content.floor_char_boundary(start.saturating_add(reach).min(content.len()));
+        let view = content.get(start..view_end).unwrap_or_default();
+        let terminator = view.bytes().position(is_line_terminator);
+        scanned =
+            scanned.saturating_add(terminator.map_or(view.len(), |end| end.saturating_add(1)));
+        let line = &view[..terminator.unwrap_or(view.len())];
+        let view_cut = terminator.is_none() && view_end < content.len();
+        next_start = terminator.map(|offset| {
+            let end = start.saturating_add(offset);
+            let crlf = content.as_bytes().get(end) == Some(&b'\r')
+                && content.as_bytes().get(end.saturating_add(1)) == Some(&b'\n');
+            end.saturating_add(1).saturating_add(usize::from(crlf))
+        });
+
+        let from = if is_first {
+            span.start.lsp_character().floor_byte_in(line)
+        } else {
+            ColumnBoundary {
+                byte: 0,
+                column: Utf16Column::new(0),
+            }
+        };
+        // `None`: the cut ends further than the byte cap from its start, so
+        // the scan stopped.
+        let end = if is_last {
+            match span.end.lsp_character().ceil_byte_in(line, from, max_bytes) {
+                Some(to) if view_cut && to >= line.len() => None,
+                other => other,
+            }
+        } else {
+            Some(line.len())
+        };
+        let separator = usize::from(!is_first);
+        let segment = line
+            .get(from.byte..end.map_or(line.len(), |to| to.max(from.byte)))
+            .unwrap_or_default();
+        let fits = end.is_some()
+            && out
+                .len()
+                .saturating_add(separator)
+                .saturating_add(segment.len())
+                <= max_bytes;
+        if !fits {
+            truncated = true;
+            if is_first {
+                out.push_str(&segment[..segment.floor_char_boundary(max_bytes)]);
+            }
+            break;
+        }
+        if !is_first {
+            out.push('\n');
+        }
+        out.push_str(segment);
+    }
+    Excerpt {
+        text: out,
+        truncated,
+        scanned,
     }
 }
 
@@ -2325,6 +2504,10 @@ pub fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     url.to_file_path().ok()
 }
 
+#[cfg(test)]
+mod excerpt_acceptance_tests;
+#[cfg(test)]
+mod excerpt_bounds_tests;
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
@@ -3039,7 +3222,6 @@ mod tests {
             last_accessed: Instant::now(),
         };
 
-        #[allow(clippy::redundant_clone, reason = "the test exercises `Clone` itself")]
         let cloned = state.clone();
         assert_eq!(cloned.uri(), state.uri());
         assert_eq!(cloned.language_id(), state.language_id());
@@ -3051,23 +3233,38 @@ mod tests {
     fn test_line_presence_distinguishes_untracked_present_and_beyond() {
         let tracker = DocumentTracker::new(ResourceLimits::default(), HashMap::new());
         let path = PathBuf::from("/test/lines.rs");
-        assert_eq!(tracker.line_presence(&path, 0), LinePresence::Untracked);
+        assert_eq!(
+            tracker.line_presence(&path, LspLine::new(0)),
+            LinePresence::Untracked
+        );
 
         tracker.open(path.clone(), "a\r\nb\n".to_string()).unwrap();
-        assert_eq!(tracker.line_presence(&path, 0), LinePresence::Present);
-        assert_eq!(tracker.line_presence(&path, 1), LinePresence::Present);
-        assert_eq!(tracker.line_presence(&path, 2), LinePresence::Present);
+        assert_eq!(
+            tracker.line_presence(&path, LspLine::new(0)),
+            LinePresence::Present
+        );
+        assert_eq!(
+            tracker.line_presence(&path, LspLine::new(1)),
+            LinePresence::Present
+        );
+        assert_eq!(
+            tracker.line_presence(&path, LspLine::new(2)),
+            LinePresence::Present
+        );
         let beyond = LinePresence::Beyond {
             last_line: NonZeroU32::new(3).unwrap(),
         };
-        assert_eq!(tracker.line_presence(&path, 3), beyond);
-        assert_eq!(tracker.line_presence(&path, u32::MAX), beyond);
+        assert_eq!(tracker.line_presence(&path, LspLine::new(3)), beyond);
+        assert_eq!(tracker.line_presence(&path, LspLine::new(u32::MAX)), beyond);
 
         let empty = PathBuf::from("/test/empty.rs");
         tracker.open(empty.clone(), String::new()).unwrap();
-        assert_eq!(tracker.line_presence(&empty, 0), LinePresence::Present);
         assert_eq!(
-            tracker.line_presence(&empty, 1),
+            tracker.line_presence(&empty, LspLine::new(0)),
+            LinePresence::Present
+        );
+        assert_eq!(
+            tracker.line_presence(&empty, LspLine::new(1)),
             LinePresence::Beyond {
                 last_line: NonZeroU32::MIN
             }
@@ -3101,7 +3298,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "a table of extension mappings; splitting would scatter it"
     )]
@@ -4868,7 +5065,7 @@ mod tests {
                     .unwrap()
                     .text;
                 assert_eq!(
-                    tracker.line_text(&path, line),
+                    tracker.line_text(&path, LspLine::new(line)),
                     disk,
                     "content {content:?}, line {line}"
                 );
@@ -4884,16 +5081,31 @@ mod tests {
             .open(path.clone(), "ab\r\ncd\r\r\n".to_string())
             .unwrap();
 
-        assert_eq!(tracker.line_text(&path, 0).as_deref(), Some("ab"));
-        assert_eq!(tracker.line_text(&path, 1).as_deref(), Some("cd"));
-        assert_eq!(tracker.line_text(&path, 2).as_deref(), Some(""));
-        assert_eq!(tracker.line_text(&path, 3).as_deref(), Some(""));
-        assert_eq!(tracker.line_text(&path, 4), None);
+        assert_eq!(
+            tracker.line_text(&path, LspLine::new(0)).as_deref(),
+            Some("ab")
+        );
+        assert_eq!(
+            tracker.line_text(&path, LspLine::new(1)).as_deref(),
+            Some("cd")
+        );
+        assert_eq!(
+            tracker.line_text(&path, LspLine::new(2)).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            tracker.line_text(&path, LspLine::new(3)).as_deref(),
+            Some("")
+        );
+        assert_eq!(tracker.line_text(&path, LspLine::new(4)), None);
 
         let empty = PathBuf::from("/test/empty.rs");
         tracker.open(empty.clone(), String::new()).unwrap();
-        assert_eq!(tracker.line_text(&empty, 0).as_deref(), Some(""));
-        assert_eq!(tracker.line_text(&empty, 1), None);
+        assert_eq!(
+            tracker.line_text(&empty, LspLine::new(0)).as_deref(),
+            Some("")
+        );
+        assert_eq!(tracker.line_text(&empty, LspLine::new(1)), None);
     }
 
     /// Regression for the `SizeLimit::read_cap` off-by-one: a file whose size

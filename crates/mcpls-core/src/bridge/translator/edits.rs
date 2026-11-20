@@ -19,7 +19,7 @@ use super::navigation::ItemBudget;
 use super::positioned::{Positioned, budgeted, budgeted_classified, document_request};
 use super::previews::{Previews, suppress_degraded};
 use super::routing::{Capability, FileLocalCapability, IndexingGate};
-use crate::bridge::{ClientPath, WorkspaceRoots};
+use crate::bridge::{ClientPath, EditUriVerdict, WorkspaceRoots};
 use crate::config::ServerId;
 use crate::error::{ErrorChain, Result, is_invalid_offset};
 use crate::escape_control;
@@ -39,7 +39,7 @@ fn versions(value: &serde_json::Value) -> Vec<Option<SuppliedVersion>> {
     value
         .get("documentChanges")
         .and_then(serde_json::Value::as_array)
-        .map(|entries| {
+        .map_or_default(|entries| {
             entries
                 .iter()
                 .map(|entry| {
@@ -52,7 +52,6 @@ fn versions(value: &serde_json::Value) -> Vec<Option<SuppliedVersion>> {
                 })
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T> {
@@ -85,7 +84,7 @@ fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T>
 /// `changes` does not already name counts as `shadowed_by_changes`. A URI
 /// present in both is a mirror, not a drop. An entry outside
 /// `workspace_roots` is dropped rather than rewritten into the response --
-/// see [`WorkspaceRoots::admits_edit_uri`]. Edits beyond
+/// see [`WorkspaceRoots::edit_uri_verdict`]. Edits beyond
 /// `MAX_NORMALIZED_LOCATIONS` are counted in `exceeds_item_cap` (#487): each
 /// file's edit list is admitted whole or not at all, files in URI order, from
 /// the caller's `budget`, which the caller shares across every edit of one
@@ -139,20 +138,31 @@ struct WorkspaceEditConverter<'a, 'b> {
 
 impl WorkspaceEditConverter<'_, '_> {
     /// Whether `uri` may be written through (see
-    /// [`WorkspaceRoots::admits_edit_uri`]: exact-case lexical containment plus
-    /// canonical containment); an outside URI is logged and tallied in
-    /// `dropped.out_of_workspace` as a side effect.
+    /// [`WorkspaceRoots::edit_uri_verdict`]: exact-case lexical containment
+    /// plus canonical containment); a refused URI is logged and tallied in
+    /// `dropped.out_of_workspace`, or in `dropped.invalid_path` when its path
+    /// carries a name the filesystem rejects, as a side effect.
     async fn check_in_workspace(&mut self, uri: &lsp_types::Uri) -> bool {
-        let in_workspace = self.workspace_roots.admits_edit_uri(uri).await;
-        if !in_workspace {
-            tracing::warn!(
-                uri = uri.as_ref(),
-                "dropping out-of-workspace {}",
-                self.edit_kind
-            );
-            self.dropped.out_of_workspace = self.dropped.out_of_workspace.saturating_add(1);
+        match self.workspace_roots.edit_uri_verdict(uri).await {
+            EditUriVerdict::Admitted => true,
+            EditUriVerdict::OutOfWorkspace => {
+                tracing::warn!(
+                    uri = uri.as_ref(),
+                    edit_kind = %self.edit_kind,
+                    "dropping out-of-workspace edit"
+                );
+                self.dropped.out_of_workspace = self.dropped.out_of_workspace.saturating_add(1);
+                false
+            }
+            EditUriVerdict::InvalidPath => {
+                tracing::warn!(
+                    edit_kind = %self.edit_kind,
+                    "dropping edit whose path the filesystem rejects"
+                );
+                self.dropped.invalid_path = self.dropped.invalid_path.saturating_add(1);
+                false
+            }
         }
-        in_workspace
     }
 
     /// Admits one file's whole edit list against the budget, or tallies all
@@ -184,7 +194,7 @@ impl WorkspaceEditConverter<'_, '_> {
         } else {
             let edits = convert_text_edits(edits, self.ctx, &uri).await;
             DocumentChanges {
-                uri: uri.to_string(),
+                uri,
                 edit_count: edits.len(),
                 edits: Some(edits),
                 preview: super::dto::EditPreview {
@@ -206,7 +216,7 @@ impl WorkspaceEditConverter<'_, '_> {
         changes_map: HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>>,
     ) {
         let mut entries: Vec<_> = changes_map.into_iter().collect();
-        entries.sort_by_cached_key(|(uri, _)| uri.to_string());
+        entries.sort_by(|(a, _), (b, _)| AsRef::<str>::as_ref(a).cmp(AsRef::<str>::as_ref(b)));
         for (uri, edits) in entries {
             if !self.check_in_workspace(&uri).await {
                 continue;
@@ -285,8 +295,8 @@ impl WorkspaceEditConverter<'_, '_> {
                     if !mirrored.contains(uri) {
                         tracing::warn!(
                             uri = uri.as_ref(),
-                            "ignoring documentChanges entry shadowed by a non-empty changes map in {}",
-                            self.edit_kind
+                            edit_kind = %self.edit_kind,
+                            "ignoring documentChanges entry shadowed by a non-empty changes map"
                         );
                         self.dropped.shadowed_by_changes =
                             self.dropped.shadowed_by_changes.saturating_add(1);
@@ -348,7 +358,7 @@ async fn resolve_code_action(
     let mut supplied = Vec::new();
     match outcome {
         Ok(value) => {
-            supplied = value.get("edit").map(versions).unwrap_or_default();
+            supplied = value.get("edit").map_or_default(versions);
             let Ok(resolved) = decode::<lsp_types::CodeAction>(value) else {
                 return (action, Vec::new());
             };
@@ -447,7 +457,7 @@ async fn resolve_deferred_code_actions(
 /// document's own URI, used for the action's `diagnostics` (always scoped to
 /// the requested document); `edit`'s per-file URIs (from either `changes` or
 /// `documentChanges`) are each checked against `workspace_roots` before being
-/// trusted -- see [`WorkspaceRoots::admits_edit_uri`].
+/// trusted -- see [`WorkspaceRoots::edit_uri_verdict`].
 async fn convert_code_action(
     action: lsp_types::CodeAction,
     ctx: &EncodingCtx,
@@ -553,11 +563,11 @@ fn prepare_rename_rejection(
     drop(err.handled());
     if code == lsp_types::ErrorCodes::UnknownErrorCode {
         tracing::warn!(
-            "prepareRename failed with the catch-all UnknownErrorCode; reported as not_renameable: {}",
-            crate::util::truncate_str(
+            error = %crate::util::truncate_str(
                 &redactions.apply(&message),
                 crate::util::MAX_LOG_STRING_BYTES
-            )
+            ),
+            "prepareRename failed with the catch-all UnknownErrorCode; reported as not_renameable"
         );
     }
     Ok(PrepareRenameOutcome::NotRenameable {
@@ -616,10 +626,7 @@ impl Translator {
             },
             position: ctx.to_lsp(doc.uri(), position).await,
         };
-        let queried_position = Position2D {
-            line: position.line().get(),
-            character: position.character().get(),
-        };
+        let queried_position = Position2D::from_mcp(position.line(), position.character());
         let preparation = match self.require_capability(doc.server_id(), Capability::PrepareRename)
         {
             Err(crate::Error::CapabilityNotSupported { .. }) => RenamePreparation::Unsupported,
@@ -950,7 +957,7 @@ impl Translator {
         let raw = budget.admit(raw.unwrap_or_default());
         let mut supplied = raw
             .iter()
-            .map(|v| v.get("edit").map(versions).unwrap_or_default())
+            .map(|v| v.get("edit").map_or_default(versions))
             .collect::<Vec<_>>();
         let mut entries = raw
             .into_iter()
@@ -1030,7 +1037,7 @@ mod tests {
     /// ordinary replacement text -- `handle_rename` is the one tool that
     /// rewrites the user's files.
     #[tokio::test]
-    #[allow(
+    #[expect(
         clippy::literal_string_with_formatting_args,
         reason = "LSP snippet placeholders, not format arguments"
     )]
@@ -1248,7 +1255,7 @@ mod tests {
             1,
             "the out-of-workspace entry must be dropped, not forwarded"
         );
-        assert_eq!(changes[0].uri, inside_uri);
+        assert_eq!(changes[0].uri.as_ref(), inside_uri);
         assert_eq!(
             dropped.out_of_workspace, 1,
             "the dropped out-of-workspace entry must be tallied so callers can tell the rename is incomplete"
@@ -1279,7 +1286,7 @@ mod tests {
             .await;
         // Will fail due to no LSP server, but validates kind is accepted
         assert!(result.is_err());
-        assert!(!matches!(result, Err(Error::InvalidToolParams(_))));
+        assert!(!matches!(result, Err(Error::InvalidKindFilter(_))));
     }
 
     #[tokio::test]
@@ -1303,7 +1310,7 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert!(!matches!(result, Err(Error::InvalidToolParams(_))));
+        assert!(!matches!(result, Err(Error::InvalidKindFilter(_))));
     }
 
     #[tokio::test]
@@ -1327,7 +1334,7 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert!(!matches!(result, Err(Error::InvalidToolParams(_))));
+        assert!(!matches!(result, Err(Error::InvalidKindFilter(_))));
     }
 
     #[tokio::test]
@@ -1351,7 +1358,7 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
-        assert!(!matches!(result, Err(Error::InvalidToolParams(_))));
+        assert!(!matches!(result, Err(Error::InvalidKindFilter(_))));
     }
 
     #[tokio::test]
@@ -1377,7 +1384,7 @@ mod tests {
             .await;
         // Will fail due to no LSP server, but validates range is accepted
         assert!(result.is_err());
-        assert!(!matches!(result, Err(Error::InvalidToolParams(_))));
+        assert!(!matches!(result, Err(Error::InvalidKindFilter(_))));
     }
 
     #[tokio::test]
@@ -1413,7 +1420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "one scenario covering every severity"
     )]
@@ -1536,10 +1543,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(
-        clippy::mutable_key_type,
-        reason = "`lsp_types::Uri` keys are never mutated"
-    )]
     async fn test_convert_code_action_with_workspace_edit() {
         use std::collections::HashMap;
 
@@ -1598,7 +1601,7 @@ mod tests {
         assert!(result.edit.is_some());
         let edit = result.edit.unwrap();
         assert_eq!(edit.changes.len(), 1);
-        assert_eq!(edit.changes[0].uri, uri_string);
+        assert_eq!(edit.changes[0].uri.as_ref(), uri_string);
         assert_eq!(edit.changes[0].edits.as_ref().unwrap().len(), 1);
         assert_eq!(edit.changes[0].edits.as_ref().unwrap()[0].new_text, "fixed");
         assert!(result.is_preferred);
@@ -1667,7 +1670,7 @@ mod tests {
             .await;
 
             assert_eq!(changes.len(), 1);
-            assert_eq!(changes[0].uri, alias_uri.as_ref());
+            assert_eq!(changes[0].uri.as_ref(), alias_uri.as_ref());
             assert_eq!(dropped.out_of_workspace, 1);
         }
     }
@@ -1700,6 +1703,42 @@ mod tests {
         )
         .await;
         (changes.len(), dropped.out_of_workspace)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_edit_with_an_overlong_component_is_tallied_as_invalid_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(dir.path()).unwrap();
+        let roots = WorkspaceRoots::from_paths(std::slice::from_ref(&base)).unwrap();
+        let overlong = base.join("a".repeat(300)).join("x.rs");
+
+        let uri = crate::bridge::path_to_uri(&overlong).unwrap();
+        let edit = lsp_types::WorkspaceEdit {
+            changes: Some(HashMap::from([(
+                uri,
+                vec![lsp_types::TextEdit {
+                    range: lsp_types::Range::default(),
+                    new_text: "x".to_string(),
+                }],
+            )])),
+            document_changes: None,
+            change_annotations: None,
+        };
+        let (changes, dropped) = convert_workspace_edit(
+            edit,
+            &test_ctx(),
+            &roots,
+            "rename edit",
+            &mut ItemBudget::new(),
+            None,
+            &[],
+        )
+        .await;
+
+        assert!(changes.is_empty());
+        assert_eq!(dropped.invalid_path, 1);
+        assert_eq!(dropped.out_of_workspace, 0);
     }
 
     /// Aliases are only a spelling aid: a symlink inside the workspace that
@@ -1805,7 +1844,7 @@ mod tests {
         assert!(result.edit.is_some());
         let edit = result.edit.unwrap();
         assert_eq!(edit.changes.len(), 1);
-        assert_eq!(edit.changes[0].uri, uri_string);
+        assert_eq!(edit.changes[0].uri.as_ref(), uri_string);
         assert_eq!(edit.changes[0].edits.as_ref().unwrap().len(), 1);
         assert_eq!(edit.changes[0].edits.as_ref().unwrap()[0].new_text, "fixed");
         assert!(result.is_preferred);
@@ -1816,10 +1855,6 @@ mod tests {
     /// tallied as shadowed -- matching the precedence `convert_workspace_edit`
     /// already applies for `handle_rename`.
     #[tokio::test]
-    #[allow(
-        clippy::mutable_key_type,
-        reason = "`lsp_types::Uri` keys are never mutated"
-    )]
     async fn test_convert_code_action_changes_takes_precedence_over_document_changes() {
         use std::collections::HashMap;
 
@@ -1912,7 +1947,7 @@ mod tests {
             1,
             "only the `changes` entry should be present"
         );
-        assert_eq!(edit.changes[0].uri, changes_uri_string);
+        assert_eq!(edit.changes[0].uri.as_ref(), changes_uri_string);
         assert_eq!(
             edit.changes[0].edits.as_ref().unwrap()[0].new_text,
             "from_changes"
@@ -1996,7 +2031,7 @@ mod tests {
             1,
             "the out-of-workspace entry must be dropped, not forwarded"
         );
-        assert_eq!(edit.changes[0].uri, inside_uri_string);
+        assert_eq!(edit.changes[0].uri.as_ref(), inside_uri_string);
         assert_eq!(edit.changes[0].edits.as_ref().unwrap()[0].new_text, "fixed");
         assert_eq!(
             edit.dropped.out_of_workspace, 1,
@@ -2080,7 +2115,7 @@ mod tests {
             1,
             "the plain TextDocumentEdit must survive alongside the dropped file operations"
         );
-        assert_eq!(changes[0].uri, uri_string);
+        assert_eq!(changes[0].uri.as_ref(), uri_string);
         assert_eq!(
             dropped.unsupported_file_operation, 3,
             "CreateFile, RenameFile, and DeleteFile must each be tallied"
@@ -2093,10 +2128,6 @@ mod tests {
     /// resulting `changes` list is empty just like "nothing to rename" would
     /// be -- `dropped` is what makes the two cases distinguishable.
     #[tokio::test]
-    #[allow(
-        clippy::mutable_key_type,
-        reason = "`lsp_types::Uri` keys are never mutated"
-    )]
     async fn test_convert_workspace_edit_everything_dropped_is_distinguishable_from_no_edits() {
         use std::collections::HashMap;
 
@@ -2170,10 +2201,6 @@ mod tests {
     /// twice -- `changes` takes precedence, and a `documentChanges` entry
     /// mirroring one of its URIs is not tallied again.
     #[tokio::test]
-    #[allow(
-        clippy::mutable_key_type,
-        reason = "`lsp_types::Uri` keys are never mutated"
-    )]
     async fn test_convert_workspace_edit_changes_precedence_avoids_double_counting_drops() {
         use std::collections::HashMap;
 
@@ -2255,10 +2282,6 @@ mod tests {
     /// genuinely withheld. `changes` being present must keep its own drop
     /// count intact regardless of what `documentChanges` separately contains.
     #[tokio::test]
-    #[allow(
-        clippy::mutable_key_type,
-        reason = "`lsp_types::Uri` keys are never mutated"
-    )]
     async fn test_convert_workspace_edit_changes_precedence_keeps_drops_when_document_changes_would_succeed()
      {
         use std::collections::HashMap;
@@ -2363,10 +2386,6 @@ mod tests {
     /// `documentChanges` and returning a result indistinguishable from
     /// "nothing to rename".
     #[tokio::test]
-    #[allow(
-        clippy::mutable_key_type,
-        reason = "`lsp_types::Uri` keys are never mutated"
-    )]
     async fn test_convert_workspace_edit_falls_back_to_document_changes_when_changes_map_is_present_but_empty()
      {
         use std::collections::HashMap;
@@ -2425,7 +2444,7 @@ mod tests {
             "an empty-but-present `changes` map must not be treated as authoritative over a \
              populated documentChanges"
         );
-        assert_eq!(changes[0].uri, uri_string);
+        assert_eq!(changes[0].uri.as_ref(), uri_string);
         assert!(dropped.is_empty());
     }
 
@@ -2436,10 +2455,7 @@ mod tests {
     #[test]
     fn test_rename_result_dropped_field_serde_presence() {
         let clean = RenameResult {
-            position: Position2D {
-                line: 1,
-                character: 1,
-            },
+            position: Position2D::at(1, 1),
             outcome: RenameOutcome::Proposed {
                 preparation: RenamePreparation::Unsupported,
                 changes: vec![],
@@ -2454,10 +2470,7 @@ mod tests {
         );
 
         let incomplete = RenameResult {
-            position: Position2D {
-                line: 1,
-                character: 1,
-            },
+            position: Position2D::at(1, 1),
             outcome: RenameOutcome::Proposed {
                 preparation: RenamePreparation::Unsupported,
                 changes: vec![],
@@ -3299,7 +3312,7 @@ mod tests {
         .await;
 
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].uri, in_changes);
+        assert_eq!(changes[0].uri.as_ref(), in_changes);
         assert_eq!(dropped.shadowed_by_changes, 1);
         assert_eq!(dropped.unsupported_file_operation, 2);
         assert_eq!(dropped.out_of_workspace, 0);
@@ -3347,7 +3360,7 @@ mod tests {
         .await;
 
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].uri, empty_on_arrival);
+        assert_eq!(changes[0].uri.as_ref(), empty_on_arrival);
         assert_eq!(dropped.unsupported_snippet_edit, 2);
     }
 
@@ -3375,7 +3388,7 @@ mod tests {
         .await;
 
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].uri, first);
+        assert_eq!(changes[0].uri.as_ref(), first);
         assert_eq!(changes[0].edits.as_ref().unwrap().len(), per_file);
         assert_eq!(dropped.exceeds_item_cap, per_file);
     }
@@ -3524,7 +3537,7 @@ mod tests {
         .await;
 
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].uri, full);
+        assert_eq!(changes[0].uri.as_ref(), full);
         assert_eq!(dropped.exceeds_item_cap, 2);
     }
 }

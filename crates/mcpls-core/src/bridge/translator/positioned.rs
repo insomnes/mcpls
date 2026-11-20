@@ -804,8 +804,7 @@ impl Translator {
         R: ItemRequest,
         R::Params: FromItem,
     {
-        let item_uri = lsp_types::Uri::from(item.uri());
-        let path = self.parse_file_uri(&item_uri).await?;
+        let path = self.parse_file_uri(item.uri()).await?;
         let origin = item.origin.clone();
         let (doc, ctx) = if let Some(origin) = &origin {
             let doc = self

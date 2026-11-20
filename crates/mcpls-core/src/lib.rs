@@ -55,6 +55,8 @@ pub mod transport;
 mod util;
 
 #[cfg(test)]
+mod panic_acceptance_tests;
+#[cfg(test)]
 mod test_lsp;
 #[cfg(test)]
 mod test_support;
@@ -86,7 +88,7 @@ pub use transport::{
     StreamLiveness, WriteStallTimeout,
 };
 use transport::{ShutdownSignal, run_stdio};
-pub use util::{escape_control, needs_control_escape};
+pub use util::{PanicMessage, escape_control, needs_control_escape};
 
 /// Start the MCPLS server with the given configuration over stdio.
 ///
@@ -303,8 +305,8 @@ async fn serve_with_inner(config: ServerConfig, transport: Transport) -> Result<
         None
     } else {
         info!(
-            "Spawning {} LSP server(s) in the background...",
-            applicable_configs.len()
+            count = applicable_configs.len(),
+            "Spawning LSP server(s) in the background..."
         );
         Some(spawn_lsp_servers_background(
             applicable_configs,
@@ -428,8 +430,8 @@ impl WorkspaceRuntime {
         }
 
         info!(
-            "Attempting to spawn {} applicable LSP server(s)...",
-            applicable_configs.len()
+            count = applicable_configs.len(),
+            "Attempting to spawn applicable LSP server(s)"
         );
 
         // Built over the applicable (post-heuristics) configs only: this is where

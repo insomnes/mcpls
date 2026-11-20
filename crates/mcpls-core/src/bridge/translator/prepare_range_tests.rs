@@ -181,13 +181,15 @@ async fn prepare_rename_invalid_params_error_is_not_renameable() {
 }
 
 async fn logs_of(answer: Answer) -> Vec<(tracing::Level, String)> {
-    logs_of_redacting(answer, Redactions::default()).await
+    logs_of_redacting(answer, Redactions::default())
+        .await
+        .entries()
 }
 
 async fn logs_of_redacting(
     answer: Answer,
     redactions: Redactions,
-) -> Vec<(tracing::Level, String)> {
+) -> crate::test_lsp::CapturedLogs {
     use tracing_subscriber::prelude::*;
 
     let captured = crate::test_lsp::CapturedLogs::default();
@@ -197,7 +199,7 @@ async fn logs_of_redacting(
             .with(tracing_subscriber::filter::LevelFilter::DEBUG),
     );
     drop(prepare_rename_redacting(answer, redactions).await);
-    captured.entries()
+    captured
 }
 
 fn error_response_logs(
@@ -378,12 +380,12 @@ macro_rules! reject {
 /// end of the tracked document as invalid params, before any LSP request.
 #[tokio::test]
 async fn every_positioned_tool_rejects_a_line_beyond_the_document() {
-    use crate::bridge::ResultContext;
+    use crate::bridge::LocationContext;
 
     let dir = TempDir::new().unwrap();
     let (translator, path, _server) = tracked_translator(&dir, all_positioned_caps(), "a\nb\n");
     let file = || client_path(path.to_string_lossy().into_owned());
-    let (beyond, ctx) = (pos(99, 1), ResultContext::None);
+    let (beyond, ctx) = (pos(99, 1), LocationContext::None);
     let t = &translator;
 
     reject!("hover", t.handle_hover(file(), beyond));
@@ -446,13 +448,23 @@ async fn every_positioned_tool_rejects_a_line_beyond_the_document() {
 
 #[tokio::test]
 async fn prepare_rename_catch_all_error_logs_a_warning() {
-    let logs = logs_of(Answer::Error(-32001, "internal clangd failure")).await;
+    let captured = logs_of_redacting(
+        Answer::Error(-32001, "internal clangd failure"),
+        Redactions::default(),
+    )
+    .await;
+    let logs = captured.entries();
     assert!(
         logs.iter()
-            .any(|(level, msg)| *level == tracing::Level::WARN
-                && msg.contains("UnknownErrorCode")
-                && msg.contains("internal clangd failure")),
+            .any(|(level, msg)| *level == tracing::Level::WARN && msg.contains("UnknownErrorCode")),
         "{logs:?}"
+    );
+    assert!(
+        captured
+            .fields()
+            .contains(&"error=internal clangd failure".to_string()),
+        "{:?}",
+        captured.fields()
     );
     assert!(
         error_response_logs(&logs, tracing::Level::ERROR).is_empty(),
@@ -463,26 +475,26 @@ async fn prepare_rename_catch_all_error_logs_a_warning() {
 #[tokio::test]
 async fn prepare_rename_catch_all_warning_redacts_the_server_message() {
     let redactions = Redactions::new([("B_TOKEN".to_owned(), "bravo-secret-222".to_owned())]);
-    let logs = logs_of_redacting(
+    let captured = logs_of_redacting(
         Answer::Error(-32001, "failed for bravo-secret-222"),
         redactions,
     )
     .await;
-    let warnings: Vec<_> = logs
-        .iter()
-        .filter(|(level, _)| *level == tracing::Level::WARN)
-        .collect();
+    let logs = captured.entries();
+    let fields = captured.fields_at(tracing::Level::WARN);
     assert!(
-        warnings
+        fields
             .iter()
-            .any(|(_, msg)| msg.contains("[redacted:B_TOKEN]")),
-        "{logs:?}"
+            .any(|field| field.starts_with("error=") && field.contains("[redacted:B_TOKEN]")),
+        "{logs:?} {fields:?}"
     );
     assert!(
-        warnings
-            .iter()
-            .all(|(_, msg)| !msg.contains("bravo-secret-222")),
-        "{logs:?}"
+        logs.iter()
+            .all(|(_, msg)| !msg.contains("bravo-secret-222"))
+            && fields
+                .iter()
+                .all(|field| !field.contains("bravo-secret-222")),
+        "{logs:?} {fields:?}"
     );
 }
 
@@ -770,10 +782,7 @@ async fn format_range_sends_zero_based_range_and_options() {
     assert_eq!(result.changes[0].edits.as_ref().unwrap().len(), 1);
     assert_eq!(
         result.changes[0].edits.as_ref().unwrap()[0].range.start,
-        Position2D {
-            line: 2,
-            character: 2
-        }
+        Position2D::at(2, 2)
     );
 }
 
@@ -796,7 +805,8 @@ async fn format_range_converts_utf8_edit_columns() {
         result.changes[0].edits.as_ref().unwrap()[0]
             .range
             .start
-            .character,
+            .character()
+            .get(),
         3
     );
     assert_eq!(result.positions_degraded, None);

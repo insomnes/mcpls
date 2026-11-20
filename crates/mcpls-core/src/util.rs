@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::future::Future;
 use std::io::Read as _;
 use std::num::NonZeroU64;
+use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::string::FromUtf8Error;
@@ -504,28 +505,76 @@ pub fn run_detached<T: Send + 'static>(
     }
 }
 
-/// A future that panicked while being driven by [`catch_panic`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("task panicked: {message}")]
-pub struct TaskPanicked {
-    message: String,
-}
+/// The text of a panic payload, escaped and bounded like every other
+/// logged attacker-influenced string (a truncation marker follows a cut).
+///
+/// The invariant holds by construction: the only constructor is
+/// [`Self::from_payload`], so the text is safe to log verbatim on one line.
+///
+/// # Examples
+///
+/// ```
+/// use mcpls_core::PanicMessage;
+///
+/// let payload: Box<dyn std::any::Any + Send> = Box::new("a\nERROR forged");
+/// assert_eq!(PanicMessage::from_payload(payload.as_ref()).as_str(), "a\\nERROR forged");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanicMessage(String);
 
-impl TaskPanicked {
-    /// Best-effort text of the panic payload.
+impl PanicMessage {
+    /// Builds the message from a panic payload; a payload that is neither
+    /// `&str` nor `String` is named as non-string.
     #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    fn from_payload(payload: &(dyn std::any::Any + Send)) -> Self {
-        let message = payload
+    pub fn from_payload(payload: &(dyn std::any::Any + Send)) -> Self {
+        let text = payload
             .downcast_ref::<&str>()
             .copied()
             .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
             .unwrap_or("non-string panic payload");
+        Self(escape_bounded(text, MAX_LOG_STRING_BYTES))
+    }
+
+    /// The panic text of a failed task, or `None` when it was cancelled
+    /// instead.
+    pub(crate) fn from_join_error(error: tokio::task::JoinError) -> Option<Self> {
+        error
+            .try_into_panic()
+            .ok()
+            .map(|payload| Self::from_payload(payload.as_ref()))
+    }
+
+    /// The escaped, bounded text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for PanicMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A future that panicked while being driven by [`catch_panic`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("task panicked: {message}")]
+pub struct TaskPanicked {
+    message: PanicMessage,
+}
+
+impl TaskPanicked {
+    /// Best-effort text of the panic payload, escaped and bounded to
+    /// [`MAX_LOG_STRING_BYTES`] when the panic was caught, so it is safe to log verbatim.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        self.message.as_str()
+    }
+
+    fn from_payload(payload: &(dyn std::any::Any + Send)) -> Self {
         Self {
-            message: message.to_owned(),
+            message: PanicMessage::from_payload(payload),
         }
     }
 }
@@ -570,6 +619,116 @@ impl WarnLimiter {
         }
         due
     }
+}
+
+/// How long a supervisor waits before rerunning a task that panicked.
+#[derive(Debug, Clone, Copy)]
+pub struct RestartDelays {
+    /// Delay after the first panic; it doubles with each further one.
+    pub first: Duration,
+    /// Largest delay, also the period of the panic log line and the run time
+    /// after which the delay starts over.
+    pub max: Duration,
+}
+
+/// Restart pacing shared by every supervised task: the delay doubles from
+/// [`RestartDelays::first`] up to [`RestartDelays::max`] (and starts over after
+/// a run that lasted `max`), and a panic is logged at error level at most once
+/// per `max`, so a task that panics at once does not flood the log.
+#[derive(Debug)]
+pub struct RestartBackoff {
+    delays: RestartDelays,
+    delay: Duration,
+    limiter: WarnLimiter,
+}
+
+impl RestartBackoff {
+    /// A backoff whose first restart waits `delays.first` and whose first
+    /// panic is logged at once.
+    ///
+    /// One backoff belongs to one supervised task, so its delay and log
+    /// throttle carry over between that task's restarts.
+    #[must_use]
+    pub const fn new(delays: RestartDelays) -> Self {
+        Self {
+            delays,
+            delay: delays.first,
+            limiter: WarnLimiter::new(),
+        }
+    }
+
+    /// Logs the panic of a run that began at `started`, then waits out the
+    /// restart delay. [`ControlFlow::Break`] when `cancel` fired meanwhile and
+    /// the task must not run again.
+    pub async fn after_panic(
+        &mut self,
+        what: crate::error::BackgroundTask,
+        panicked: &TaskPanicked,
+        started: tokio::time::Instant,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> ControlFlow<()> {
+        let now = tokio::time::Instant::now();
+        if now.saturating_duration_since(started) >= self.delays.max {
+            self.delay = self.delays.first;
+        }
+        if self.limiter.due(now.into_std(), self.delays.max) {
+            tracing::error!(
+                panic = %panicked.message(),
+                operation = %what,
+                delay = ?self.delay,
+                "task panicked; restarting it after the delay, it is not running until then"
+            );
+        }
+        tokio::select! {
+            () = cancel.cancelled() => return ControlFlow::Break(()),
+            () = tokio::time::sleep(self.delay) => {}
+        }
+        self.delay = self.delay.saturating_mul(2).min(self.delays.max);
+        ControlFlow::Continue(())
+    }
+}
+
+/// Runs `run` to completion, rerunning it each time it panics after the
+/// [`RestartBackoff`] delay, and stops once it returns or `cancel` fires during
+/// the delay.
+pub async fn supervise<Fut: Future<Output = ()>>(
+    what: crate::error::BackgroundTask,
+    mut run: impl FnMut() -> Fut,
+    cancel: &tokio_util::sync::CancellationToken,
+    delays: RestartDelays,
+) {
+    let mut backoff = RestartBackoff::new(delays);
+    loop {
+        let started = tokio::time::Instant::now();
+        let Err(panicked) = catch_panic(run()).await else {
+            return;
+        };
+        if backoff
+            .after_panic(what, &panicked, started, cancel)
+            .await
+            .is_break()
+        {
+            return;
+        }
+    }
+}
+
+/// The serialized JSON length of `value`, measured without allocating the
+/// text; `None` if serialization fails.
+pub fn json_len(value: &impl serde::Serialize) -> Option<usize> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).ok()?;
+    Some(counter.0)
 }
 
 /// Counts dropped frames and says when one is worth a warning: at most once
@@ -620,9 +779,59 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn after_panic_escapes_the_panic_payload_in_the_log() {
+        use tracing_subscriber::prelude::*;
+
+        let logs = crate::test_lsp::CapturedLogs::default();
+        let subscriber = tracing_subscriber::registry().with(logs.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let panicked = catch_panic(async { panic!("ok\nERROR forged") })
+            .await
+            .unwrap_err();
+        let mut backoff = RestartBackoff::new(RestartDelays {
+            first: Duration::from_secs(1),
+            max: Duration::from_secs(8),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let flow = backoff
+            .after_panic(
+                crate::error::BackgroundTask::SessionDelivery,
+                &panicked,
+                tokio::time::Instant::now(),
+                &cancel,
+            )
+            .await;
+        assert!(flow.is_break());
+        let fields = logs.fields_at(tracing::Level::ERROR);
+        let panic = fields
+            .iter()
+            .find(|f| f.starts_with("panic="))
+            .expect("panic field");
+        assert!(!panic.contains('\n'), "{panic}");
+        assert!(panic.contains("ok\\nERROR forged"), "{panic}");
+    }
+
+    #[test]
+    fn json_len_matches_the_serialized_length() {
+        let value = serde_json::json!({"a": [1, "é\n", null]});
+        assert_eq!(
+            json_len(&value),
+            Some(serde_json::to_vec(&value).unwrap().len())
+        );
+    }
+
+    #[test]
+    fn json_len_is_none_when_serialization_fails() {
+        use std::collections::HashMap;
+        let unserializable: HashMap<(u8, u8), u8> = HashMap::from([((1, 2), 3)]);
+        assert_eq!(json_len(&unserializable), None);
+    }
+
     #[test]
     fn warn_limiter_is_due_at_first_and_then_once_per_interval() {
-        let every = Duration::from_secs(60);
+        let every = Duration::from_mins(1);
         let start = Instant::now();
         let mut limiter = WarnLimiter::default();
         assert!(limiter.due(start, every));

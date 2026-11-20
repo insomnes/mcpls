@@ -194,7 +194,7 @@ impl Translator {
     /// Enrich only retained discovery entries, with a separate fixed acquisition budget.
     pub(crate) async fn portable_targets(
         &self,
-        entries: impl IntoIterator<Item = (String, Position2D)>,
+        entries: impl IntoIterator<Item = (lsp_types::Uri, Position2D)>,
         unavailable: Option<&'static str>,
     ) -> Vec<std::result::Result<SymbolTargetEnvelope, SymbolTargetUnavailable>> {
         let mut remaining = 4_194_304usize;
@@ -212,8 +212,6 @@ impl Translator {
                 if let Some(reason) = unavailable {
                     return Err(reason);
                 }
-                let uri: lsp_types::Uri = serde_json::from_value(serde_json::Value::String(uri))
-                    .map_err(|_| "non_file_uri")?;
                 let path = crate::bridge::state::uri_to_path(&uri).ok_or("non_file_uri")?;
                 if !sources.contains_key(&path) {
                     let source = async {
@@ -249,7 +247,7 @@ impl Translator {
                     .ok_or("source_unverifiable")?
                     .as_ref()
                     .map_err(|reason| *reason)?;
-                let position = Position::from_client(point.line, point.character)
+                let position = Position::from_client(point.line().get(), point.character().get())
                     .map_err(|_| "position_unverifiable")?;
                 if !valid_point(text, position) {
                     return Err("position_unverifiable");

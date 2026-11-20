@@ -32,38 +32,50 @@ The result is `null` when the server has no hover information for that position.
 
 Returns where a symbol is defined, across files and crates.
 
-Arguments: the same addressing as `get_hover`, plus optional `context` (see [enclosing-symbol context](overview.md#enclosing-symbol-context)).
+Arguments: the same addressing as `get_hover`, plus optional `context` (see [enclosing-symbol context](overview.md#enclosing-symbol-context) and [symbol source](overview.md#symbol-source)).
 
 ```json
 { "file_path": "/work/app/src/billing.rs", "symbol_name": "process_payment" }
 ```
 
 ```json
-[
-  {
-    "uri": "file:///work/app/src/billing.rs",
-    "range": {
-      "start": { "line": 23, "character": 0 },
-      "end": { "line": 23, "character": 14 }
-    },
-    "out_of_workspace": false
-  }
-]
+{
+  "locations": [
+    {
+      "uri": "file:///work/app/src/billing.rs",
+      "range": {
+        "start": { "line": 23, "character": 1 },
+        "end": { "line": 23, "character": 14 }
+      }
+    }
+  ]
+}
 ```
 
-A symbol with several definitions returns several locations; an unknown symbol returns an empty array.
+Several definitions produce several locations. A position without a definition produces an empty `locations` array.
 
 ### Optional navigation source
 
-`get_definition`, `go_to_implementation`, `go_to_type_definition`, and
-`go_to_declaration` accept `include_source` (boolean, default `false`).
-Declaration remains position-only; the other three also accept symbol names.
+`get_definition`, `get_references`, `go_to_implementation`,
+`go_to_type_definition`, and `go_to_declaration` accept boolean `include_source`
+and `broader_context`. Both flags default to `false`. Declaration takes a
+position. The other tools also accept symbol names.
+
+| Options | Location fields |
+|---------|-----------------|
+| Default or `context:"enclosing_symbol"`, with both flags false | No source fields |
+| `include_source:true` | Excerpt in `source` |
+| `broader_context:true` with either value of `include_source` | Excerpt in `broader_context` |
+| `context:"symbol_source"` with both flags false | Symbol body outcome in `source` |
+| `context:"symbol_source"` with either excerpt flag true | Body in `source` and one excerpt in `broader_context` |
 
 ```json
-{"file_path":"/work/app/src/billing.rs","symbol_name":"process_payment","include_source":true}
+{"file_path":"/work/app/src/billing.rs","symbol_name":"process_payment","context":"symbol_source","broader_context":true}
 ```
 
-Every retained location then has `source.status` equal to `text` or `unavailable`.
+Body outcomes follow the [symbol-source contract](overview.md#symbol-source).
+A body or excerpt can be unavailable independently. Excerpts use `status`
+`text` or `unavailable`. For the four go-to tools, text includes the fields below.
 Text includes `text`, `start_line` (1-based), `origin` (`tracked` or `disk`),
 `sha256`, and `shortened`. The lowercase SHA-256 identifies the complete unredacted
 observed file bytes, including bytes outside the excerpt. It does not identify
@@ -110,7 +122,7 @@ Returns references reported by the language server, in server order, including d
 Arguments: addressing as above, `mode` (`"locations"` by default, or `"files"`),
 `include_declaration` (default `false`), optional `context`,
 `limit` (default 10, integer 1 through 10000), optional absolute `path_filter`,
-`include_source` (default `false`), and `include_targets` (default `false`).
+`include_source`, `broader_context`, and `include_targets` (all default `false`).
 Relative filters are rejected. Explicit null or non-boolean target flags fail.
 
 With `include_targets:true`, each retained location has `symbol_target` or
@@ -187,7 +199,8 @@ path cannot be represented as a UTF-8 JSON string. Requested source failures rem
 explicit. Source and positions do not form an atomic snapshot.
 
 Each location preserves `uri`, `range`, advisory `out_of_workspace`, and optional `enclosing_symbol`.
-With source enabled, `source` has one of these shapes:
+The excerpt appears in `source` or `broader_context` as shown in the
+[options table](#optional-navigation-source). It has one of these shapes:
 
 ```json
 {"status":"text","text":"fn usage() {\n    call();\n}\n","start_line":10,"origin":"disk","shortened":false}
@@ -203,8 +216,10 @@ Text includes the reference's starting line and up to two lines on either side.
 These snapshots are not atomic with the server's locations.
 External paths and symlink escapes disclose no source, regardless of `out_of_workspace`.
 Source enrichment does not open LSP documents or use a persistent cache.
-`include_source: true` opts into source for returned locations only.
-Omitted or false `include_source` omits `source` and source excerpt reads and copies.
+With both excerpt flags false, the excerpt pass performs no reads or copies.
+In files mode the excerpt applies to the selected examples.
+`context:"symbol_source"` requires `mode:"locations"`.
+Files mode rejects that context with `-32602` before acquiring source.
 With `context` omitted or `"none"`, enclosing-symbol enrichment is also skipped.
 Necessary document synchronization and position normalization still occur.
 To request the previous defaults explicitly, use `"limit":100,"include_source":true`.
@@ -240,7 +255,7 @@ Use it to understand a file before reading it, or to find the exact name for a `
 
 Searches symbol names across the whole workspace, with partial and fuzzy matching. It needs no file, so it is the way in when you only know a name.
 
-Arguments: `query` (required), `limit` (default 100, capped by the server) and `kind_filter` (a kind name such as `function` or `class`, or the numeric LSP kind).
+Arguments: `query` (required, at most 1,000 bytes; a longer one fails with `-32602` naming `query`), `limit` (default 100, capped by the server) and `kind_filter` (a kind name such as `function` or `class`, or the numeric LSP kind).
 
 ```json
 { "query": "SessionManager", "kind_filter": "struct" }

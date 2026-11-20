@@ -347,7 +347,7 @@ impl McplsServer {
                 .delta_completeness(&uri)
         };
         let cache_unknown = history_unknown || evidence.is_some_and(|e| e.cache_unknown);
-        let mut report = json!({"availability":availability,"origin":origin,"pull_kind":pull_kind,"result_id":evidence.and_then(|e|e.result_id.as_ref()),"synced_version":translator.document_tracker().synced_version(validated.as_path(),&route),"report_version":evidence.and_then(|e|e.report_version),"cached_origins":evidence.map(|e|e.origins.iter().copied().filter(|origin| pull_kind != "full" || *origin != "pull").collect::<Vec<_>>()).unwrap_or_default(),"indexing_in_progress":signals.indexing.indexing_in_progress,"push_notifications_degraded":signals.push_notifications_degraded,"completeness":"complete","uncertainties":[],"omitted_diagnostics":evidence.and_then(|e|e.omitted).unwrap_or(0),"source_freshness":"unknown"});
+        let mut report = json!({"availability":availability,"origin":origin,"pull_kind":pull_kind,"result_id":evidence.and_then(|e|e.result_id.as_ref()),"synced_version":translator.document_tracker().synced_version(validated.as_path(),&route),"report_version":evidence.and_then(|e|e.report_version),"cached_origins":evidence.map_or_default(|e|e.origins.iter().copied().filter(|origin| pull_kind != "full" || *origin != "pull").collect::<Vec<_>>()),"indexing_in_progress":signals.indexing.indexing_in_progress,"push_notifications_degraded":signals.push_notifications_degraded,"completeness":"complete","uncertainties":[],"omitted_diagnostics":evidence.and_then(|e|e.omitted).unwrap_or(0),"source_freshness":"unknown"});
         for (condition, reason) in [
             (
                 availability == crate::bridge::DiagnosticsAvailability::Pending,
@@ -470,7 +470,12 @@ impl McplsServer {
                     .filter_map(|(i, m)| (!m).then_some(i))
                     .collect();
                 let complete = report["completeness"] == "complete" && baseline_complete;
-                json!({"status":if complete{"compared"}else{"incomplete"},"identity":identity,"report":report,"comparison_complete":complete,"added":added,"remaining":remaining,"resolved":if complete{missing.clone()}else{vec![]},"uncertain_removed":if complete{vec![]}else{missing},"truncated":truncated})
+                let (resolved, uncertain_removed) = if complete {
+                    (missing, vec![])
+                } else {
+                    (vec![], missing)
+                };
+                json!({"status":if complete{"compared"}else{"incomplete"},"identity":identity,"report":report,"comparison_complete":complete,"added":added,"remaining":remaining,"resolved":resolved,"uncertain_removed":uncertain_removed,"truncated":truncated})
             };
             if (input["action"] != "capture" || size(&baseline) <= 65536)
                 && size(&output) <= 131_072

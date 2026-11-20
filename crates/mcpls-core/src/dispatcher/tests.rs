@@ -372,7 +372,7 @@ async fn profile_reload_retires_continuations() {
 
 /// A live diagnostic subscription prevents capacity eviction and releases its pin after unsubscribe.
 #[tokio::test]
-#[allow(
+#[expect(
     deprecated,
     reason = "exercises the supported legacy resource subscription protocol"
 )]
@@ -1047,7 +1047,7 @@ async fn corrupt_nested_git_does_not_fall_back_to_approved_parent() {
 
 /// Diagnostic resources accept an approved root alias and release its subscription pin.
 #[tokio::test]
-#[allow(
+#[expect(
     deprecated,
     reason = "exercises legacy stateful resource subscriptions"
 )]
@@ -1319,7 +1319,7 @@ async fn wait_activity(client: &Client, active: usize, state: Option<&str>) -> V
 
 /// Cold cancellation cannot add a pin; shared start and overlapping successful callers survive.
 #[tokio::test]
-#[allow(
+#[expect(
     deprecated,
     reason = "covers stateful resources subscription cancellation"
 )]

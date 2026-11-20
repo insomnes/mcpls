@@ -7,11 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0+insomnes.1]
+
+- Merge the complete upstream v0.10.0 release. Preserve fork navigation, edit
+  previews, shared workspaces, Watchman, and tool profiles.
+- Add `broader_context` to the five location tools. Legacy `include_source`
+  returns excerpts in `source` when that field does not carry a symbol body.
+- Count the serialized array in the 4 MiB `workspace/configuration` reply limit.
+
 - Add optional lexical `call_path_filter` include/exclude prefixes to incoming calls, outgoing calls, call graphs, and the outgoing section of symbol context. Preserve dependency-inclusive defaults; report examined filtered visits and prune rejected graph branches.
 
 - Add focused agent navigation guidance for outline filters, selected context sections, known-target reuse, and reference modes. Preserve capability checks and result uncertainty.
 
 - Expose running-service `runtime_provenance` through `get_tool_support` and new private feedback records. On Linux, validate the adjacent installation receipt against measured executable bytes; report explicit unknown values when provenance is unavailable. Caller observations and feedback inputs remain unchanged.
+
+## [0.10.0] - 2026-11-15
+
+### Added
+
+- `context: "symbol_source"` on `get_references`, `get_definition`, `go_to_implementation`, `go_to_type_definition` and `go_to_declaration` adds each item's bounded source text, picks the innermost of overlapping sibling symbols and spends at most a 16 MiB scan budget per call (later items report `call_budget`) (#909, #923, #927, #931, #936).
+- The release workflow runs `cargo semver-checks` and `scripts/check-release-bump.sh`, and fails a Cargo-compatible bump that carries breaking changes (#879, #905, #908, #923).
+- CI rejects interpolated `tracing` messages via `scripts/check-tracing-messages.py` (#904, #915, #920).
+
+### Changed
+
+- **Breaking:** `get_server_logs` and `get_server_messages` share one five-level `LogLevel` (`error`, `warning`, `info`, `log`, `debug`): LSP `Log` entries read `log`, `min_level` accepts `log`, LSP `Debug` and custom show-message types read `debug`, and `bridge::MessageType` is removed (#934, #937).
+- **Breaking:** `Location`, `DocumentChanges` and `HierarchyItem` hold `uri` as `lsp_types::Uri`; JSON output is unchanged (#935, #937).
+- **Breaking:** `Position2D` is non-zero (`NonZeroU32`), ordered and has private fields (use `from_mcp`, `line()`, `character()`); `lsp_character` returns `Utf16Column`, `Position::lsp_line()` returns `LspLine`, `DocumentTracker::line_text` takes `LspLine`, and a zero line or character nested in a range or hierarchy item fails with serde's error text instead of `must be >= 1` (#882, #913, #908, #923).
+- **Breaking:** `ContextualLocation` is now `Contextual<NavigationLocation>` (`.inner.uri` becomes `.inner.location.uri`), and the `context` parameter of the location tools is `LocationContext` (#909, #923).
+- **Breaking:** `BoundedUri::new` is replaced by `TryFrom<Uri>` (error `UriTooLong`), `BoundedUri::into_uri` is removed, `BoundedPublish::uri()` returns `&BoundedUri`, and `LspNotification::PublishDiagnostics` carries `DecodedPublish` (#881, #885, #908).
+- **Breaking:** `handle_workspace_symbol` takes a bounded `WorkspaceQuery`, and an over-long query fails with a -32602 error naming `query` (#930, #936).
+- **Breaking:** `Error::InvalidToolParams` is replaced by `InvalidTextField`, `InvalidKindFilter` and `NotFileUri`, and `KindFilterInput::into_known` returns `InvalidKindFilter` (#932, #936).
+- **Breaking:** `SourceOutcome`, `SourceSkipReason`, `LocationContext` and `FoldingKind` are `#[non_exhaustive]`, and `ServerColumn`, `LabelOffsets` and the `Excerpt*` types are crate-private (#919, #923, #933, #936).
+- **Breaking:** `DroppedEdits` gains an `invalid_path` field and is `#[non_exhaustive]`; `workspace_edit` reports over-long path components under `dropped.invalid_path` instead of `out_of_workspace` (#916, #920).
+- `tools/list` size budget raised to 145,000 B total and 9,500 B per tool for `symbol_source` and closed-enum schemas (#909, #919, #923, #934, #937).
+- Update `rmcp` to 3.10, `toml` to 1.2, `nix` to 0.32 and `process-wrap` to 10.0, and refresh lockfile patch versions (#925, #937).
+- Lint hygiene: the `unused_dependencies` workspace lint is `deny`, and suppressions are `#[expect]` with `clippy::allow_attributes` enabled (#904, #926, #937).
+- Internal: `NormalizedLocation` owns link targets, `bridge/encoding.rs` owns column scanning with `ServerColumn` offsets and a typed `OffsetError`, `error.rs` is split into submodules, and the diagnostics cap uses a shared `util::json_len` (#883, #912, #914, #921, #924, #928, #929, #936).
+
+### Fixed
+
+- Panic payloads are escaped and bounded where caught and logged through `PanicMessage`, and a process-wide panic hook in `mcpls` logs one bounded line instead of the raw payload (#907, #911, #918, #920, #922, #923, #924, #933, #936).
+- Published-URI resolution treats NUL bytes, symlink loops, permission-denied paths and invalid filenames (e.g. `ENAMETOOLONG`) as permanent refusals, so they no longer delay a server's other diagnostics (#890, #908, #910, #920).
+- `workspace/configuration` replies are capped at 256 items and 4 MiB, and the first undecodable-LSP-message warning no longer claims other messages were dropped (#887, #906, #908, #917, #920).
+- The `resources/updated` delivery task of a session is restarted after a panic, and a closed doorbell logs one warning per session (#880, #908).
+- `get_tool_support` lists every `Capability` spelling as an `enum` in its output schema and omits `languages` on workspace routes (#888, #908, #919, #923).
+- Clippy 1.100 lints (`empty_enums`, `map_unwrap_or`) that failed the CI gate (#904).
+
+### Security
+
+- Bump `rmcp` to 3.9 to fix RUSTSEC-2026-0462; tool `outputSchema` marks always-serialized nullable fields as `required` (#900).
 
 ## [0.9.1+insomnes.1] - 2026-11-09
 
@@ -1001,7 +1046,8 @@ Add to `~/.claude/mcp.json`:
 - Workspace auto-discovery
 - LSP server auto-detection and installation
 
-[Unreleased]: https://github.com/bug-ops/mcpls/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/bug-ops/mcpls/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/bug-ops/mcpls/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/bug-ops/mcpls/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/bug-ops/mcpls/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/bug-ops/mcpls/compare/v0.7.0...v0.8.0

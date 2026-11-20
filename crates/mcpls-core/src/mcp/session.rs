@@ -26,6 +26,7 @@ use rmcp::{ErrorData as McpError, Peer, RoleServer};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, warn};
 
 use crate::bridge::WorkspaceRoots;
@@ -33,7 +34,8 @@ use crate::bridge::resources::{
     DiagnosticsResourceUri, MAX_LISTEN_STREAMS, MAX_SUBSCRIPTIONS, ResolvedResource,
     ResourceSubscriptions, SubscriptionError, parse_uri,
 };
-use crate::util::lock_std;
+use crate::error::BackgroundTask;
+use crate::util::{RestartDelays, lock_std, supervise};
 
 /// Whether `meta` carries rmcp's discover-lifecycle keys -- the same test
 /// `tower.rs::is_legacy_request` uses to route a request through its
@@ -112,6 +114,14 @@ pub enum Target {
     /// In-memory sink so tests run the production coalescing loop.
     #[cfg(test)]
     Channel(mpsc::Sender<String>),
+    /// Panics on the first send, then behaves like `Channel`.
+    #[cfg(test)]
+    PanicFirst {
+        /// Set once the panic happened.
+        panicked: AtomicBool,
+        /// Receives every URI sent after the panic.
+        tx: mpsc::Sender<String>,
+    },
     /// In-memory stand-in for `Sink` (not constructible without a live rmcp
     /// stream) that runs the same [`Spellings`] fan-out.
     #[cfg(test)]
@@ -237,7 +247,7 @@ impl Target {
                 .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri.as_str()))
                 .await
                 .map_err(|e| {
-                    debug!("peer closed while delivering resources/updated: {e}");
+                    debug!(error = %e, "peer closed while delivering resources/updated");
                     TargetClosed
                 }),
             Self::Sink { sink, uris } => {
@@ -246,10 +256,10 @@ impl Target {
                     match sink.notify_resource_updated(raw).await {
                         Ok(()) => {}
                         Err(rmcp::service::SubscriptionSendError::NotificationNotAccepted(_)) => {
-                            warn!("listen sink rejected {raw}: not in its accepted set");
+                            warn!(%raw, "listen sink rejected a resource: not in its accepted set");
                         }
                         Err(e) => {
-                            debug!("listen stream closed while delivering resources/updated: {e}");
+                            debug!(error = %e, "listen stream closed while delivering resources/updated");
                             return Err(TargetClosed);
                         }
                     }
@@ -261,6 +271,13 @@ impl Target {
                 .send(uri.as_str().to_owned())
                 .await
                 .map_err(|_| TargetClosed),
+            #[cfg(test)]
+            Self::PanicFirst { panicked, tx } => {
+                assert!(panicked.swap(true, Ordering::Relaxed), "injected panic");
+                tx.send(uri.as_str().to_owned())
+                    .await
+                    .map_err(|_| TargetClosed)
+            }
             #[cfg(test)]
             Self::RawChannel { tx, uris } => {
                 let mut spellings = Spellings::of(uris, uri);
@@ -316,7 +333,30 @@ struct Delivery {
     pending: Arc<StdMutex<HashSet<DiagnosticsResourceUri>>>,
     doorbell: mpsc::Sender<()>,
     cap_warned: AtomicBool,
+    closed_warned: AtomicBool,
+    _cancel: DropGuard,
 }
+
+impl Delivery {
+    /// Logs that the delivery task has ended while the session lives: at warn
+    /// once, then at debug. Carries no URI or session id (#555).
+    fn log_closed(&self) {
+        if self.closed_warned.swap(true, Ordering::Relaxed) {
+            debug!("resources/updated delivery stopped, dropping update");
+        } else {
+            warn!(
+                "resources/updated delivery stopped: the client stream is closed; \
+                 further updates for this session are dropped"
+            );
+        }
+    }
+}
+
+/// Restart pacing of a panicked delivery task.
+const DELIVERY_RESTART_DELAYS: RestartDelays = RestartDelays {
+    first: Duration::from_secs(1),
+    max: Duration::from_mins(1),
+};
 
 /// Drains `pending` on every doorbell ring and forwards its URIs to `target`
 /// one at a time.
@@ -329,30 +369,62 @@ struct Delivery {
 ///
 /// Exits when the doorbell closes (the owning [`SessionState`] was dropped,
 /// also while waiting for a pacing slot) or the first send fails (the
-/// transport is gone).
+/// transport is gone). A panic is logged and the task restarted with a growing
+/// delay until `cancel` fires, so the session never silently stops delivering.
 async fn run_delivery(
     target: Target,
     pending: Arc<StdMutex<HashSet<DiagnosticsResourceUri>>>,
     doorbell: mpsc::Receiver<()>,
     state: Weak<SessionState>,
     registry: SubscriptionRegistry,
+    cancel: CancellationToken,
 ) {
-    let mut gate = Gate {
+    let gate = Gate {
         pacer: target.is_paced().then(ListenPacer::new),
         doorbell,
         state,
     };
-    while gate.doorbell.recv().await.is_some() {
-        while !lock_std(&pending).is_empty() {
+    let target = Arc::new(target);
+    let gate = Arc::new(tokio::sync::Mutex::new(gate));
+    supervise(
+        BackgroundTask::SessionDelivery,
+        || {
+            let (target, pending, gate, registry) = (
+                target.clone(),
+                pending.clone(),
+                gate.clone(),
+                registry.clone(),
+            );
+            async move { deliver(&target, &pending, &mut *gate.lock().await, &registry).await }
+        },
+        &cancel,
+        DELIVERY_RESTART_DELAYS,
+    )
+    .await;
+}
+
+/// One run of the delivery loop. Drains `pending` before waiting for a ring,
+/// so URIs left behind by a panicked run are delivered after the restart.
+async fn deliver(
+    target: &Target,
+    pending: &StdMutex<HashSet<DiagnosticsResourceUri>>,
+    gate: &mut Gate,
+    registry: &SubscriptionRegistry,
+) {
+    loop {
+        while !lock_std(pending).is_empty() {
             if gate.pace().await.is_err() {
                 return;
             }
-            let Some(uri) = take_one(&pending) else {
+            let Some(uri) = take_one(pending) else {
                 continue;
             };
-            if !registry.is_valid().await || target.send(&uri, &mut gate).await.is_err() {
+            if !registry.is_valid().await || target.send(&uri, gate).await.is_err() {
                 return;
             }
+        }
+        if gate.doorbell.recv().await.is_none() {
+            return;
         }
     }
 }
@@ -401,18 +473,24 @@ impl SessionState {
             return;
         }
         let Some(delivery) = self.delivery.get() else {
-            debug!("subscribed session has no bound delivery, dropping update for {uri}");
+            debug!(%uri, "subscribed session has no bound delivery, dropping update");
             return;
         };
+        if delivery.doorbell.is_closed() {
+            delivery.log_closed();
+            return;
+        }
         {
             let mut pending = lock_std(&delivery.pending);
             if !pending.contains(uri) {
                 if pending.len() >= MAX_SUBSCRIPTIONS {
                     if delivery.cap_warned.swap(true, Ordering::Relaxed) {
-                        debug!("pending resource updates at cap, dropping {uri}");
+                        debug!(%uri, "pending resource updates at cap, dropping update");
                     } else {
                         warn!(
-                            "pending resource updates reached {MAX_SUBSCRIPTIONS}, dropping {uri} \
+                            max = MAX_SUBSCRIPTIONS,
+                            %uri,
+                            "pending resource updates reached the cap, dropping update \
                              (further drops for this session are logged at debug)"
                         );
                     }
@@ -424,7 +502,8 @@ impl SessionState {
         match delivery.doorbell.try_send(()) {
             Ok(()) | Err(TrySendError::Full(())) => {}
             Err(TrySendError::Closed(())) => {
-                debug!("delivery task gone, dropping update for {uri}");
+                lock_std(&delivery.pending).remove(uri);
+                delivery.log_closed();
             }
         }
     }
@@ -795,18 +874,22 @@ fn bind_delivery(
     state.delivery.get_or_init(|| {
         let (doorbell, rx) = mpsc::channel(1);
         let pending = Arc::new(StdMutex::new(HashSet::new()));
+        let cancel = CancellationToken::new();
         tokio::spawn(run_delivery(
             target(),
             Arc::clone(&pending),
             rx,
             Arc::downgrade(state),
             registry.clone(),
+            cancel.clone(),
         ));
         registry.register(state);
         Delivery {
             pending,
             doorbell,
             cap_warned: AtomicBool::new(false),
+            closed_warned: AtomicBool::new(false),
+            _cancel: cancel.drop_guard(),
         }
     });
 }
@@ -1229,10 +1312,10 @@ mod tests {
         assert_eq!(lock_std(&delivery.pending).len(), MAX_SUBSCRIPTIONS);
         assert!(!lock_std(&delivery.pending).contains(&x));
         assert!(
-            captured
-                .messages()
-                .iter()
-                .any(|m| m.contains("dropping lsp-diagnostics:///x.rs")),
+            captured.events().iter().any(|event| {
+                event.message.contains("dropping update")
+                    && event.has_field("uri=lsp-diagnostics:///x.rs")
+            }),
             "dropping at the pending cap must be logged"
         );
     }
@@ -1643,5 +1726,45 @@ mod tests {
         let distinct: HashSet<_> = delivered.iter().collect();
         assert_eq!(distinct.len(), TOTAL);
         assert_eq!(delivered.len(), TOTAL);
+    }
+
+    /// A panic in the delivery task is contained and the task restarted, so
+    /// the next update is still delivered.
+    #[tokio::test(start_paused = true)]
+    async fn test_run_delivery_restarts_after_a_panic() {
+        let (state, uris) = subscribed_to(2).await;
+        let (tx, mut rx) = mpsc::channel(4);
+        bind(
+            &state,
+            Target::PanicFirst {
+                panicked: AtomicBool::new(false),
+                tx,
+            },
+        );
+        state.publish_if_subscribed(&uris[0]).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        state.publish_if_subscribed(&uris[1]).await;
+
+        assert_eq!(rx.recv().await.unwrap(), uris[1].as_str());
+    }
+
+    /// Once the delivery task has ended, publishing leaves `pending` alone and
+    /// warns only the first time.
+    #[tokio::test(start_paused = true)]
+    async fn test_publish_after_the_delivery_task_ended_does_not_grow_pending() {
+        let (state, uris) = subscribed_to(3).await;
+        let (tx, rx) = mpsc::channel(4);
+        bind(&state, Target::Channel(tx));
+        drop(rx);
+        state.publish_if_subscribed(&uris[0]).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let delivery = state.delivery.get().unwrap();
+        assert!(!delivery.closed_warned.load(Ordering::Relaxed));
+
+        state.publish_if_subscribed(&uris[1]).await;
+        assert!(delivery.closed_warned.load(Ordering::Relaxed));
+        state.publish_if_subscribed(&uris[2]).await;
+
+        assert!(lock_std(&delivery.pending).is_empty());
     }
 }

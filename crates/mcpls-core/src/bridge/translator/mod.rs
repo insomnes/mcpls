@@ -64,6 +64,14 @@ mod routing;
 mod save_support;
 mod selection_range;
 mod servers;
+mod source;
+#[cfg(test)]
+#[expect(
+    clippy::future_not_send,
+    clippy::format_collect,
+    reason = "protected acceptance test file; its helpers trip these pedantic lints"
+)]
+mod source_acceptance_tests;
 mod support;
 mod symbol_context;
 mod symbol_refs;
@@ -87,11 +95,12 @@ pub use diagnostics::{
 pub use dto::*;
 pub use enclosing::{
     Contextual, ContextualDiagnostic, ContextualLocation, EnclosingSymbol, EnclosingSymbolOutcome,
-    EnrichmentSummary, NotComputedReason, ResultContext, SymbolFidelity, UnavailableReason,
+    EnrichmentSummary, LocationContext, NotComputedReason, ResultContext, SymbolFidelity,
+    UnavailableReason,
 };
 pub use kind_filter::{
-    CodeActionKindFilter, KindFilter, KindFilterField, KindFilterInput, RejectedKindFilter,
-    Rejection, SymbolKindFilter,
+    CodeActionKindFilter, InvalidKindFilter, KindFilter, KindFilterField, KindFilterInput,
+    RejectedKindFilter, Rejection, SymbolKindFilter,
 };
 pub use restart::{
     DiagnosticsRole, MAX_RESTART_SERVER_IDS, MAX_SERVER_ID_BYTES, NotificationReceivers,
@@ -99,6 +108,7 @@ pub use restart::{
     ServerIds, ServerIdsError, ServerRestartEntry,
 };
 pub use routing::Capability;
+pub use source::{ItemIndex, NavigationLocation, SourceOutcome, SourceSkipReason};
 pub use support::{MemberStatus, MemberSupport, RouteSupport, ToolSupportSnapshot};
 
 /// Authenticated connection snapshot for a dispatcher hierarchy follow-up.
@@ -316,7 +326,7 @@ impl Translator {
 
     /// Mark the set of servers that are expected (configured + applicable)
     /// but may still be initializing in the background.
-    #[allow(
+    #[expect(
         clippy::needless_pass_by_value,
         reason = "public API: callers hand over the set they built"
     )]
@@ -552,7 +562,7 @@ impl Translator {
         let registered = lock_std(&self.servers).register(id.clone(), Backend::Process(server));
         drop(registered.displaced);
         if !registered.was_expected {
-            tracing::error!("LSP server '{id}' settled twice or was never expected");
+            tracing::error!(%id, "LSP server settled twice or was never expected");
         }
         self.rebind_router_to_settled();
         (id, language)
@@ -567,7 +577,7 @@ impl Translator {
         self.rebind_router_to_settled();
         let was_expected = lock_std(&self.servers).record_failure(failure);
         if !was_expected {
-            tracing::error!("LSP server '{id}' settled twice or was never expected");
+            tracing::error!(%id, "LSP server settled twice or was never expected");
         }
         self.warn_failed_routes(&id, &RouteLoss::FailedToStart);
     }
@@ -594,8 +604,10 @@ impl Translator {
             })
             .collect();
         tracing::warn!(
-            "server '{id}' {loss}; routes of [{}] are rebound or dropped",
-            catch_all_states.join(", ")
+            %id,
+            %loss,
+            routes = %catch_all_states.join(", "),
+            "server lost; its routes are rebound or dropped"
         );
     }
 

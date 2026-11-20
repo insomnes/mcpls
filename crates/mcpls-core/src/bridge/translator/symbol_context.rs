@@ -12,8 +12,8 @@ use super::dto::{Position, PositionDegradation, Range, Symbol};
 use super::symbols::{DocumentSymbolTree, symbol_tree};
 use crate::bridge::ClientPath;
 
-const fn key(position: &super::dto::Position2D) -> (u32, u32) {
-    (position.line, position.character)
+const fn key(position: super::dto::Position2D) -> (u32, u32) {
+    (position.line().get(), position.character().get())
 }
 
 pub(super) fn source_lines(text: &str) -> Vec<&str> {
@@ -107,16 +107,12 @@ impl Translator {
             }
             let selection = &symbol.selection_range;
             let range = &symbol.range;
-            if key(&range.start) < key(&range.end)
-                && key(&selection.start) < key(&selection.end)
-                && key(&range.start) <= key(&selection.start)
-                && key(&selection.end) <= key(&range.end)
-                && key(&selection.start) <= point
-                && point < key(&selection.end)
-                && range.start.line > 0
-                && range.start.character > 0
-                && range.end.line > 0
-                && range.end.character > 0
+            if key(range.start) < key(range.end)
+                && key(selection.start) < key(selection.end)
+                && key(range.start) <= key(selection.start)
+                && key(selection.end) <= key(range.end)
+                && key(selection.start) <= point
+                && point < key(selection.end)
             {
                 matches.push(symbol);
             }
@@ -126,10 +122,9 @@ impl Translator {
             .filter(|candidate| {
                 matches.iter().all(|other| {
                     std::ptr::eq(**candidate, *other)
-                        || (key(&other.selection_range.start)
-                            <= key(&candidate.selection_range.start)
-                            && key(&candidate.selection_range.end)
-                                <= key(&other.selection_range.end)
+                        || (key(other.selection_range.start)
+                            <= key(candidate.selection_range.start)
+                            && key(candidate.selection_range.end) <= key(other.selection_range.end)
                             && candidate.selection_range != other.selection_range)
                 })
             })
@@ -139,13 +134,13 @@ impl Translator {
                 let valid = self.document_tracker.valid_utf16_positions(
                     fetched.doc.path(),
                     &[
-                        symbol.range.start.clone(),
-                        symbol.range.end.clone(),
-                        symbol.selection_range.start.clone(),
-                        symbol.selection_range.end.clone(),
+                        symbol.range.start,
+                        symbol.range.end,
+                        symbol.selection_range.start,
+                        symbol.selection_range.end,
                     ],
                 );
-                valid.then(|| symbol.range.clone())
+                valid.then_some(symbol.range)
             } else {
                 None
             },
@@ -190,11 +185,12 @@ impl Translator {
             },
             |range| {
                 (
-                    range.start.line.saturating_sub(1) as usize,
+                    range.start.line().get().saturating_sub(1) as usize,
                     range
                         .end
-                        .line
-                        .saturating_sub(u32::from(range.end.character == 1))
+                        .line()
+                        .get()
+                        .saturating_sub(u32::from(range.end.character().get() == 1))
                         as usize,
                 )
             },

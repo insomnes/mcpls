@@ -37,6 +37,8 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'fuzz/**'
+              - 'scripts/check-tracing-messages.py'
+              - 'scripts/test-check-tracing-messages.sh'
               - 'server.json'
               - 'README.md'
               - 'book/src/getting-started/installation.md'
@@ -97,6 +99,10 @@ jobs:
           shared-key: "ci"
       - name: Clippy
         run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+      - name: Check tracing messages are constant
+        run: python3 scripts/check-tracing-messages.py
+      - name: Check the tracing message checker against a synthetic tree
+        run: scripts/test-check-tracing-messages.sh
       - name: Check mcpls with the committed lockfile
         run: cargo check -p mcpls --locked
 
@@ -125,7 +131,7 @@ jobs:
           cache-targets: "false"
           shared-key: "ci"
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
       - name: Build and archive tests
@@ -185,7 +191,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
       - name: Download test archive
@@ -209,7 +215,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
       - name: Download test archive
@@ -233,7 +239,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: nextest
       - name: Download test archive
@@ -310,7 +316,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Shellcheck scripts
-        run: shellcheck --shell=sh scripts/install.sh scripts/check-server-json-version.sh scripts/test-check-server-json-version.sh
+        run: shellcheck --shell=sh scripts/install.sh scripts/check-server-json-version.sh scripts/test-check-server-json-version.sh scripts/test-check-tracing-messages.sh scripts/check-release-bump.sh scripts/test-check-release-bump.sh
 
   server-json:
     name: Registry Manifest
@@ -326,6 +332,8 @@ jobs:
         run: scripts/check-server-json-version.sh
       - name: Check that broken manifests are rejected
         run: scripts/test-check-server-json-version.sh
+      - name: Check that breaking changes under a compatible version are rejected
+        run: scripts/test-check-release-bump.sh
 
   security:
     name: Security Audit
@@ -383,7 +391,7 @@ jobs:
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           shared-key: "coverage"
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-llvm-cov,nextest
       - name: Generate coverage

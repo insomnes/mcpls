@@ -172,7 +172,10 @@ impl LspTransport {
         let header = format!("Content-Length: {}\r\n\r\n", content.len());
 
         if tracing::enabled!(Level::TRACE) {
-            trace!("Sending LSP message: {}", self.redactions.apply(&content));
+            trace!(
+                payload = %self.redactions.apply(&content),
+                "Sending LSP message"
+            );
         }
 
         self.stdin.write_all(header.as_bytes()).await?;
@@ -247,8 +250,8 @@ impl LspTransportReader {
 
             if tracing::enabled!(Level::TRACE) {
                 trace!(
-                    "Received LSP message: {}",
-                    self.redactions.apply(&String::from_utf8_lossy(&content))
+                    payload = %self.redactions.apply(&String::from_utf8_lossy(&content)),
+                    "Received LSP message"
                 );
             }
 
@@ -256,9 +259,10 @@ impl LspTransportReader {
                 Ok(value) => value,
                 Err(error) => {
                     debug!(
-                        "{}",
-                        self.redactions
-                            .protocol_error(format_args!("Invalid JSON: {error}"))
+                        error = %self
+                            .redactions
+                            .protocol_error(format_args!("Invalid JSON: {error}")),
+                        "Dropping a message that is not valid JSON"
                     );
                     return Ok(undecodable_message(&content));
                 }
@@ -272,8 +276,8 @@ impl LspTransportReader {
                 // startup; log at debug to avoid flooding the logs for what is a
                 // recoverable, expected condition.
                 debug!(
-                    "Skipping non-object LSP message: {}",
-                    self.redactions.apply(&value.to_string())
+                    payload = %self.redactions.apply(&value.to_string()),
+                    "Skipping non-object LSP message"
                 );
                 continue;
             }
@@ -301,9 +305,9 @@ impl LspTransportReader {
             // EOF - stream closed (read_line returns 0 bytes on EOF)
             if bytes_read == 0 || line.is_empty() {
                 trace!(
-                    "EOF detected in read_headers: bytes_read={}, line_len={}",
                     bytes_read,
-                    line.len()
+                    line_len = line.len(),
+                    "EOF detected in read_headers"
                 );
                 return Err(Error::ServerTerminated);
             }
@@ -337,9 +341,9 @@ impl LspTransportReader {
                     .malformed_header_warn
                     .due(Instant::now(), WarnLimiter::DEFAULT_PERIOD)
                 {
-                    warn!("Malformed header: {shown}");
+                    warn!(header = %shown, "Malformed header");
                 } else {
-                    debug!("Malformed header: {shown}");
+                    debug!(header = %shown, "Malformed header");
                 }
             }
         }
@@ -366,7 +370,7 @@ impl LspTransportReader {
     ///
     /// [`Error::ServerTerminated`] when the stream ends inside the frame.
     async fn skip_content(&mut self, length: usize) -> Result<Envelope> {
-        let mut scan = EnvelopeScan::with_params_uri();
+        let mut scan = EnvelopeScan::with_params_uri(BoundedUri::MAX_BYTES);
         let mut remaining = length;
         while remaining > 0 {
             let available = self.stdout.fill_buf().await?;
@@ -388,7 +392,7 @@ impl LspTransportReader {
 /// (nesting past the parser's recursion limit, a lone surrogate escape, an
 /// out-of-range number) does not stop it.
 fn undecodable_message(content: &[u8]) -> InboundMessage {
-    let mut scan = EnvelopeScan::with_params_uri();
+    let mut scan = EnvelopeScan::with_params_uri(BoundedUri::MAX_BYTES);
     scan.feed(content);
     dropped_message(&scan.finish(), UndecodableReason::Malformed)
 }
@@ -425,7 +429,13 @@ fn dropped_message(envelope: &Envelope, reason: UndecodableReason) -> InboundMes
         let lost = envelope
             .params_uri
             .decode::<Uri>()
-            .and_then(BoundedUri::new)
+            .and_then(|uri| {
+                BoundedUri::try_from(uri)
+                    .inspect_err(
+                        |e| debug!(error = %e, "dropped publish names an unretainable URI"),
+                    )
+                    .ok()
+            })
             .map_or(LostPublish::Unidentified, LostPublish::File);
         return InboundMessage::UndecodableNotification(DroppedNotification::Publish(lost));
     }
@@ -508,7 +518,10 @@ fn parse_inbound_message(value: Value, redactions: &Redactions) -> InboundMessag
         MessageKind::IncompleteResponse | MessageKind::Unrecognized => None,
     };
     decoded.unwrap_or_else(|| {
-        debug!("Dropping a message that is not a request, response or notification ({kind:?})");
+        debug!(
+            ?kind,
+            "Dropping a message that is not a request, response or notification"
+        );
         undecodable_of_kind(kind, id, UndecodableReason::Malformed)
     })
 }
@@ -521,8 +534,8 @@ fn decode<T: serde::de::DeserializeOwned>(
     serde_json::from_value(value)
         .inspect_err(|error| {
             debug!(
-                "{}",
-                redactions.protocol_error(format_args!("Invalid {what}: {error}"))
+                error = %redactions.protocol_error(format_args!("Invalid {what}: {error}")),
+                "Dropping a message that failed to decode"
             );
         })
         .ok()
@@ -569,9 +582,11 @@ mod tests {
         writer_half.send(&frame).await.unwrap();
         reader_half.receive().await.unwrap();
 
-        let output = logs.messages().join("\n");
-        assert!(output.contains("Sending LSP message"), "{output}");
-        assert!(output.contains("Received LSP message"), "{output}");
+        let messages = logs.messages().join("\n");
+        let fields = logs.fields().join("\n");
+        let output = format!("{messages}\n{fields}");
+        assert!(messages.contains("Sending LSP message"), "{output}");
+        assert!(messages.contains("Received LSP message"), "{output}");
         assert!(!output.contains("word-12345"), "{output}");
         assert_eq!(
             output.matches("[redacted:API_TOKEN]").count(),
@@ -951,8 +966,10 @@ mod tests {
             }
         );
         let text = logs.messages().join("\n");
-        assert!(text.contains("[redacted:API_TOKEN]"), "{text}");
+        let fields = logs.fields().join("\n");
+        assert!(fields.contains("[redacted:API_TOKEN]"), "{fields}");
         assert!(!text.contains("SuperSecretValue123"), "{text}");
+        assert!(!fields.contains("SuperSecretValue123"), "{fields}");
     }
 
     #[test]
@@ -1220,7 +1237,7 @@ mod tests {
     }
 
     fn file(uri: &str) -> LostPublish {
-        LostPublish::File(BoundedUri::new(Uri::from(uri.to_owned())).unwrap())
+        LostPublish::File(BoundedUri::try_from(Uri::from(uri.to_owned())).unwrap())
     }
 
     #[tokio::test]

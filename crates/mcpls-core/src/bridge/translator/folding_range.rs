@@ -8,7 +8,7 @@ use super::encoding_ctx::EncodingCtx;
 use super::navigation::ItemBudget;
 use super::positioned::document_request;
 use super::routing::{FileLocalCapability, IndexingGate};
-use crate::bridge::ClientPath;
+use crate::bridge::{ClientPath, LspLine};
 use crate::error::Result;
 use crate::util::escape_control_owned;
 
@@ -59,7 +59,8 @@ async fn character(
     Some(
         ctx.to_mcp(uri, lsp_types::Position { line, character })
             .await
-            .character,
+            .character()
+            .get(),
     )
 }
 
@@ -70,8 +71,8 @@ async fn region(
     range: lsp_types::FoldingRange,
 ) -> FoldingRegion {
     FoldingRegion {
-        start_line: range.start_line.saturating_add(1),
-        end_line: range.end_line.saturating_add(1),
+        start_line: LspLine::new(range.start_line).to_mcp().get(),
+        end_line: LspLine::new(range.end_line).to_mcp().get(),
         start_character: character(ctx, uri, range.start_line, range.start_character).await,
         end_character: character(ctx, uri, range.end_line, range.end_character).await,
         kind,

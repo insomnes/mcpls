@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 
-use lsp_types::{ErrorCodes, LspErrorCodes, LspRequestMethod, PublishDiagnosticsParams};
+use lsp_types::{ErrorCodes, LspErrorCodes, LspRequestMethod};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -16,9 +16,9 @@ use crate::config::{LanguageId, LspServerConfig, LspSettings, ServerId};
 use crate::error::{BackgroundTask, Error, Result};
 use crate::lsp::transport::{LspTransport, LspTransportReader, MAX_CONTENT_LENGTH};
 use crate::lsp::types::{
-    DroppedNotification, InboundMessage, JsonRpcError, JsonRpcNotification, JsonRpcOutcome,
-    JsonRpcReply, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, LostPublish, LspNotification,
-    RequestId, UndecodableReason,
+    DecodedPublish, DroppedNotification, InboundMessage, JsonRpcError, JsonRpcNotification,
+    JsonRpcOutcome, JsonRpcReply, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, LostPublish,
+    LspNotification, RequestId, UndecodableReason,
 };
 use crate::lsp::{DropLog, Lane, NotificationSink, ServerMessage};
 use crate::redaction::{RedactedText, Redactions};
@@ -244,13 +244,13 @@ impl UndecodableRun {
         }
         if let Some(suppressed) = self.drops.record(now) {
             warn!(
-                "Dropped an undecodable LSP message ({suppressed} others dropped since the last \
-                 warning); further ones are logged at debug for a minute"
+                suppressed,
+                "Dropped an undecodable LSP message; further ones are logged at debug for a minute"
             );
         } else {
             debug!(
-                "Dropped an undecodable LSP message ({} in a row)",
-                self.in_a_row
+                in_a_row = self.in_a_row,
+                "Dropped an undecodable LSP message"
             );
         }
         Ok(message)
@@ -378,7 +378,7 @@ struct Lanes {
 #[derive(Debug)]
 enum Route<'a> {
     /// The diagnostics mailbox.
-    Mailbox(&'a NotificationSink, PublishDiagnosticsParams),
+    Mailbox(&'a NotificationSink, DecodedPublish),
     /// The diagnostics mailbox, told that a publish was lost.
     Lost(&'a NotificationSink, LostPublish),
     /// The log and `showMessage` lane.
@@ -772,8 +772,11 @@ impl LspClient {
             graph_request_available(method).map_err(UnclassifiedError::logged)?;
             if attempt > 0 {
                 debug!(
-                    "Retrying {} (attempt {}/{}), backoff={}ms",
-                    method, attempt, SERVER_CANCELLED_MAX_RETRIES, delay_ms
+                    %method,
+                    attempt,
+                    max_attempts = SERVER_CANCELLED_MAX_RETRIES,
+                    backoff_ms = delay_ms,
+                    "Retrying"
                 );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = delay_ms.saturating_mul(2);
@@ -792,7 +795,7 @@ impl LspClient {
                 params: params_value.clone(),
             };
 
-            debug!("Sending request: {} (id={:?})", method, id);
+            debug!(%method, ?id, "Sending request");
 
             let in_flight = self
                 .register_and_send_request(&id, request, response_tx)
@@ -825,25 +828,25 @@ impl LspClient {
                 }
                 Err(Error::LspServerError(response)) if Self::retries(&response, method) => {
                     if attempt == SERVER_CANCELLED_MAX_RETRIES {
-                        // Same "LSP error response: ..." prefix as the
+                        // Same "LSP error response" message prefix as the
                         // non-retryable branch below -- a log-grep alert on
                         // that prefix must catch every error actually
                         // surfaced to the caller, retry exhaustion included.
                         error!(
-                            "LSP error response: {} (code {}) on '{}' (id={:?}), retries exhausted",
-                            Self::truncate_error_message_for_log(&response.message),
-                            response.code,
-                            method,
-                            id
+                            error = %Self::truncate_error_message_for_log(&response.message),
+                            code = response.code,
+                            %method,
+                            ?id,
+                            "LSP error response, retries exhausted"
                         );
                         return Err(UnclassifiedError::logged(Error::LspServerError(response)));
                     }
                     warn!(
-                        "LSP error response: {} (code {}) on '{}' (id={:?}), will retry",
-                        Self::truncate_error_message_for_log(&response.message),
-                        response.code,
-                        method,
-                        id
+                        error = %Self::truncate_error_message_for_log(&response.message),
+                        code = response.code,
+                        %method,
+                        ?id,
+                        "LSP error response, will retry"
                     );
                     // continue loop for next attempt
                 }
@@ -988,7 +991,7 @@ impl LspClient {
     {
         let notification = OutboundNotification::new(method, params)?;
 
-        debug!("Sending notification: {}", method);
+        debug!(%method, "Sending notification");
 
         self.send_notification(notification).await
     }
@@ -1019,7 +1022,7 @@ impl LspClient {
     /// Returns [`Error::ShutdownTimeout`] if the loop did not stop in time (it is then
     /// aborted and every pending request fails with [`Error::ServerTerminated`]), or
     /// another error if the background task failed.
-    #[allow(
+    #[expect(
         clippy::arithmetic_side_effects,
         reason = "SHUTDOWN_TIMEOUT is a small constant"
     )]
@@ -1071,10 +1074,6 @@ impl LspClient {
     /// - Outbound requests and notifications
     /// - Inbound responses and server notifications
     /// - Matching responses to pending requests
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one-to-one with the spawned loop's channels and shared state"
-    )]
     async fn message_loop(
         transport: (LspTransport, LspTransportReader),
         mut command_rx: mpsc::Receiver<ClientCommand>,
@@ -1117,7 +1116,7 @@ impl LspClient {
         // requests with no answer get failed here (#458).
         Self::drain_and_fail_pending(&pending_requests, &pending_failure);
         if let Err(ref e) = result {
-            error!("Message loop exiting with error: {}", e);
+            error!(error = %e, "Message loop exiting with error");
         } else {
             debug!("Message loop exiting normally");
         }
@@ -1166,8 +1165,8 @@ impl LspClient {
             return Route::Floor;
         };
         match notification {
-            LspNotification::PublishDiagnostics(params) => {
-                Route::Mailbox(&lanes.notifications, params)
+            LspNotification::PublishDiagnostics(publish) => {
+                Route::Mailbox(&lanes.notifications, publish)
             }
             LspNotification::LostPublish(lost) => Route::Lost(&lanes.notifications, lost),
             LspNotification::LogMessage(params) => {
@@ -1205,13 +1204,13 @@ impl LspClient {
             }
         };
         match route {
-            Route::Mailbox(sink, params) => {
+            Route::Mailbox(sink, publish) => {
                 debug!(
-                    uri = params.uri.as_ref(),
-                    items = params.diagnostics.len(),
+                    uri = publish.file_uri().as_ref(),
+                    items = publish.diagnostics().len(),
                     "Forwarding diagnostics"
                 );
-                sink.publishes().publish(params);
+                sink.publishes().publish(publish);
                 Delivery::Delivered
             }
             Route::Lost(sink, lost) => {
@@ -1229,11 +1228,6 @@ impl LspClient {
         }
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        clippy::too_many_arguments,
-        reason = "one select loop over the transport, channels and shared state"
-    )]
     async fn message_loop_inner(
         transport: &mut LspTransport,
         msg_rx: &mut mpsc::Receiver<Result<InboundMessage>>,
@@ -1300,7 +1294,7 @@ impl LspClient {
                                         .await?;
                                     }
                                     Err(e) => {
-                                        error!("Transport receive error while draining on shutdown: {}", e);
+                                        error!(error = %e, "Transport receive error while draining on shutdown");
                                         break;
                                     }
                                 }
@@ -1315,7 +1309,7 @@ impl LspClient {
                     let message = match message {
                         Some(Ok(m)) => m,
                         Some(Err(e)) => {
-                            error!("Transport receive error: {}", e);
+                            error!(error = %e, "Transport receive error");
                             return Err(e);
                         }
                         None => {
@@ -1346,7 +1340,7 @@ impl LspClient {
         response: JsonRpcResponse,
         redactions: &Redactions,
     ) {
-        trace!("Received response: id={:?}", response.id);
+        trace!(id = ?response.id, "Received response");
 
         match pending_requests.resolve(&response.id) {
             Resolution::Waiting(sender) => match response.outcome {
@@ -1363,9 +1357,9 @@ impl LspClient {
                     // the response id is already traced above.
                     let message = redactions.apply(&error.message);
                     trace!(
-                        "LSP error response: {} (code {})",
-                        Self::truncate_error_message_for_log(&message),
-                        error.code
+                        error = %Self::truncate_error_message_for_log(&message),
+                        code = error.code,
+                        "LSP error response"
                     );
                     // Truncated separately from the log line, to the larger
                     // MAX_ERROR_MESSAGE_CALLER_BYTES -- the raw message is
@@ -1386,15 +1380,13 @@ impl LspClient {
             },
             Resolution::Cancelled(cause) => {
                 trace!(
-                    "Dropped the reply to a request mcpls cancelled ({cause:?}): id={:?}",
-                    response.id
+                    ?cause,
+                    id = ?response.id,
+                    "Dropped the reply to a request mcpls cancelled"
                 );
             }
             Resolution::Unknown => {
-                warn!(
-                    "Received response for unknown request ID: {:?}",
-                    response.id
-                );
+                warn!(id = ?response.id, "Received response for unknown request ID");
             }
         }
     }
@@ -1457,8 +1449,9 @@ impl LspClient {
             | InboundMessage::UndecodableFrame => {}
             InboundMessage::Request(request) => {
                 debug!(
-                    "Received server request: {} (id={:?})",
-                    request.method, request.id
+                    method = %request.method,
+                    id = ?request.id,
+                    "Received server request"
                 );
                 let reply = if matches!(
                     request.method.as_str(),
@@ -1496,8 +1489,8 @@ impl LspClient {
                     };
                     if let Some(payload) = forwarded {
                         trace!(
-                            "Forwarding notification: {}",
-                            redactions.apply(&format!("{payload:?}"))
+                            payload = %redactions.apply(&format!("{payload:?}")),
+                            "Forwarding notification"
                         );
                     }
                 }
@@ -1525,8 +1518,8 @@ impl LspClient {
             LspNotification::ShowMessage(params) => {
                 redactions.redact_in_place(&mut params.message);
             }
-            LspNotification::PublishDiagnostics(params) => {
-                for diagnostic in &mut params.diagnostics {
+            LspNotification::PublishDiagnostics(publish) => {
+                for diagnostic in publish.diagnostics_mut() {
                     redactions.redact_diagnostic(diagnostic);
                 }
             }
@@ -1576,8 +1569,12 @@ impl LspClient {
     /// when `items` is absent (the reply before settings existed). With
     /// settings an item gets its section (the whole object when `section` is
     /// absent, `Null` when it is unknown, not a string, or the item is not an
-    /// object); only a missing
-    /// `items` list is answered with `-32602`. `scopeUri` is never read.
+    /// object); only a missing `items` list is answered with `-32602`.
+    /// `scopeUri` is never read.
+    ///
+    /// More than [`MAX_CONFIGURATION_ITEMS`] items are answered with `-32602`
+    /// and a reply that would serialize past [`MAX_CONFIGURATION_REPLY_BYTES`]
+    /// with `-32603`, both before any section is copied.
     fn workspace_configuration_result(
         params: Option<&Value>,
         settings: Option<&LspSettings>,
@@ -1585,6 +1582,12 @@ impl LspClient {
         let items = params
             .and_then(|params| params.get("items"))
             .and_then(Value::as_array);
+        if items.is_some_and(|items| items.len() > MAX_CONFIGURATION_ITEMS) {
+            return Err(JsonRpcError::new(
+                ErrorCodes::InvalidParams,
+                format!("workspace/configuration over {MAX_CONFIGURATION_ITEMS} items"),
+            ));
+        }
         let Some(settings) = settings else {
             return Ok(Value::Array(vec![
                 Value::Null;
@@ -1597,15 +1600,30 @@ impl LspClient {
                 "Invalid params for workspace/configuration",
             )
         })?;
-        let sections = items
+        let sections: Vec<_> = items
             .iter()
             .map(|item| match ConfigurationItem::parse(item) {
-                ConfigurationItem::Whole => settings.section(None),
-                ConfigurationItem::Section(section) => settings.section(Some(section)),
-                ConfigurationItem::Uninterpretable => Value::Null,
+                ConfigurationItem::Whole => settings.section_ref(None),
+                ConfigurationItem::Section(section) => settings.section_ref(Some(section)),
+                ConfigurationItem::Uninterpretable => LspSettings::missing_section(),
             })
             .collect();
-        Ok(Value::Array(sections))
+        // Count the brackets and separators before cloning any section.
+        let mut total = 2usize.saturating_add(sections.len().saturating_sub(1));
+        for section in &sections {
+            total = total.saturating_add(section.serialized_len());
+            if total > MAX_CONFIGURATION_REPLY_BYTES {
+                return Err(JsonRpcError::new(
+                    ErrorCodes::InternalError,
+                    format!(
+                        "workspace/configuration reply over {MAX_CONFIGURATION_REPLY_BYTES} bytes"
+                    ),
+                ));
+            }
+        }
+        Ok(Value::Array(
+            sections.into_iter().map(Value::from).collect(),
+        ))
     }
 }
 
@@ -1613,11 +1631,11 @@ impl LspClient {
 /// log-grep alert watches for.
 fn log_surfaced_error(method: &str, id: &RequestId, code: i32, message: &str) {
     error!(
-        "LSP error response: {} (code {}) on '{}' (id={:?})",
-        LspClient::truncate_error_message_for_log(message),
+        error = %LspClient::truncate_error_message_for_log(message),
         code,
-        method,
-        id
+        %method,
+        ?id,
+        "LSP error response"
     );
 }
 
@@ -1659,11 +1677,11 @@ impl Unclassified {
 
 fn log_handled_error(method: &str, id: &RequestId, code: i32, message: &str) {
     debug!(
-        "LSP error response handled by the caller: {} (code {}) on '{}' (id={:?})",
-        LspClient::truncate_error_message_for_log(message),
+        error = %LspClient::truncate_error_message_for_log(message),
         code,
-        method,
-        id
+        %method,
+        ?id,
+        "LSP error response handled by the caller"
     );
 }
 
@@ -1723,6 +1741,13 @@ impl Drop for UnclassifiedError {
         drop(inner.finish(log_surfaced_error));
     }
 }
+
+/// Most items a `workspace/configuration` request may carry; real servers ask
+/// for a handful of sections.
+const MAX_CONFIGURATION_ITEMS: usize = 256;
+
+/// Largest serialized `workspace/configuration` reply mcpls will build.
+const MAX_CONFIGURATION_REPLY_BYTES: usize = 4 * 1024 * 1024;
 
 /// How one `workspace/configuration` item selects part of the settings.
 enum ConfigurationItem<'a> {
@@ -1821,9 +1846,27 @@ mod tests {
         .unwrap();
 
         assert!(lifecycle_rx.recv().await.is_some());
-        let output = logs.messages().join("\n");
-        assert!(output.contains("Forwarding notification"), "{output}");
-        assert!(!output.contains("SuperSecretValue123"), "{output}");
+        let events = logs.events();
+        let forwarded = events
+            .iter()
+            .find(|event| event.message == "Forwarding notification")
+            .unwrap_or_else(|| panic!("no forwarding event in {events:?}"));
+        assert!(
+            forwarded.fields.iter().any(
+                |field| field.starts_with("payload=") && field.contains("[redacted:API_TOKEN]")
+            ),
+            "{forwarded:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.message.contains("SuperSecretValue123")
+                    && event
+                        .fields
+                        .iter()
+                        .all(|field| !field.contains("SuperSecretValue123"))),
+            "{events:?}"
+        );
     }
 
     fn secret_diagnostics_params() -> Value {
@@ -1954,7 +1997,7 @@ mod tests {
         let config = LspServerConfig::rust_analyzer();
         let client = LspClient::new(config);
 
-        #[allow(clippy::redundant_clone, reason = "the test exercises `Clone` itself")]
+        #[expect(clippy::redundant_clone, reason = "the test exercises `Clone` itself")]
         let cloned = client.clone();
         assert_eq!(cloned.language_id(), "rust");
 
@@ -2197,6 +2240,98 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_workspace_configuration_rejects_too_many_items() {
+        let items = vec![serde_json::json!({}); MAX_CONFIGURATION_ITEMS + 1];
+        let params = serde_json::json!({ "items": items });
+        for settings in [None, Some(&sample_settings())] {
+            let error =
+                LspClient::workspace_configuration_result(Some(&params), settings).unwrap_err();
+            assert_eq!(error.code, -32602);
+        }
+        let at_cap = serde_json::json!({
+            "items": vec![serde_json::json!({}); MAX_CONFIGURATION_ITEMS]
+        });
+        assert!(LspClient::workspace_configuration_result(Some(&at_cap), None).is_ok());
+    }
+
+    #[test]
+    fn test_workspace_configuration_rejects_oversized_reply() {
+        let big = "x".repeat(32 * 1024);
+        let settings: LspSettings =
+            serde_json::from_value(serde_json::json!({ "k": big })).unwrap();
+        let params = serde_json::json!({
+            "items": vec![serde_json::json!({}); MAX_CONFIGURATION_ITEMS]
+        });
+
+        let error =
+            LspClient::workspace_configuration_result(Some(&params), Some(&settings)).unwrap_err();
+
+        assert_eq!(error.code, -32603);
+    }
+
+    fn configuration_reply_for_value_of_len(
+        value_len: usize,
+        item: &Value,
+    ) -> std::result::Result<Value, JsonRpcError> {
+        let settings: LspSettings =
+            serde_json::from_value(serde_json::json!({ "k": "x".repeat(value_len) })).unwrap();
+        let params = serde_json::json!({ "items": [item] });
+        LspClient::workspace_configuration_result(Some(&params), Some(&settings))
+    }
+
+    #[test]
+    fn test_workspace_configuration_reply_size_boundary_for_whole_settings() {
+        // `{"k":"<n x>"}` serializes to n + 8 bytes.
+        let at_cap = configuration_reply_for_value_of_len(
+            MAX_CONFIGURATION_REPLY_BYTES - 10,
+            &serde_json::json!({}),
+        );
+        assert!(at_cap.is_ok());
+
+        let over_cap = configuration_reply_for_value_of_len(
+            MAX_CONFIGURATION_REPLY_BYTES - 9,
+            &serde_json::json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(over_cap.code, -32603);
+    }
+
+    #[test]
+    fn test_workspace_configuration_reply_size_boundary_for_sections() {
+        // A string section serializes to n + 2 bytes.
+        let item = serde_json::json!({ "section": "k" });
+        let at_cap = configuration_reply_for_value_of_len(MAX_CONFIGURATION_REPLY_BYTES - 4, &item);
+        assert!(at_cap.is_ok());
+
+        let over_cap =
+            configuration_reply_for_value_of_len(MAX_CONFIGURATION_REPLY_BYTES - 3, &item)
+                .unwrap_err();
+        assert_eq!(over_cap.code, -32603);
+    }
+
+    #[test]
+    fn test_workspace_configuration_counts_separators_in_result_budget() {
+        let check = |len| {
+            let settings: LspSettings = serde_json::from_value(serde_json::json!({
+                "k": "x".repeat(len)
+            }))
+            .unwrap();
+            let params = serde_json::json!({"items":[{"section":"k"},{"section":"missing"}]});
+            LspClient::workspace_configuration_result(Some(&params), Some(&settings))
+        };
+        // Two string quotes, two brackets, a comma, and the four-byte null.
+        let at_cap = check(MAX_CONFIGURATION_REPLY_BYTES - 9).unwrap();
+        assert_eq!(
+            crate::util::json_len(&at_cap),
+            Some(MAX_CONFIGURATION_REPLY_BYTES)
+        );
+        assert_eq!(
+            check(MAX_CONFIGURATION_REPLY_BYTES - 8).unwrap_err().code,
+            -32603
+        );
+    }
+
     /// P1: without this, no spec-compliant LSP server may ever initiate
     /// `$/progress` at all (per LSP 3.17, a server needs a successful
     /// `window/workDoneProgress/create` response before it may report
@@ -2294,7 +2429,7 @@ mod tests {
     #[test]
     fn test_route_covers_every_notification_shape() {
         let publish = || {
-            LspNotification::PublishDiagnostics(PublishDiagnosticsParams {
+            LspNotification::publish_for_test(lsp_types::PublishDiagnosticsParams {
                 uri: lsp_types::Uri::from("file:///a.rs".to_owned()),
                 diagnostics: Vec::new(),
                 version: None,
@@ -2792,8 +2927,12 @@ mod tests {
                 .map(|(_, message)| message)
                 .collect();
             assert_eq!(warnings.len(), 2, "{warnings:?}");
-            assert!(warnings[0].contains("(0 others"), "{warnings:?}");
-            assert!(warnings[1].contains("(3 others"), "{warnings:?}");
+            let suppressed: Vec<_> = captured
+                .fields()
+                .into_iter()
+                .filter(|field| field.starts_with("suppressed="))
+                .collect();
+            assert_eq!(suppressed, ["suppressed=0", "suppressed=3"]);
         }
 
         #[tokio::test]
@@ -3828,10 +3967,15 @@ mod tests {
             assert!(
                 logs.iter()
                     .any(|(level, msg)| *level == tracing::Level::ERROR
-                        && msg.contains("LSP error response")
-                        && msg.contains("content modified")),
+                        && msg.starts_with("LSP error response")),
                 "a non-retryable error must still surface an ERROR log sharing the \
                  'LSP error response' prefix, got: {logs:?}"
+            );
+            assert!(
+                captured
+                    .fields()
+                    .contains(&"error=content modified".to_string()),
+                "the server message is a field of the error event"
             );
         }
     }

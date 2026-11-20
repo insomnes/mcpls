@@ -4,7 +4,11 @@
 //! do their MCP-facing DTOs, so both families convert through one pair of
 //! functions instead of two copies.
 
-use super::dto::{CheckedHierarchyItem, HierarchyItem, MAX_POSITION_VALUE, Range, lsp_kind_to_u32};
+use std::num::NonZeroU32;
+
+use super::dto::{
+    CheckedHierarchyItem, HierarchyItem, MAX_POSITION_VALUE, Position2D, Range, lsp_kind_to_u32,
+};
 use super::encoding_ctx::EncodingCtx;
 
 /// The fields common to an LSP call or type hierarchy item, in the routed
@@ -81,9 +85,12 @@ impl From<LspHierarchyItem> for lsp_types::TypeHierarchyItem {
 /// (an end-of-line sentinel or a minified line) can be passed back to the
 /// walking tools, which reject larger values.
 pub(super) fn clamp_to_input_limit(mut range: Range) -> Range {
+    // Both values are at least 1 and so is the limit, so `min` never yields zero.
+    let clamp = |value: NonZeroU32| {
+        NonZeroU32::new(value.get().min(MAX_POSITION_VALUE)).unwrap_or(NonZeroU32::MIN)
+    };
     for position in [&mut range.start, &mut range.end] {
-        position.line = position.line.min(MAX_POSITION_VALUE);
-        position.character = position.character.min(MAX_POSITION_VALUE);
+        *position = Position2D::from_mcp(clamp(position.line()), clamp(position.character()));
     }
     range
 }
@@ -104,7 +111,7 @@ where
         name: item.name,
         kind: lsp_kind_to_u32(item.kind),
         detail: item.detail,
-        uri: item.uri.to_string(),
+        uri: item.uri,
         range,
         selection_range,
         data: item.data,
@@ -178,8 +185,11 @@ mod tests {
         item.selection_range.end.character = 2_147_483_647;
 
         let dto: HierarchyItem = hierarchy_item_to_mcp(item, &ctx).await;
-        assert_eq!(dto.range.end.character, MAX_POSITION_VALUE);
-        assert_eq!(dto.selection_range.end.character, MAX_POSITION_VALUE);
+        assert_eq!(dto.range.end.character().get(), MAX_POSITION_VALUE);
+        assert_eq!(
+            dto.selection_range.end.character().get(),
+            MAX_POSITION_VALUE
+        );
         assert!(CheckedHierarchyItem::from_client(dto).is_ok());
     }
 
@@ -191,13 +201,7 @@ mod tests {
 
         let dto: HierarchyItem = hierarchy_item_to_mcp(original.clone(), &ctx).await;
         assert_eq!(dto.kind, 5);
-        assert_eq!(
-            dto.range.start,
-            Position2D {
-                line: 3,
-                character: 5
-            }
-        );
+        assert_eq!(dto.range.start, Position2D::at(3, 5));
 
         let back: lsp_types::TypeHierarchyItem =
             hierarchy_item_to_lsp(CheckedHierarchyItem::from_client(dto).unwrap(), uri, &ctx).await;

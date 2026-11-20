@@ -17,7 +17,7 @@ use super::dto::{Position, Position2D, PositionDegradation};
 use super::encoding_ctx::EncodingCtx;
 use super::routing::Capability;
 use crate::bridge::ClientPath;
-use crate::bridge::encoding::{EncodingConverter, PositionEncoding};
+use crate::bridge::encoding::{LspLine, Utf16Column};
 use crate::bridge::state::uri_to_path;
 use crate::config::text_newtype::impl_text_newtype;
 use crate::config::{BoundedText, InvalidBoundedText};
@@ -439,9 +439,8 @@ enum IdentifierPosition {
 }
 
 /// Whether the document text spells `word` at the MCP `position`.
-fn spells_at(line_text: &str, character: u32, word: &str) -> bool {
-    let utf16 = EncodingConverter::new(PositionEncoding::Utf16);
-    let Ok(byte) = utf16.character_to_byte_offset(line_text, character.saturating_sub(1)) else {
+fn spells_at(line_text: &str, position: Position2D, word: &str) -> bool {
+    let Ok(byte) = position.lsp_character().byte_offset_in(line_text) else {
         return false;
     };
     whole_word_occurrences(line_text, word).contains(&byte)
@@ -462,8 +461,8 @@ async fn locate_identifier(
     if let Some(selection) = entry.selection_range {
         let position = ctx.to_mcp(uri, selection.start).await;
         let spelled = tracker
-            .line_text(&path, position.line.saturating_sub(1))
-            .is_some_and(|text| spells_at(&text, position.character, &simple));
+            .line_text(&path, position.lsp_line())
+            .is_some_and(|text| spells_at(&text, position, &simple));
         if spelled {
             return IdentifierPosition::Verified(position, PositionSource::SelectionRange);
         }
@@ -471,26 +470,25 @@ async fn locate_identifier(
 
     let start = ctx.to_mcp(uri, entry.range.start).await;
     let end = ctx.to_mcp(uri, entry.range.end).await;
+    let first_line = start.lsp_line();
     let last_line = end
-        .line
-        .min(start.line.saturating_add(MAX_WINDOW_LINES - 1));
-    let utf16 = EncodingConverter::new(PositionEncoding::Utf16);
-    let window = usize::try_from(last_line.saturating_sub(start.line).saturating_add(1))
+        .lsp_line()
+        .get()
+        .min(first_line.get().saturating_add(MAX_WINDOW_LINES - 1));
+    let window = usize::try_from(last_line.saturating_sub(first_line.get()).saturating_add(1))
         .unwrap_or(usize::MAX);
     let text = tracker
-        .line_window(&path, start.line.saturating_sub(1), window)
+        .line_window(&path, first_line, window)
         .unwrap_or_default();
     let mut found = Vec::new();
-    for (line, text) in (start.line..).zip(text.split('\n')) {
+    for (line, text) in (first_line.get()..).map(LspLine::new).zip(text.split('\n')) {
         for byte in whole_word_occurrences(text, &simple) {
-            let Ok(column) = utf16.byte_offset_to_character(text, byte) else {
+            let Ok(column) = Utf16Column::at_byte(text, byte) else {
                 continue;
             };
-            let character = column.saturating_add(1);
-            let after_start = (line, character) >= (start.line, start.character);
-            let before_end = (line, character) < (end.line, end.character);
-            if after_start && before_end {
-                found.push(Position2D { line, character });
+            let at = Position2D::from_lsp(line, column);
+            if at >= start && at < end {
+                found.push(at);
             }
         }
         if found.len() > 1 {
@@ -503,14 +501,14 @@ async fn locate_identifier(
     }
 }
 
-fn candidate(entry: &SymbolEntry, position: &Position2D) -> SymbolCandidate {
+fn candidate(entry: &SymbolEntry, position: Position2D) -> SymbolCandidate {
     SymbolCandidate {
         name: entry.name.clone(),
         kind: u32::from(entry.kind),
         kind_name: format!("{:?}", entry.kind),
         container: entry.container.clone(),
-        line: position.line,
-        character: position.character,
+        line: position.line().get(),
+        character: position.character().get(),
     }
 }
 
@@ -575,9 +573,7 @@ impl Translator {
                         | AddressableTool::References
                         | AddressableTool::PrepareCallHierarchy
                 ) {
-                    return Err(crate::error::Error::InvalidToolParams(
-                        "symbol_ref is not supported by this tool".into(),
-                    ));
+                    return Err(crate::error::Error::UnsupportedSymbolReference);
                 }
                 let (position, charge) = self.validate_symbol_ref(file_path, &reference).await?;
                 return Ok(ResolvedTarget {
@@ -612,7 +608,7 @@ impl Translator {
                 match located {
                     IdentifierPosition::Verified(position, source) => Ok(ResolvedTarget {
                         source_acquisition_bytes: 0,
-                        position: Position::from_server_output(&position),
+                        position: Position::from_server_output(position),
                         positions_degraded: fetched.ctx.positions_degraded(),
                         resolved: Some(ResolvedSymbol {
                             name: entry.name.clone(),
@@ -625,7 +621,7 @@ impl Translator {
                     IdentifierPosition::Unverified(position) => {
                         Err(resolution_error(SymbolResolutionData::PositionUnverified {
                             name: query.name.as_str().to_string(),
-                            candidate: candidate(entry, &position),
+                            candidate: candidate(entry, position),
                         }))
                     }
                 }
@@ -634,7 +630,7 @@ impl Translator {
                 let mut candidates = Vec::with_capacity(many.len().min(MAX_CANDIDATES));
                 for entry in many.iter().take(MAX_CANDIDATES) {
                     let located = locate_identifier(self, &fetched.ctx, &uri, entry).await;
-                    candidates.push(candidate(entry, identifier_position(&located)));
+                    candidates.push(candidate(entry, *identifier_position(&located)));
                 }
                 Err(resolution_error(SymbolResolutionData::Ambiguous {
                     name: query.name.as_str().to_string(),
@@ -671,7 +667,7 @@ impl Translator {
             return false;
         };
         self.document_tracker()
-            .line_window(&path, 0, MAX_SCAN_LINES)
+            .line_window(&path, LspLine::new(0), MAX_SCAN_LINES)
             .is_some_and(|text| {
                 text.split('\n')
                     .any(|line| !whole_word_occurrences(line, word).is_empty())
@@ -732,7 +728,7 @@ impl<T: ServerText> ServerText for Addressed<T> {
 }
 
 #[cfg(test)]
-#[allow(deprecated, reason = "LSP servers still send this deprecated field")]
+#[expect(deprecated, reason = "LSP servers still send this deprecated field")]
 mod tests {
     use super::*;
 
@@ -964,9 +960,9 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert!(spells_at(line, col + 1, "foo"));
-        assert!(!spells_at(line, col, "foo"));
-        assert!(!spells_at(line, 999, "foo"));
+        assert!(spells_at(line, Position2D::at(1, col + 1), "foo"));
+        assert!(!spells_at(line, Position2D::at(1, col), "foo"));
+        assert!(!spells_at(line, Position2D::at(1, 999), "foo"));
     }
 }
 
@@ -1490,10 +1486,7 @@ mod server_text_tests {
                 name: format!("sym_{SECRET}"),
                 kind: 12,
                 container: Some(format!("c_{SECRET}")),
-                position: Position2D {
-                    line: 1,
-                    character: 1,
-                },
+                position: Position2D::at(1, 1),
                 position_source: PositionSource::SelectionRange,
             }),
         };

@@ -16,7 +16,7 @@ pub(crate) use translator::MAX_NORMALIZED_LOCATIONS;
 mod workspace_roots;
 
 pub use client_path::{ClientPath, InvalidClientPath};
-pub use encoding::{InvalidPositionEncoding, PositionEncoding};
+pub use encoding::{InvalidPositionEncoding, LspLine, OffsetError, PositionEncoding, Utf16Column};
 // Not part of the crate's public API surface (unlike `IndexingPolicy`/`IndexingState`
 // above, both referenced from public signatures) -- these three exist only
 // for `config`'s default-value/validation wiring, so `pub(crate)` avoids
@@ -33,8 +33,8 @@ pub(crate) use notifications::{
     on_lifecycle,
 };
 pub use notifications::{
-    DiagnosticInfo, DiagnosticSources, LogEntry, LogLevel, MessageType, NotificationCache,
-    ReportedSeverity, ServerMessage, apply_lifecycle_notification,
+    DiagnosticInfo, DiagnosticSources, LogEntry, LogLevel, NotificationCache, ReportedSeverity,
+    ServerMessage, apply_lifecycle_notification,
 };
 #[cfg(test)]
 pub(crate) use published_uri::resolve_one;
@@ -56,23 +56,24 @@ pub use translator::{
     DocumentHighlightsResult, DocumentOutlineResult, DocumentSymbolsResult, DroppedEdits,
     EditPreview, EnclosingSymbol, EnclosingSymbolOutcome, EnrichmentSummary, FoldingKind,
     FoldingKindFilter, FoldingRangesResult, FoldingRegion, FormatDocumentResult, HierarchyItem,
-    HoverResult, IndexCoverage, InvalidHierarchyItem, InvalidPosition, InvalidRange,
-    InvalidTabSize, InvalidTextField, KindFilter, KindFilterField, KindFilterInput, Location,
-    LocationsResult, MAX_COLLAPSED_TEXT_BYTES, MAX_NEW_NAME_LENGTH, MAX_POSITION_VALUE,
-    MAX_RANGE_LINES, MAX_RESTART_SERVER_IDS, MAX_SELECTION_CHAIN, MAX_SERVER_ID_BYTES,
-    MAX_SYMBOL_NAME_BYTES, MAX_TAB_SIZE, MAX_TRIGGER_CHARACTER_BYTES, MemberStatus, MemberSupport,
-    NavigationLocation, NavigationResult, NavigationSource, NewName, NotComputedReason,
-    OutlineSymbol, Position, Position2D, PositionDegradation, PositionRange, PositionSource,
-    PrepareRenameOutcome, PrepareRenameResult, PreviewSource, PreviewStatus, Range, ReferenceFile,
-    ReferenceFileLimits, ReferenceFileSummary, ReferenceLocation, ReferenceLocationsResult,
-    ReferenceMode, ReferenceOptions, ReferenceSource, ReferencesResult, RejectedKindFilter,
-    Rejection, RenameOutcome, RenamePreparation, RenameResult, ResolvedSymbol, ResolvedTarget,
-    RestartFailure, RestartOutcome, RestartServerResult, RestartTarget, ResultContext,
-    RouteSupport, SelectionRangesResult, ServerIds, ServerIdsError, ServerRestartEntry,
-    SourceOrigin, SourceUnavailableReason, SuppliedVersion, Symbol, SymbolFidelity,
-    SymbolKindFilter, SymbolName, SymbolQuery, SymbolTarget, SymbolTargetEnvelope,
-    SymbolTargetUnavailable, TabSize, TextEdit, TextField, Translator, TypeHierarchyResult,
-    UnavailableReason,
+    HoverResult, IndexCoverage, InvalidHierarchyItem, InvalidKindFilter, InvalidPosition,
+    InvalidRange, InvalidTabSize, InvalidTextField, ItemIndex, KindFilter, KindFilterField,
+    KindFilterInput, Location, LocationContext, LocationSource, LocationsResult,
+    MAX_COLLAPSED_TEXT_BYTES, MAX_NEW_NAME_LENGTH, MAX_POSITION_VALUE, MAX_RANGE_LINES,
+    MAX_RESTART_SERVER_IDS, MAX_SELECTION_CHAIN, MAX_SERVER_ID_BYTES, MAX_SYMBOL_NAME_BYTES,
+    MAX_TAB_SIZE, MAX_TRIGGER_CHARACTER_BYTES, MAX_WORKSPACE_QUERY_BYTES, MemberStatus,
+    MemberSupport, NavigationLocation, NavigationObservation, NavigationResult, NavigationSource,
+    NewName, NotComputedReason, OutlineSymbol, Position, Position2D, PositionDegradation,
+    PositionRange, PositionSource, PrepareRenameOutcome, PrepareRenameResult, PreviewSource,
+    PreviewStatus, Range, ReferenceFile, ReferenceFileLimits, ReferenceFileSummary,
+    ReferenceLocation, ReferenceLocationsResult, ReferenceMode, ReferenceOptions, ReferenceSource,
+    ReferencesResult, RejectedKindFilter, Rejection, RenameOutcome, RenamePreparation,
+    RenameResult, ResolvedSymbol, ResolvedTarget, RestartFailure, RestartOutcome,
+    RestartServerResult, RestartTarget, ResultContext, RouteSupport, SelectionRangesResult,
+    ServerIds, ServerIdsError, ServerRestartEntry, SourceOrigin, SourceOutcome, SourceSkipReason,
+    SourceUnavailableReason, SuppliedVersion, Symbol, SymbolFidelity, SymbolKindFilter, SymbolName,
+    SymbolQuery, SymbolTarget, SymbolTargetEnvelope, SymbolTargetUnavailable, TabSize, TextEdit,
+    TextField, Translator, TypeHierarchyResult, UnavailableReason, WorkspaceQuery,
 };
 pub(crate) use translator::{
     CallGraphOptions, CallGraphStart, CallHierarchyPrepareResult, CallPathFilter,
@@ -84,5 +85,7 @@ pub(crate) use translator::{
 };
 #[cfg(test)]
 pub(crate) use workspace_roots::{CanonicalizeFn, ProcessCwd};
+pub(crate) use workspace_roots::{
+    EditUriVerdict, join_relative_root, lexically_normalize, probe_root,
+};
 pub use workspace_roots::{WorkspacePath, WorkspaceRoots};
-pub(crate) use workspace_roots::{join_relative_root, lexically_normalize, probe_root};

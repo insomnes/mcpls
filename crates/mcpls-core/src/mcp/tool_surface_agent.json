@@ -1207,12 +1207,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -1514,12 +1514,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -1744,12 +1744,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -1916,13 +1916,13 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "description": "Line number (1-based).",
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -2771,6 +2771,11 @@
               "minimum": 0,
               "type": "integer"
             },
+            "invalid_path": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
             "out_of_workspace": {
               "format": "uint",
               "minimum": 0,
@@ -2824,12 +2829,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -3141,20 +3146,16 @@
   {
     "name": "get_definition",
     "title": "Go to Definition",
-    "description": "Definition location of a symbol. include_targets:true adds portable symbol_target objects; default false. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Returns file path, line, and character where declared. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory).",
+    "description": "Definition locations. Address by absolute file_path with 1-based UTF-16 coordinates, symbol_name or portable target. include_targets:true returns reusable targets. context:enclosing_symbol adds enclosing metadata. context:symbol_source adds a bounded body to source. broader_context:true requests a location excerpt. include_source:true returns the excerpt in source when neither option claims it. Otherwise the excerpt appears once in broader_context. truncated marks omitted locations. positions_degraded request means uncertain query; response means inexact columns. out_of_workspace is advisory.",
     "inputSchema": {
       "$defs": {
-        "ResultContext": {
-          "oneOf": [
-            {
-              "const": "none",
-              "type": "string"
-            },
-            {
-              "const": "enclosing_symbol",
-              "type": "string"
-            }
-          ]
+        "LocationContext": {
+          "enum": [
+            "none",
+            "enclosing_symbol",
+            "symbol_source"
+          ],
+          "type": "string"
         },
         "SymbolTargetEnvelope": {
           "additionalProperties": false,
@@ -3176,6 +3177,10 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "broader_context": {
+          "default": false,
+          "type": "boolean"
+        },
         "character": {
           "description": "UTF-16 column (1-based), with line.",
           "format": "uint32",
@@ -3192,7 +3197,7 @@
           ]
         },
         "context": {
-          "$ref": "#/$defs/ResultContext",
+          "$ref": "#/$defs/LocationContext",
           "default": "none"
         },
         "file_path": {
@@ -3405,8 +3410,11 @@
           ],
           "type": "object"
         },
-        "NavigationLocation": {
+        "NavigationObservation": {
           "properties": {
+            "broader_context": {
+              "$ref": "#/$defs/NavigationSource"
+            },
             "enclosing_symbol": {
               "$ref": "#/$defs/EnclosingSymbolOutcome"
             },
@@ -3418,6 +3426,9 @@
             },
             "source": {
               "anyOf": [
+                {
+                  "$ref": "#/$defs/SourceOutcome"
+                },
                 {
                   "$ref": "#/$defs/NavigationSource"
                 },
@@ -3511,35 +3522,24 @@
           ]
         },
         "NotComputedReason": {
-          "oneOf": [
-            {
-              "const": "file_cap",
-              "type": "string"
-            },
-            {
-              "const": "out_of_workspace",
-              "type": "string"
-            },
-            {
-              "const": "tracker_limit",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "file_cap",
+            "out_of_workspace",
+            "tracker_limit",
+            "deadline"
+          ],
+          "type": "string"
         },
         "Position2D": {
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -3621,72 +3621,100 @@
           "type": "object"
         },
         "SourceOrigin": {
+          "enum": [
+            "tracked",
+            "disk"
+          ],
+          "type": "string"
+        },
+        "SourceOutcome": {
           "oneOf": [
             {
-              "const": "tracked",
-              "type": "string"
+              "properties": {
+                "status": {
+                  "const": "included",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "status",
+                "text",
+                "truncated"
+              ],
+              "type": "object"
             },
             {
-              "const": "disk",
-              "type": "string"
+              "properties": {
+                "item": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "same_as",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/SourceSkipReason"
+                },
+                "status": {
+                  "const": "not_computed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "SourceSkipReason": {
+          "enum": [
+            "no_span",
+            "call_budget",
+            "document_changed",
+            "symbol_lookup_skipped"
+          ],
+          "type": "string"
         },
         "SourceUnavailableReason": {
-          "oneOf": [
-            {
-              "const": "candidate_limit",
-              "type": "string"
-            },
-            {
-              "const": "file_limit",
-              "type": "string"
-            },
-            {
-              "const": "source_budget",
-              "type": "string"
-            },
-            {
-              "const": "text_budget",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            },
-            {
-              "const": "access_denied",
-              "type": "string"
-            },
-            {
-              "const": "read_failed",
-              "type": "string"
-            },
-            {
-              "const": "file_too_large",
-              "type": "string"
-            },
-            {
-              "const": "invalid_utf8",
-              "type": "string"
-            },
-            {
-              "const": "line_unavailable",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "candidate_limit",
+            "file_limit",
+            "source_budget",
+            "text_budget",
+            "deadline",
+            "access_denied",
+            "read_failed",
+            "file_too_large",
+            "invalid_utf8",
+            "line_unavailable"
+          ],
+          "type": "string"
         },
         "SymbolFidelity": {
-          "oneOf": [
-            {
-              "const": "hierarchical",
-              "type": "string"
-            },
-            {
-              "const": "flat",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "hierarchical",
+            "flat"
+          ],
+          "type": "string"
         },
         "SymbolTargetEnvelope": {
           "additionalProperties": false,
@@ -3716,20 +3744,12 @@
           "type": "object"
         },
         "UnavailableReason": {
-          "oneOf": [
-            {
-              "const": "capability_absent",
-              "type": "string"
-            },
-            {
-              "const": "request_failed",
-              "type": "string"
-            },
-            {
-              "const": "timed_out",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "capability_absent",
+            "request_failed",
+            "timed_out"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3746,7 +3766,7 @@
         },
         "locations": {
           "items": {
-            "$ref": "#/$defs/NavigationLocation"
+            "$ref": "#/$defs/NavigationObservation"
           },
           "type": "array"
         },
@@ -3797,10 +3817,12 @@
           "oneOf": [
             {
               "const": "none",
+              "description": "Return the plain result with no extra lookups.",
               "type": "string"
             },
             {
               "const": "enclosing_symbol",
+              "description": "Attach the innermost enclosing symbol to each item, one documentSymbol request per file.",
               "type": "string"
             }
           ]
@@ -4105,12 +4127,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -4344,12 +4366,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -4560,12 +4582,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -4692,12 +4714,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -4934,12 +4956,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -5150,12 +5172,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -5511,12 +5533,12 @@
                             "properties": {
                               "character": {
                                 "format": "uint32",
-                                "minimum": 0,
+                                "minimum": 1,
                                 "type": "integer"
                               },
                               "line": {
                                 "format": "uint32",
-                                "minimum": 0,
+                                "minimum": 1,
                                 "type": "integer"
                               }
                             },
@@ -5530,12 +5552,12 @@
                             "properties": {
                               "character": {
                                 "format": "uint32",
-                                "minimum": 0,
+                                "minimum": 1,
                                 "type": "integer"
                               },
                               "line": {
                                 "format": "uint32",
-                                "minimum": 0,
+                                "minimum": 1,
                                 "type": "integer"
                               }
                             },
@@ -5603,12 +5625,12 @@
                           "properties": {
                             "character": {
                               "format": "uint32",
-                              "minimum": 0,
+                              "minimum": 1,
                               "type": "integer"
                             },
                             "line": {
                               "format": "uint32",
-                              "minimum": 0,
+                              "minimum": 1,
                               "type": "integer"
                             }
                           },
@@ -5666,12 +5688,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -5704,12 +5726,12 @@
               "properties": {
                 "character": {
                   "format": "uint32",
-                  "minimum": 0,
+                  "minimum": 1,
                   "type": "integer"
                 },
                 "line": {
                   "format": "uint32",
-                  "minimum": 0,
+                  "minimum": 1,
                   "type": "integer"
                 }
               },
@@ -5878,13 +5900,13 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "description": "Line number (1-based).",
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -6030,12 +6052,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -6338,12 +6360,12 @@
                             "properties": {
                               "character": {
                                 "format": "uint32",
-                                "minimum": 0,
+                                "minimum": 1,
                                 "type": "integer"
                               },
                               "line": {
                                 "format": "uint32",
-                                "minimum": 0,
+                                "minimum": 1,
                                 "type": "integer"
                               }
                             },
@@ -6357,12 +6379,12 @@
                             "properties": {
                               "character": {
                                 "format": "uint32",
-                                "minimum": 0,
+                                "minimum": 1,
                                 "type": "integer"
                               },
                               "line": {
                                 "format": "uint32",
-                                "minimum": 0,
+                                "minimum": 1,
                                 "type": "integer"
                               }
                             },
@@ -6430,12 +6452,12 @@
                           "properties": {
                             "character": {
                               "format": "uint32",
-                              "minimum": 0,
+                              "minimum": 1,
                               "type": "integer"
                             },
                             "line": {
                               "format": "uint32",
-                              "minimum": 0,
+                              "minimum": 1,
                               "type": "integer"
                             }
                           },
@@ -6546,12 +6568,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -6584,12 +6606,12 @@
               "properties": {
                 "character": {
                   "format": "uint32",
-                  "minimum": 0,
+                  "minimum": 1,
                   "type": "integer"
                 },
                 "line": {
                   "format": "uint32",
-                  "minimum": 0,
+                  "minimum": 1,
                   "type": "integer"
                 }
               },
@@ -6660,9 +6682,17 @@
   {
     "name": "get_references",
     "title": "Find References",
-    "description": "References including duplicates. include_targets:true adds symbol_target or symbol_target_unavailable at each retained range.start; default false. Copy targets unchanged to definition or context tools. Files mode has no target enrichment. Acquisition is bounded; analysis freshness is unknown. Address by absolute file_path with 1-based line/character, symbol_name, or portable target. mode:locations(default) returns locations; mode:files returns empty locations and file_summary: first-seen exact-URI groups with count,first example,file_path. Reuse file_path as lexical path_filter; unsupported paths:null+unsupported_uri. limit:10(1..10000) bounds locations/groups. Files scan caps:100000 locations,8388608 URI bytes,10000 matching URIs; whole-summary cap:65536 JSON bytes. counts_complete:false means lower bounds; output_truncated means known groups omitted. truncated never proves workspace coverage. include_source:false; true adds bounded text/unavailable. context:enclosing_symbol opts in. Snapshots are not atomic.",
+    "description": "References in server order with duplicates. Files mode groups exact URIs and retains first examples within 64 KiB. Reuse the group file_path as path_filter. include_targets adds portable location targets. context:symbol_source adds bodies to source and requires locations mode. broader_context adds excerpts. include_source adds excerpts under source, or broader_context when combined with symbol_source. truncated marks omitted results or incomplete counts. out_of_workspace is advisory. positions_degraded request means uncertain query; response means inexact columns.",
     "inputSchema": {
       "$defs": {
+        "LocationContext": {
+          "enum": [
+            "none",
+            "enclosing_symbol",
+            "symbol_source"
+          ],
+          "type": "string"
+        },
         "ReferenceMode": {
           "oneOf": [
             {
@@ -6671,18 +6701,6 @@
             },
             {
               "const": "files",
-              "type": "string"
-            }
-          ]
-        },
-        "ResultContext": {
-          "oneOf": [
-            {
-              "const": "none",
-              "type": "string"
-            },
-            {
-              "const": "enclosing_symbol",
               "type": "string"
             }
           ]
@@ -6707,6 +6725,10 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "broader_context": {
+          "default": false,
+          "type": "boolean"
+        },
         "character": {
           "format": "uint32",
           "minimum": 0,
@@ -6722,7 +6744,7 @@
           ]
         },
         "context": {
-          "$ref": "#/$defs/ResultContext",
+          "$ref": "#/$defs/LocationContext",
           "default": "none"
         },
         "file_path": {
@@ -6848,7 +6870,6 @@
               "$ref": "#/$defs/SymbolFidelity"
             },
             "kind": {
-              "format": "uint32",
               "minimum": 0,
               "type": "integer"
             },
@@ -6937,12 +6958,10 @@
               "type": "boolean"
             },
             "files_enriched": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
             "files_skipped": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             }
@@ -6960,7 +6979,6 @@
               "type": "boolean"
             },
             "synced_documents": {
-              "format": "uint32",
               "minimum": 0,
               "type": "integer"
             }
@@ -6971,35 +6989,22 @@
           "type": "object"
         },
         "NotComputedReason": {
-          "oneOf": [
-            {
-              "const": "file_cap",
-              "type": "string"
-            },
-            {
-              "const": "out_of_workspace",
-              "type": "string"
-            },
-            {
-              "const": "tracker_limit",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "file_cap",
+            "out_of_workspace",
+            "tracker_limit",
+            "deadline"
+          ],
+          "type": "string"
         },
         "Position2D": {
           "properties": {
             "character": {
-              "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
-              "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -7027,7 +7032,6 @@
         "ReferenceFile": {
           "properties": {
             "count": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
@@ -7061,22 +7065,18 @@
         "ReferenceFileLimits": {
           "properties": {
             "max_files": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
             "max_output_bytes": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
             "max_processed_locations": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
             "max_uri_bytes": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             }
@@ -7098,7 +7098,6 @@
               "type": "boolean"
             },
             "file_count": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
@@ -7112,7 +7111,6 @@
               "$ref": "#/$defs/ReferenceFileLimits"
             },
             "omitted_file_count": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
@@ -7120,12 +7118,10 @@
               "type": "boolean"
             },
             "processed_count": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             },
             "received_count": {
-              "format": "uint",
               "minimum": 0,
               "type": "integer"
             }
@@ -7145,6 +7141,9 @@
         },
         "ReferenceLocation": {
           "properties": {
+            "broader_context": {
+              "$ref": "#/$defs/ReferenceSource"
+            },
             "enclosing_symbol": {
               "$ref": "#/$defs/EnclosingSymbolOutcome"
             },
@@ -7157,70 +7156,10 @@
             "source": {
               "anyOf": [
                 {
-                  "oneOf": [
-                    {
-                      "properties": {
-                        "origin": {
-                          "enum": [
-                            "tracked",
-                            "disk"
-                          ],
-                          "type": "string"
-                        },
-                        "shortened": {
-                          "type": "boolean"
-                        },
-                        "start_line": {
-                          "format": "uint32",
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "status": {
-                          "const": "text",
-                          "type": "string"
-                        },
-                        "text": {
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "status",
-                        "text",
-                        "start_line",
-                        "origin",
-                        "shortened"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "properties": {
-                        "reason": {
-                          "enum": [
-                            "candidate_limit",
-                            "file_limit",
-                            "source_budget",
-                            "text_budget",
-                            "deadline",
-                            "access_denied",
-                            "read_failed",
-                            "file_too_large",
-                            "invalid_utf8",
-                            "line_unavailable"
-                          ],
-                          "type": "string"
-                        },
-                        "status": {
-                          "const": "unavailable",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "status",
-                        "reason"
-                      ],
-                      "type": "object"
-                    }
-                  ]
+                  "$ref": "#/$defs/SourceOutcome"
+                },
+                {
+                  "$ref": "#/$defs/ReferenceSource"
                 },
                 {
                   "type": "null"
@@ -7257,17 +7196,143 @@
           ],
           "type": "object"
         },
-        "SymbolFidelity": {
+        "ReferenceSource": {
           "oneOf": [
             {
-              "const": "hierarchical",
-              "type": "string"
+              "properties": {
+                "origin": {
+                  "enum": [
+                    "tracked",
+                    "disk"
+                  ],
+                  "type": "string"
+                },
+                "shortened": {
+                  "type": "boolean"
+                },
+                "start_line": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "text",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "text",
+                "start_line",
+                "origin",
+                "shortened"
+              ],
+              "type": "object"
             },
             {
-              "const": "flat",
-              "type": "string"
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "candidate_limit",
+                    "file_limit",
+                    "source_budget",
+                    "text_budget",
+                    "deadline",
+                    "access_denied",
+                    "read_failed",
+                    "file_too_large",
+                    "invalid_utf8",
+                    "line_unavailable"
+                  ],
+                  "type": "string"
+                },
+                "status": {
+                  "const": "unavailable",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "SourceOutcome": {
+          "oneOf": [
+            {
+              "properties": {
+                "status": {
+                  "const": "included",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "status",
+                "text",
+                "truncated"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "item": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "same_as",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/SourceSkipReason"
+                },
+                "status": {
+                  "const": "not_computed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "SourceSkipReason": {
+          "enum": [
+            "no_span",
+            "call_budget",
+            "document_changed",
+            "symbol_lookup_skipped"
+          ],
+          "type": "string"
+        },
+        "SymbolFidelity": {
+          "enum": [
+            "hierarchical",
+            "flat"
+          ],
+          "type": "string"
         },
         "SymbolTargetEnvelope": {
           "additionalProperties": false,
@@ -7297,20 +7362,12 @@
           "type": "object"
         },
         "UnavailableReason": {
-          "oneOf": [
-            {
-              "const": "capability_absent",
-              "type": "string"
-            },
-            {
-              "const": "request_failed",
-              "type": "string"
-            },
-            {
-              "const": "timed_out",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "capability_absent",
+            "request_failed",
+            "timed_out"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7345,7 +7402,6 @@
           "type": "array"
         },
         "matched_count": {
-          "format": "uint",
           "minimum": 0,
           "type": "integer"
         },
@@ -7374,7 +7430,6 @@
                   ]
                 },
                 "kind": {
-                  "format": "uint32",
                   "minimum": 0,
                   "type": "integer"
                 },
@@ -7384,13 +7439,11 @@
                 "position": {
                   "properties": {
                     "character": {
-                      "format": "uint32",
-                      "minimum": 0,
+                      "minimum": 1,
                       "type": "integer"
                     },
                     "line": {
-                      "format": "uint32",
-                      "minimum": 0,
+                      "minimum": 1,
                       "type": "integer"
                     }
                   },
@@ -7442,7 +7495,7 @@
   {
     "name": "get_server_logs",
     "title": "Server Logs",
-    "description": "Recent server log messages. Filter by level (error, warning, info, debug) for debugging.",
+    "description": "Recent server log messages. Filter by level (error, warning, info, log, debug) for debugging.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7457,26 +7510,31 @@
         "min_level": {
           "anyOf": [
             {
-              "description": "Log severity level.",
+              "description": "Severity of a server log or message, mirroring the LSP `MessageType` levels.",
               "oneOf": [
                 {
                   "const": "error",
-                  "description": "Error log level.",
+                  "description": "Error level.",
                   "type": "string"
                 },
                 {
                   "const": "warning",
-                  "description": "Warning log level.",
+                  "description": "Warning level.",
                   "type": "string"
                 },
                 {
                   "const": "info",
-                  "description": "Info log level.",
+                  "description": "Info level.",
+                  "type": "string"
+                },
+                {
+                  "const": "log",
+                  "description": "LSP `Log` level.",
                   "type": "string"
                 },
                 {
                   "const": "debug",
-                  "description": "Debug log level.",
+                  "description": "Debug level; also used for unrecognized LSP message types.",
                   "type": "string"
                 }
               ]
@@ -7485,7 +7543,7 @@
               "type": "null"
             }
           ],
-          "description": "Minimum log level to include: error, warning, info, debug."
+          "description": "Minimum log level to include: error, warning, info, log, debug."
         },
         "workspace_path": {
           "type": "string"
@@ -7503,22 +7561,27 @@
               "oneOf": [
                 {
                   "const": "error",
-                  "description": "Error log level.",
+                  "description": "Error level.",
                   "type": "string"
                 },
                 {
                   "const": "warning",
-                  "description": "Warning log level.",
+                  "description": "Warning level.",
                   "type": "string"
                 },
                 {
                   "const": "info",
-                  "description": "Info log level.",
+                  "description": "Info level.",
+                  "type": "string"
+                },
+                {
+                  "const": "log",
+                  "description": "LSP `Log` level.",
                   "type": "string"
                 },
                 {
                   "const": "debug",
-                  "description": "Debug log level.",
+                  "description": "Debug level; also used for unrecognized LSP message types.",
                   "type": "string"
                 }
               ]
@@ -7586,31 +7649,6 @@
     },
     "outputSchema": {
       "$defs": {
-        "MessageType": {
-          "description": "Server message type.",
-          "oneOf": [
-            {
-              "const": "error",
-              "description": "Error message.",
-              "type": "string"
-            },
-            {
-              "const": "warning",
-              "description": "Warning message.",
-              "type": "string"
-            },
-            {
-              "const": "info",
-              "description": "Info message.",
-              "type": "string"
-            },
-            {
-              "const": "log",
-              "description": "Log message.",
-              "type": "string"
-            }
-          ]
-        },
         "ServerMessage": {
           "description": "A message from the LSP server.",
           "properties": {
@@ -7619,8 +7657,34 @@
               "type": "string"
             },
             "message_type": {
-              "$ref": "#/$defs/MessageType",
-              "description": "Message type."
+              "description": "Message type.",
+              "oneOf": [
+                {
+                  "const": "error",
+                  "description": "Error level.",
+                  "type": "string"
+                },
+                {
+                  "const": "warning",
+                  "description": "Warning level.",
+                  "type": "string"
+                },
+                {
+                  "const": "info",
+                  "description": "Info level.",
+                  "type": "string"
+                },
+                {
+                  "const": "log",
+                  "description": "LSP `Log` level.",
+                  "type": "string"
+                },
+                {
+                  "const": "debug",
+                  "description": "Debug level; also used for unrecognized LSP message types.",
+                  "type": "string"
+                }
+              ]
             },
             "timestamp": {
               "description": "Timestamp when the message was received.",
@@ -7864,12 +7928,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -8087,12 +8151,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -8275,12 +8339,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -8498,12 +8562,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -9050,6 +9114,29 @@
     "outputSchema": {
       "$defs": {
         "Capability": {
+          "enum": [
+            "completionProvider",
+            "signatureHelpProvider",
+            "inlayHintProvider",
+            "hoverProvider",
+            "definitionProvider",
+            "referencesProvider",
+            "implementationProvider",
+            "typeDefinitionProvider",
+            "callHierarchyProvider",
+            "renameProvider",
+            "documentFormattingProvider",
+            "codeActionProvider",
+            "documentSymbolProvider",
+            "workspaceSymbolProvider",
+            "declarationProvider",
+            "typeHierarchyProvider",
+            "renameProvider.prepareProvider",
+            "documentHighlightProvider",
+            "documentRangeFormattingProvider",
+            "selectionRangeProvider",
+            "foldingRangeProvider"
+          ],
           "type": "string"
         },
         "RouteShape": {
@@ -9075,8 +9162,7 @@
               },
               "required": [
                 "status",
-                "server",
-                "languages"
+                "server"
               ],
               "type": "object"
             },
@@ -9101,8 +9187,7 @@
               },
               "required": [
                 "status",
-                "server",
-                "languages"
+                "server"
               ],
               "type": "object"
             },
@@ -9131,8 +9216,7 @@
               "required": [
                 "status",
                 "server",
-                "capability",
-                "languages"
+                "capability"
               ],
               "type": "object"
             },
@@ -9156,8 +9240,7 @@
                 }
               },
               "required": [
-                "status",
-                "languages"
+                "status"
               ],
               "type": "object"
             },
@@ -9182,8 +9265,7 @@
               },
               "required": [
                 "status",
-                "server",
-                "languages"
+                "server"
               ],
               "type": "object"
             },
@@ -9204,8 +9286,7 @@
                 }
               },
               "required": [
-                "status",
-                "languages"
+                "status"
               ],
               "type": "object"
             }
@@ -9327,25 +9408,25 @@
   {
     "name": "go_to_declaration",
     "title": "Go to Declaration",
-    "description": "Declaration location of the symbol at position. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Differs from go-to-definition for languages that separate declaration from definition (C/C++ headers, interface members); servers without a declaration concept may return the definition. An empty result is valid. Capped at a fixed maximum; `truncated: true` on the result means more locations exist than are returned. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory).",
+    "description": "Declaration locations at absolute file_path with 1-based UTF-16 coordinates. Some providers return the definition. context:enclosing_symbol adds enclosing metadata. context:symbol_source adds a bounded body to source. broader_context:true requests a location excerpt. include_source:true returns the excerpt in source when neither option claims it. Otherwise the excerpt appears once in broader_context. truncated marks omitted locations. positions_degraded request means uncertain query; response means inexact columns. out_of_workspace is advisory.",
     "inputSchema": {
       "$defs": {
-        "ResultContext": {
-          "oneOf": [
-            {
-              "const": "none",
-              "type": "string"
-            },
-            {
-              "const": "enclosing_symbol",
-              "type": "string"
-            }
-          ]
+        "LocationContext": {
+          "enum": [
+            "none",
+            "enclosing_symbol",
+            "symbol_source"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "broader_context": {
+          "default": false,
+          "type": "boolean"
+        },
         "character": {
           "description": "Character/column number (1-based).",
           "format": "uint32",
@@ -9353,7 +9434,7 @@
           "type": "integer"
         },
         "context": {
-          "$ref": "#/$defs/ResultContext",
+          "$ref": "#/$defs/LocationContext",
           "default": "none"
         },
         "file_path": {
@@ -9492,8 +9573,11 @@
           ],
           "type": "object"
         },
-        "NavigationLocation": {
+        "NavigationObservation": {
           "properties": {
+            "broader_context": {
+              "$ref": "#/$defs/NavigationSource"
+            },
             "enclosing_symbol": {
               "$ref": "#/$defs/EnclosingSymbolOutcome"
             },
@@ -9505,6 +9589,9 @@
             },
             "source": {
               "anyOf": [
+                {
+                  "$ref": "#/$defs/SourceOutcome"
+                },
                 {
                   "$ref": "#/$defs/NavigationSource"
                 },
@@ -9578,35 +9665,24 @@
           ]
         },
         "NotComputedReason": {
-          "oneOf": [
-            {
-              "const": "file_cap",
-              "type": "string"
-            },
-            {
-              "const": "out_of_workspace",
-              "type": "string"
-            },
-            {
-              "const": "tracker_limit",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "file_cap",
+            "out_of_workspace",
+            "tracker_limit",
+            "deadline"
+          ],
+          "type": "string"
         },
         "Position2D": {
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -9644,88 +9720,108 @@
           "type": "object"
         },
         "SourceOrigin": {
+          "enum": [
+            "tracked",
+            "disk"
+          ],
+          "type": "string"
+        },
+        "SourceOutcome": {
           "oneOf": [
             {
-              "const": "tracked",
-              "type": "string"
+              "properties": {
+                "status": {
+                  "const": "included",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "status",
+                "text",
+                "truncated"
+              ],
+              "type": "object"
             },
             {
-              "const": "disk",
-              "type": "string"
+              "properties": {
+                "item": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "same_as",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/SourceSkipReason"
+                },
+                "status": {
+                  "const": "not_computed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "SourceSkipReason": {
+          "enum": [
+            "no_span",
+            "call_budget",
+            "document_changed",
+            "symbol_lookup_skipped"
+          ],
+          "type": "string"
         },
         "SourceUnavailableReason": {
-          "oneOf": [
-            {
-              "const": "candidate_limit",
-              "type": "string"
-            },
-            {
-              "const": "file_limit",
-              "type": "string"
-            },
-            {
-              "const": "source_budget",
-              "type": "string"
-            },
-            {
-              "const": "text_budget",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            },
-            {
-              "const": "access_denied",
-              "type": "string"
-            },
-            {
-              "const": "read_failed",
-              "type": "string"
-            },
-            {
-              "const": "file_too_large",
-              "type": "string"
-            },
-            {
-              "const": "invalid_utf8",
-              "type": "string"
-            },
-            {
-              "const": "line_unavailable",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "candidate_limit",
+            "file_limit",
+            "source_budget",
+            "text_budget",
+            "deadline",
+            "access_denied",
+            "read_failed",
+            "file_too_large",
+            "invalid_utf8",
+            "line_unavailable"
+          ],
+          "type": "string"
         },
         "SymbolFidelity": {
-          "oneOf": [
-            {
-              "const": "hierarchical",
-              "type": "string"
-            },
-            {
-              "const": "flat",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "hierarchical",
+            "flat"
+          ],
+          "type": "string"
         },
         "UnavailableReason": {
-          "oneOf": [
-            {
-              "const": "capability_absent",
-              "type": "string"
-            },
-            {
-              "const": "request_failed",
-              "type": "string"
-            },
-            {
-              "const": "timed_out",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "capability_absent",
+            "request_failed",
+            "timed_out"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -9742,7 +9838,7 @@
         },
         "locations": {
           "items": {
-            "$ref": "#/$defs/NavigationLocation"
+            "$ref": "#/$defs/NavigationObservation"
           },
           "type": "array"
         },
@@ -9775,25 +9871,25 @@
   {
     "name": "go_to_implementation",
     "title": "Go to Implementation",
-    "description": "Implementation locations of a trait method or interface member. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Capped at a fixed maximum for an extremely common trait/interface; `truncated: true` on the result means more implementations exist than are returned. Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory).",
+    "description": "Trait or interface implementation locations. Address by absolute file_path with 1-based UTF-16 coordinates or symbol_name. context:enclosing_symbol adds enclosing metadata. context:symbol_source adds a bounded body to source. broader_context:true requests a location excerpt. include_source:true returns the excerpt in source when neither option claims it. Otherwise the excerpt appears once in broader_context. truncated marks omitted locations. positions_degraded request means uncertain query; response means inexact columns. out_of_workspace is advisory.",
     "inputSchema": {
       "$defs": {
-        "ResultContext": {
-          "oneOf": [
-            {
-              "const": "none",
-              "type": "string"
-            },
-            {
-              "const": "enclosing_symbol",
-              "type": "string"
-            }
-          ]
+        "LocationContext": {
+          "enum": [
+            "none",
+            "enclosing_symbol",
+            "symbol_source"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "broader_context": {
+          "default": false,
+          "type": "boolean"
+        },
         "character": {
           "default": null,
           "description": "Character/column number (1-based). Give with `line`, instead of `symbol_name`.",
@@ -9812,7 +9908,7 @@
           ]
         },
         "context": {
-          "$ref": "#/$defs/ResultContext",
+          "$ref": "#/$defs/LocationContext",
           "default": "none"
         },
         "file_path": {
@@ -10008,8 +10104,11 @@
           ],
           "type": "object"
         },
-        "NavigationLocation": {
+        "NavigationObservation": {
           "properties": {
+            "broader_context": {
+              "$ref": "#/$defs/NavigationSource"
+            },
             "enclosing_symbol": {
               "$ref": "#/$defs/EnclosingSymbolOutcome"
             },
@@ -10021,6 +10120,9 @@
             },
             "source": {
               "anyOf": [
+                {
+                  "$ref": "#/$defs/SourceOutcome"
+                },
                 {
                   "$ref": "#/$defs/NavigationSource"
                 },
@@ -10094,35 +10196,24 @@
           ]
         },
         "NotComputedReason": {
-          "oneOf": [
-            {
-              "const": "file_cap",
-              "type": "string"
-            },
-            {
-              "const": "out_of_workspace",
-              "type": "string"
-            },
-            {
-              "const": "tracker_limit",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "file_cap",
+            "out_of_workspace",
+            "tracker_limit",
+            "deadline"
+          ],
+          "type": "string"
         },
         "Position2D": {
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -10204,88 +10295,108 @@
           "type": "object"
         },
         "SourceOrigin": {
+          "enum": [
+            "tracked",
+            "disk"
+          ],
+          "type": "string"
+        },
+        "SourceOutcome": {
           "oneOf": [
             {
-              "const": "tracked",
-              "type": "string"
+              "properties": {
+                "status": {
+                  "const": "included",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "status",
+                "text",
+                "truncated"
+              ],
+              "type": "object"
             },
             {
-              "const": "disk",
-              "type": "string"
+              "properties": {
+                "item": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "same_as",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/SourceSkipReason"
+                },
+                "status": {
+                  "const": "not_computed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "SourceSkipReason": {
+          "enum": [
+            "no_span",
+            "call_budget",
+            "document_changed",
+            "symbol_lookup_skipped"
+          ],
+          "type": "string"
         },
         "SourceUnavailableReason": {
-          "oneOf": [
-            {
-              "const": "candidate_limit",
-              "type": "string"
-            },
-            {
-              "const": "file_limit",
-              "type": "string"
-            },
-            {
-              "const": "source_budget",
-              "type": "string"
-            },
-            {
-              "const": "text_budget",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            },
-            {
-              "const": "access_denied",
-              "type": "string"
-            },
-            {
-              "const": "read_failed",
-              "type": "string"
-            },
-            {
-              "const": "file_too_large",
-              "type": "string"
-            },
-            {
-              "const": "invalid_utf8",
-              "type": "string"
-            },
-            {
-              "const": "line_unavailable",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "candidate_limit",
+            "file_limit",
+            "source_budget",
+            "text_budget",
+            "deadline",
+            "access_denied",
+            "read_failed",
+            "file_too_large",
+            "invalid_utf8",
+            "line_unavailable"
+          ],
+          "type": "string"
         },
         "SymbolFidelity": {
-          "oneOf": [
-            {
-              "const": "hierarchical",
-              "type": "string"
-            },
-            {
-              "const": "flat",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "hierarchical",
+            "flat"
+          ],
+          "type": "string"
         },
         "UnavailableReason": {
-          "oneOf": [
-            {
-              "const": "capability_absent",
-              "type": "string"
-            },
-            {
-              "const": "request_failed",
-              "type": "string"
-            },
-            {
-              "const": "timed_out",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "capability_absent",
+            "request_failed",
+            "timed_out"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10302,7 +10413,7 @@
         },
         "locations": {
           "items": {
-            "$ref": "#/$defs/NavigationLocation"
+            "$ref": "#/$defs/NavigationObservation"
           },
           "type": "array"
         },
@@ -10345,25 +10456,25 @@
   {
     "name": "go_to_type_definition",
     "title": "Go to Type Definition",
-    "description": "Type definition location of an expression or symbol. include_source:true adds bounded five-line source or an unavailable reason; default false. Text includes start_line (1-based),origin,sha256 of complete unredacted observed bytes,shortened. Limits:100 candidates,16 files,1 MiB/file,4 MiB acquisition,2 KiB/excerpt,64 KiB final redacted text,2 MiB added JSON,2 s best-effort acquisition. Whole target-line fallback; no complete-body or analyzed-snapshot guarantee. Existing warnings remain.  Distinct from go-to-definition for variable bindings. Capped at a fixed maximum for a pathological case; `truncated: true` on the result means more locations exist than are returned. Use `line`+`character`, or `symbol_name` for a file symbol, optionally narrowed by `symbol_kind`/`container`. Name results carry `resolved_symbol` and the queried position. Ambiguous, absent or unverifiable names fail with candidates or a reason. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact. Pass `context: \"enclosing_symbol\"` to attach `enclosing_symbol` to each item: `status` `resolved` (with `name_path`, `kind`, `range`, `fidelity`), `top_level` (no symbol contains it), `not_computed` or `unavailable` (with a `reason`; nothing is known, never read as top level). Costs one documentSymbol request per distinct file, capped per call; `enrichment` reports files enriched or skipped and `cut_short`. `out_of_workspace: true`: not provably in configured workspace roots (lexical, advisory).",
+    "description": "Type definition locations for an expression or symbol. Address by absolute file_path with 1-based UTF-16 coordinates or symbol_name. context:enclosing_symbol adds enclosing metadata. context:symbol_source adds a bounded body to source. broader_context:true requests a location excerpt. include_source:true returns the excerpt in source when neither option claims it. Otherwise the excerpt appears once in broader_context. truncated marks omitted locations. positions_degraded request means uncertain query; response means inexact columns. out_of_workspace is advisory.",
     "inputSchema": {
       "$defs": {
-        "ResultContext": {
-          "oneOf": [
-            {
-              "const": "none",
-              "type": "string"
-            },
-            {
-              "const": "enclosing_symbol",
-              "type": "string"
-            }
-          ]
+        "LocationContext": {
+          "enum": [
+            "none",
+            "enclosing_symbol",
+            "symbol_source"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "broader_context": {
+          "default": false,
+          "type": "boolean"
+        },
         "character": {
           "default": null,
           "description": "Character/column number (1-based). Give with `line`, instead of `symbol_name`.",
@@ -10382,7 +10493,7 @@
           ]
         },
         "context": {
-          "$ref": "#/$defs/ResultContext",
+          "$ref": "#/$defs/LocationContext",
           "default": "none"
         },
         "file_path": {
@@ -10578,8 +10689,11 @@
           ],
           "type": "object"
         },
-        "NavigationLocation": {
+        "NavigationObservation": {
           "properties": {
+            "broader_context": {
+              "$ref": "#/$defs/NavigationSource"
+            },
             "enclosing_symbol": {
               "$ref": "#/$defs/EnclosingSymbolOutcome"
             },
@@ -10591,6 +10705,9 @@
             },
             "source": {
               "anyOf": [
+                {
+                  "$ref": "#/$defs/SourceOutcome"
+                },
                 {
                   "$ref": "#/$defs/NavigationSource"
                 },
@@ -10664,35 +10781,24 @@
           ]
         },
         "NotComputedReason": {
-          "oneOf": [
-            {
-              "const": "file_cap",
-              "type": "string"
-            },
-            {
-              "const": "out_of_workspace",
-              "type": "string"
-            },
-            {
-              "const": "tracker_limit",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "file_cap",
+            "out_of_workspace",
+            "tracker_limit",
+            "deadline"
+          ],
+          "type": "string"
         },
         "Position2D": {
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -10774,88 +10880,108 @@
           "type": "object"
         },
         "SourceOrigin": {
+          "enum": [
+            "tracked",
+            "disk"
+          ],
+          "type": "string"
+        },
+        "SourceOutcome": {
           "oneOf": [
             {
-              "const": "tracked",
-              "type": "string"
+              "properties": {
+                "status": {
+                  "const": "included",
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "status",
+                "text",
+                "truncated"
+              ],
+              "type": "object"
             },
             {
-              "const": "disk",
-              "type": "string"
+              "properties": {
+                "item": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "status": {
+                  "const": "same_as",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/SourceSkipReason"
+                },
+                "status": {
+                  "const": "not_computed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status",
+                "reason"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "SourceSkipReason": {
+          "enum": [
+            "no_span",
+            "call_budget",
+            "document_changed",
+            "symbol_lookup_skipped"
+          ],
+          "type": "string"
         },
         "SourceUnavailableReason": {
-          "oneOf": [
-            {
-              "const": "candidate_limit",
-              "type": "string"
-            },
-            {
-              "const": "file_limit",
-              "type": "string"
-            },
-            {
-              "const": "source_budget",
-              "type": "string"
-            },
-            {
-              "const": "text_budget",
-              "type": "string"
-            },
-            {
-              "const": "deadline",
-              "type": "string"
-            },
-            {
-              "const": "access_denied",
-              "type": "string"
-            },
-            {
-              "const": "read_failed",
-              "type": "string"
-            },
-            {
-              "const": "file_too_large",
-              "type": "string"
-            },
-            {
-              "const": "invalid_utf8",
-              "type": "string"
-            },
-            {
-              "const": "line_unavailable",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "candidate_limit",
+            "file_limit",
+            "source_budget",
+            "text_budget",
+            "deadline",
+            "access_denied",
+            "read_failed",
+            "file_too_large",
+            "invalid_utf8",
+            "line_unavailable"
+          ],
+          "type": "string"
         },
         "SymbolFidelity": {
-          "oneOf": [
-            {
-              "const": "hierarchical",
-              "type": "string"
-            },
-            {
-              "const": "flat",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "hierarchical",
+            "flat"
+          ],
+          "type": "string"
         },
         "UnavailableReason": {
-          "oneOf": [
-            {
-              "const": "capability_absent",
-              "type": "string"
-            },
-            {
-              "const": "request_failed",
-              "type": "string"
-            },
-            {
-              "const": "timed_out",
-              "type": "string"
-            }
-          ]
+          "enum": [
+            "capability_absent",
+            "request_failed",
+            "timed_out"
+          ],
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -10872,7 +10998,7 @@
         },
         "locations": {
           "items": {
-            "$ref": "#/$defs/NavigationLocation"
+            "$ref": "#/$defs/NavigationObservation"
           },
           "type": "array"
         },
@@ -11096,6 +11222,11 @@
               "minimum": 0,
               "type": "integer"
             },
+            "invalid_path": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
             "out_of_workspace": {
               "format": "uint",
               "minimum": 0,
@@ -11149,12 +11280,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },
@@ -11830,12 +11961,12 @@
           "properties": {
             "character": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             },
             "line": {
               "format": "uint32",
-              "minimum": 0,
+              "minimum": 1,
               "type": "integer"
             }
           },

@@ -7,8 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::enclosing::{ContextualDiagnostic, ContextualLocation, EnrichmentSummary};
+use super::enclosing::{Contextual, ContextualDiagnostic, ContextualLocation, EnrichmentSummary};
 use super::kind_filter::{self, KindFilter};
+use crate::bridge::encoding::{LspLine, Utf16Column};
 use crate::bridge::notifications::ReportedSeverity;
 use crate::config::text_newtype::impl_text_newtype;
 use crate::config::{BoundedText, InvalidBoundedText, ServerId};
@@ -24,12 +25,78 @@ pub(super) fn lsp_kind_to_u32<T: Into<u32>>(kind: T) -> u32 {
 }
 
 /// Position in a document (1-based for MCP).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct Position2D {
     /// Line number (1-based).
-    pub line: u32,
+    line: NonZeroU32,
     /// Character offset (1-based).
-    pub character: u32,
+    character: NonZeroU32,
+}
+
+impl Position2D {
+    /// Builds a position from 1-based MCP numbers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroU32;
+    ///
+    /// use mcpls_core::bridge::{Position2D, Utf16Column};
+    ///
+    /// let nz = |value| NonZeroU32::new(value).unwrap();
+    /// let position = Position2D::from_mcp(nz(3), nz(5));
+    /// assert_eq!((position.line(), position.character()), (nz(3), nz(5)));
+    /// assert_eq!(position.lsp_line().get(), 2);
+    /// assert_eq!(position.lsp_character(), Utf16Column::new(4));
+    /// ```
+    #[must_use]
+    pub const fn from_mcp(line: NonZeroU32, character: NonZeroU32) -> Self {
+        Self { line, character }
+    }
+
+    /// Builds a position from a 0-based LSP line and a 0-based UTF-16 column.
+    #[must_use]
+    pub(crate) const fn from_lsp(line: LspLine, column: Utf16Column) -> Self {
+        Self {
+            line: line.to_mcp(),
+            character: column.to_mcp(),
+        }
+    }
+
+    /// Line number (1-based).
+    #[must_use]
+    pub const fn line(&self) -> NonZeroU32 {
+        self.line
+    }
+
+    /// Character offset (1-based).
+    #[must_use]
+    pub const fn character(&self) -> NonZeroU32 {
+        self.character
+    }
+
+    /// The 0-based LSP line.
+    #[must_use]
+    pub const fn lsp_line(&self) -> LspLine {
+        LspLine::from_mcp(self.line)
+    }
+
+    /// The 0-based character offset, still in UTF-16 units.
+    #[must_use]
+    pub const fn lsp_character(&self) -> Utf16Column {
+        Utf16Column::from_mcp(self.character)
+    }
+
+    /// Builds a fixture position, panicking on a zero.
+    #[cfg(test)]
+    pub(crate) const fn at(line: u32, character: u32) -> Self {
+        Self::from_mcp(
+            NonZeroU32::new(line).expect("fixture line is 1-based"),
+            NonZeroU32::new(character).expect("fixture character is 1-based"),
+        )
+    }
 }
 
 /// Largest line or character value a client may supply.
@@ -66,6 +133,8 @@ spelled_enum! {
         SymbolName => "symbol_name",
         /// `container` of a name-addressed tool.
         Container => "container",
+        /// `query` of `workspace_symbol_search`.
+        Query => "query",
     }
 }
 
@@ -199,6 +268,51 @@ impl CompletionTrigger {
 }
 
 impl_text_newtype!(CompletionTrigger, InvalidTextField);
+
+/// Longest accepted `workspace_symbol_search` `query`, in bytes.
+pub const MAX_WORKSPACE_QUERY_BYTES: usize = 1_000;
+
+/// A `workspace_symbol_search` query: at most [`MAX_WORKSPACE_QUERY_BYTES`]
+/// bytes, so an over-long query is refused before any language server is asked.
+///
+/// The empty string is valid: LSP defines it as "all symbols", so unlike
+/// [`BoundedText`] this type refuses only over-long text.
+///
+/// # Examples
+///
+/// ```
+/// use mcpls_core::bridge::{MAX_WORKSPACE_QUERY_BYTES, WorkspaceQuery};
+///
+/// assert_eq!(WorkspaceQuery::new("Foo")?.as_str(), "Foo");
+/// assert!(WorkspaceQuery::new("").is_ok());
+/// assert!(WorkspaceQuery::new("x".repeat(MAX_WORKSPACE_QUERY_BYTES + 1)).is_err());
+/// # Ok::<(), mcpls_core::bridge::InvalidTextField>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceQuery(String);
+
+impl WorkspaceQuery {
+    /// Validates `raw`, keeping it verbatim.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidTextField`] naming `query` when `raw` is longer than
+    /// [`MAX_WORKSPACE_QUERY_BYTES`].
+    pub fn new(raw: impl Into<String>) -> Result<Self, InvalidTextField> {
+        let raw = raw.into();
+        if raw.len() > MAX_WORKSPACE_QUERY_BYTES {
+            return Err(InvalidTextField::of(TextField::Query)(
+                InvalidBoundedText::TooLong {
+                    len: raw.len(),
+                    max: MAX_WORKSPACE_QUERY_BYTES,
+                },
+            ));
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl_text_newtype!(WorkspaceQuery, InvalidTextField);
 
 /// Largest tab size a client may request for formatting.
 pub const MAX_TAB_SIZE: u32 = 32;
@@ -355,26 +469,24 @@ impl Position {
 
     /// Zero-based LSP line.
     #[must_use]
-    pub const fn lsp_line(self) -> u32 {
-        self.line.get().saturating_sub(1)
+    pub const fn lsp_line(self) -> LspLine {
+        LspLine::from_mcp(self.line)
     }
 
     /// Zero-based character offset, still in UTF-16 units.
     #[must_use]
-    pub const fn lsp_character(self) -> u32 {
-        self.character.get().saturating_sub(1)
+    pub const fn lsp_character(self) -> Utf16Column {
+        Utf16Column::from_mcp(self.character)
     }
 
     /// Reuses a position taken from server output, which is already 1-based
     /// MCP form, as a handler input position. Deliberately not a `From`
     /// impl: a position typed by a client must go through
-    /// [`Self::from_client`]. A zero, which converted LSP output never
-    /// carries, clamps to 1.
-    pub(crate) fn from_server_output(position: &Position2D) -> Self {
-        let clamp = |value: u32| NonZeroU32::new(value).unwrap_or(NonZeroU32::MIN);
+    /// [`Self::from_client`].
+    pub(crate) const fn from_server_output(position: Position2D) -> Self {
         Self {
-            line: clamp(position.line),
-            character: clamp(position.character),
+            line: position.line,
+            character: position.character,
         }
     }
 
@@ -469,7 +581,7 @@ impl TryFrom<PositionRange> for BoundedRange {
 }
 
 /// Range in a document (1-based for MCP).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct Range {
     /// Start position.
     pub start: Position2D,
@@ -481,7 +593,8 @@ pub struct Range {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Location {
     /// URI of the document.
-    pub uri: String,
+    #[schemars(with = "String")]
+    pub uri: lsp_types::Uri,
     /// Range within the document.
     pub range: Range,
     /// Whether this location is not provably inside a configured workspace root (stdlib, a dependency).
@@ -658,7 +771,8 @@ pub enum AnalysisFreshness {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DocumentChanges {
     /// Original document URI.
-    pub uri: String,
+    #[schemars(with = "String")]
+    pub uri: lsp_types::Uri,
     /// Number of retained edits, including when raw edits are omitted.
     pub edit_count: usize,
     /// Bounded presentation against observed source.
@@ -738,10 +852,17 @@ pub enum RenamePreparation {
 /// rename" apart from "some of the rename was withheld" -- this makes that
 /// distinction visible in the result itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[non_exhaustive]
 pub struct DroppedEdits {
-    /// Entries referencing a URI outside every configured workspace root.
+    /// Entries refused as outside the workspace: a URI outside every
+    /// configured root, or one that could not be resolved to a path inside a
+    /// root (symlink loop, permission denied, transient filesystem error).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub out_of_workspace: usize,
+    /// Entries whose URI path carries a name the filesystem rejects (for
+    /// example a component over the name-length limit, or a NUL byte).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub invalid_path: usize,
     /// `CreateFile`/`RenameFile`/`DeleteFile` document changes, which mcpls
     /// does not translate into MCP DTOs.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -1220,7 +1341,7 @@ pub struct LocationsResult {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NavigationResult {
     /// Locations in server order, including duplicates.
-    pub locations: Vec<NavigationLocation>,
+    pub locations: Vec<NavigationObservation>,
     /// The server returned more locations than retained.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
@@ -1232,9 +1353,20 @@ pub struct NavigationResult {
     pub enrichment: Option<EnrichmentSummary>,
 }
 
-/// A navigation location and its opt-in source outcome.
+/// Source from either the symbol-body pass or the location-excerpt pass.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct NavigationLocation {
+#[serde(untagged)]
+#[schemars(inline)]
+pub enum LocationSource<E> {
+    /// Bounded symbol body lookup outcome.
+    Symbol(super::SourceOutcome),
+    /// Bounded location excerpt lookup outcome.
+    Excerpt(E),
+}
+
+/// A navigation location and its opt-in source outcomes.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NavigationObservation {
     /// Absent unless portable target enrichment was requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol_target: Option<SymbolTargetEnvelope>,
@@ -1243,10 +1375,14 @@ pub struct NavigationLocation {
     pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
     /// Original location and enclosing context.
     #[serde(flatten)]
-    pub location: ContextualLocation,
-    /// Absent unless `include_source` is true.
+    pub location: Contextual<Location>,
+    /// Symbol body or legacy location excerpt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<NavigationSource>,
+    pub source: Option<LocationSource<NavigationSource>>,
+    /// Bounded excerpt around the location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "NavigationSource")]
+    pub broader_context: Option<NavigationSource>,
 }
 
 /// Bounded observed source, independent of language-server analysis.
@@ -1299,11 +1435,15 @@ impl From<LocationsResult> for NavigationResult {
             locations: result
                 .locations
                 .into_iter()
-                .map(|location| NavigationLocation {
-                    symbol_target: None,
-                    symbol_target_unavailable: None,
-                    location,
-                    source: None,
+                .map(|location| {
+                    let (location, source) = split_location(location);
+                    NavigationObservation {
+                        symbol_target: None,
+                        symbol_target_unavailable: None,
+                        location,
+                        source: source.map(LocationSource::Symbol),
+                        broader_context: None,
+                    }
                 })
                 .collect(),
             truncated: result.truncated,
@@ -1395,14 +1535,43 @@ pub struct ReferenceLocation {
     pub symbol_target_unavailable: Option<SymbolTargetUnavailable>,
     /// Location and optional enclosing-symbol context.
     #[serde(flatten)]
-    pub location: ContextualLocation,
-    /// Present whenever source was requested, including failures.
+    pub location: Contextual<Location>,
+    /// Symbol body or legacy location excerpt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<ReferenceSource>,
+    pub source: Option<LocationSource<ReferenceSource>>,
+    /// Bounded excerpt around the occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "ReferenceSource")]
+    pub broader_context: Option<ReferenceSource>,
+}
+
+fn split_location(
+    location: ContextualLocation,
+) -> (Contextual<Location>, Option<super::SourceOutcome>) {
+    (
+        Contextual {
+            inner: location.inner.location,
+            enclosing_symbol: location.enclosing_symbol,
+        },
+        location.inner.source,
+    )
+}
+
+impl From<ContextualLocation> for ReferenceLocation {
+    fn from(location: ContextualLocation) -> Self {
+        let (location, source) = split_location(location);
+        Self {
+            symbol_target: None,
+            symbol_target_unavailable: None,
+            location,
+            source: source.map(LocationSource::Symbol),
+            broader_context: None,
+        }
+    }
 }
 
 impl std::ops::Deref for ReferenceLocation {
-    type Target = ContextualLocation;
+    type Target = Contextual<Location>;
     fn deref(&self) -> &Self::Target {
         &self.location
     }
@@ -1628,7 +1797,8 @@ pub struct HierarchyItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// URI of the document.
-    pub uri: String,
+    #[schemars(with = "String")]
+    pub uri: lsp_types::Uri,
     /// Range of the symbol.
     pub range: Range,
     /// Selection range (identifier location).
@@ -1661,7 +1831,7 @@ pub enum InvalidHierarchyItem {
 
 /// A [`HierarchyItem`] whose ranges passed client-input validation.
 ///
-/// Taken by the walking handlers instead of the raw wire DTO, so a zero,
+/// Taken by the walking handlers instead of the raw wire DTO, so an
 /// oversized or reversed range cannot reach the LSP conversion. Built only by
 /// [`Self::from_client`].
 ///
@@ -1682,7 +1852,7 @@ pub enum InvalidHierarchyItem {
 /// };
 /// assert!(CheckedHierarchyItem::from_client(wire(1)).is_ok());
 /// assert_matches!(
-///     CheckedHierarchyItem::from_client(wire(0)),
+///     CheckedHierarchyItem::from_client(wire(3)),
 ///     Err(InvalidHierarchyItem::Range(_))
 /// );
 /// ```
@@ -1692,7 +1862,7 @@ pub struct CheckedHierarchyItem {
     pub(super) name: String,
     pub(super) kind: u32,
     pub(super) detail: Option<String>,
-    pub(super) uri: String,
+    pub(super) uri: lsp_types::Uri,
     pub(super) range: PositionRange,
     pub(super) selection_range: PositionRange,
     pub(super) data: Option<serde_json::Value>,
@@ -1728,15 +1898,15 @@ impl CheckedHierarchyItem {
 
     /// The item's document URI, as the client sent it.
     #[must_use]
-    pub fn uri(&self) -> &str {
+    pub const fn uri(&self) -> &lsp_types::Uri {
         &self.uri
     }
 }
 
 fn checked_range(range: &Range) -> Result<PositionRange, InvalidRange> {
     PositionRange::from_client(
-        (range.start.line, range.start.character),
-        (range.end.line, range.end.character),
+        (range.start.line.get(), range.start.character.get()),
+        (range.end.line.get(), range.end.character.get()),
     )
 }
 
@@ -1870,18 +2040,20 @@ pub struct SelectionRangesResult {
 /// truncation marker.
 pub const MAX_COLLAPSED_TEXT_BYTES: usize = 256;
 
-/// What a folding region covers, from the LSP's open-string kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FoldingKind {
-    /// A comment block.
-    Comment,
-    /// An import group.
-    Imports,
-    /// A marked region.
-    Region,
-    /// No kind, or a server-defined one.
-    Unspecified,
+spelled_enum! {
+    /// What a folding region covers, from the LSP's open-string kind.
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    FoldingKind {
+        /// A comment block.
+        Comment => "comment",
+        /// An import group.
+        Imports => "imports",
+        /// A marked region.
+        Region => "region",
+        /// No kind, or a server-defined one.
+        Unspecified => "unspecified",
+    }
 }
 
 spelled_enum! {
@@ -1909,10 +2081,7 @@ impl JsonSchema for FoldingKind {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "enum": ["comment", "imports", "region", "unspecified"],
-        })
+        crate::spelling::spelled_schema::<Self>()
     }
 }
 
@@ -2012,7 +2181,7 @@ impl ServerText for Location {
             range: _,
             out_of_workspace: _,
         } = self;
-        redactions.note_payload(uri);
+        redactions.note_payload(uri.as_ref());
     }
 }
 
@@ -2044,32 +2213,38 @@ impl ServerText for NavigationResult {
         let mut remaining = super::references::OUTPUT_BYTES;
         for item in &mut self.locations {
             item.location.redact_server_text(redactions);
-            if matches!(item.source, Some(NavigationSource::Text { .. })) {
-                let Some(NavigationSource::Text {
-                    text,
-                    start_line,
-                    origin,
-                    shortened,
-                    sha256,
-                }) = item.source.take()
-                else {
-                    continue;
+            let excerpt = match &mut item.source {
+                Some(LocationSource::Symbol(body)) => {
+                    body.redact_server_text(redactions);
+                    item.broader_context.as_mut()
+                }
+                Some(LocationSource::Excerpt(excerpt)) => Some(excerpt),
+                None => item.broader_context.as_mut(),
+            };
+            if let Some(NavigationSource::Text {
+                text,
+                start_line,
+                origin,
+                shortened,
+                sha256,
+            }) = excerpt
+            {
+                let source = ReferenceSource::Text {
+                    text: std::mem::take(text),
+                    start_line: *start_line,
+                    origin: *origin,
+                    shortened: *shortened,
                 };
-                let mut reference = ReferenceLocation {
-                    symbol_target: None,
-                    symbol_target_unavailable: None,
-                    location: item.location.clone(),
-                    source: Some(ReferenceSource::Text {
-                        text,
-                        start_line,
-                        origin,
-                        shortened,
-                    }),
-                };
-                super::references::redact_source(&mut reference, redactions, &mut remaining);
-                item.source = reference
-                    .source
-                    .map(|source| NavigationSource::from_excerpt(source, sha256));
+                let redacted = super::references::redact_excerpt(
+                    source,
+                    item.location.range.start.line().get(),
+                    redactions,
+                    &mut remaining,
+                );
+                let observation = NavigationSource::from_excerpt(redacted, std::mem::take(sha256));
+                if let Some(excerpt) = excerpt {
+                    *excerpt = observation;
+                }
             }
         }
     }
@@ -2143,7 +2318,7 @@ impl ServerText for TextEdit {
 
 impl ServerText for DocumentChanges {
     fn redact_server_text(&mut self, redactions: &Redactions) {
-        redactions.note_payload(&self.uri);
+        redactions.note_payload(self.uri.as_ref());
         self.edits.redact_server_text(redactions);
         if let Some(diff) = &mut self.preview.diff {
             let before = diff.clone();
@@ -2495,7 +2670,7 @@ impl ServerText for HierarchyItem {
         if let Some(detail) = detail {
             redactions.note_payload(detail);
         }
-        redactions.note_payload(uri);
+        redactions.note_payload(uri.as_ref());
         if let Some(data) = data {
             redactions.note_payload_json(data);
         }
@@ -2598,18 +2773,49 @@ mod tests {
     #[test]
     fn checked_hierarchy_item_accepts_valid_ranges() {
         let item = CheckedHierarchyItem::from_client(hierarchy_wire([1, 1, 2, 1], [1, 7, 1, 9]));
-        assert_eq!(item.unwrap().uri(), "file:///a.rs");
+        assert_eq!(item.unwrap().uri().as_ref(), "file:///a.rs");
+    }
+
+    #[test]
+    fn uri_fields_serialize_as_plain_json_strings() {
+        let at = |line, character| serde_json::json!({"line": line, "character": character});
+        let range = serde_json::json!({"start": at(1, 1), "end": at(1, 2)});
+        let location: Location =
+            serde_json::from_value(serde_json::json!({"uri": "file:///a.rs", "range": range}))
+                .unwrap();
+        let changes = DocumentChanges {
+            uri: lsp_types::Uri::from("file:///a.rs"),
+            edits: Some(Vec::new()),
+            edit_count: 0,
+            preview: EditPreview {
+                status: PreviewStatus::Unavailable,
+                diff: None,
+                reason: None,
+                redacted: false,
+            },
+            preview_source: None,
+            supplied_version: None,
+            analysis_freshness: AnalysisFreshness::Unknown,
+        };
+        let item = hierarchy_wire([1, 1, 2, 1], [1, 7, 1, 9]);
+
+        for value in [
+            serde_json::to_value(&location).unwrap(),
+            serde_json::to_value(&changes).unwrap(),
+            serde_json::to_value(&item).unwrap(),
+        ] {
+            assert_eq!(value["uri"], serde_json::json!("file:///a.rs"));
+        }
+
+        let reparsed: HierarchyItem =
+            serde_json::from_value(serde_json::to_value(&item).unwrap()).unwrap();
+        let checked = CheckedHierarchyItem::from_client(reparsed).unwrap();
+        assert_eq!(checked.uri().as_ref(), "file:///a.rs");
     }
 
     #[test]
     fn checked_hierarchy_item_rejects_bad_range_and_names_it() {
-        for bad in [
-            [0, 1, 1, 1],
-            [1, 0, 1, 1],
-            [1, 1, 1, 1_000_001],
-            [1, 1, u32::MAX, 1],
-            [2, 1, 1, 1],
-        ] {
+        for bad in [[1, 1, 1, 1_000_001], [1, 1, u32::MAX, 1], [2, 1, 1, 1]] {
             let err =
                 CheckedHierarchyItem::from_client(hierarchy_wire(bad, [1, 1, 1, 1])).unwrap_err();
             assert_matches!(err, InvalidHierarchyItem::Range(_), "{bad:?}");
@@ -2617,6 +2823,36 @@ mod tests {
                 CheckedHierarchyItem::from_client(hierarchy_wire([1, 1, 9, 1], bad)).unwrap_err();
             assert_matches!(err, InvalidHierarchyItem::SelectionRange(_), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn workspace_query_bounds_length_but_allows_empty_and_blank() {
+        assert_eq!(WorkspaceQuery::new("").unwrap().as_str(), "");
+        assert_eq!(WorkspaceQuery::new("  ").unwrap().as_str(), "  ");
+        assert!(WorkspaceQuery::new("x".repeat(MAX_WORKSPACE_QUERY_BYTES)).is_ok());
+        let error = WorkspaceQuery::new("x".repeat(MAX_WORKSPACE_QUERY_BYTES + 1)).unwrap_err();
+        assert_eq!(error.field, TextField::Query);
+        assert_eq!(
+            error.reason,
+            InvalidBoundedText::TooLong {
+                len: MAX_WORKSPACE_QUERY_BYTES + 1,
+                max: MAX_WORKSPACE_QUERY_BYTES,
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_query_bound_counts_bytes_not_characters() {
+        let at_cap = "\u{e9}".repeat(MAX_WORKSPACE_QUERY_BYTES / 2);
+        assert!(WorkspaceQuery::new(at_cap).is_ok());
+        let over = "\u{e9}".repeat(MAX_WORKSPACE_QUERY_BYTES / 2 + 1);
+        assert_eq!(
+            WorkspaceQuery::new(over).unwrap_err().reason,
+            InvalidBoundedText::TooLong {
+                len: MAX_WORKSPACE_QUERY_BYTES + 2,
+                max: MAX_WORKSPACE_QUERY_BYTES,
+            }
+        );
     }
 
     #[test]
@@ -2672,14 +2908,8 @@ mod tests {
 
     fn range() -> Range {
         Range {
-            start: Position2D {
-                line: 1,
-                character: 1,
-            },
-            end: Position2D {
-                line: 1,
-                character: 2,
-            },
+            start: Position2D::at(1, 1),
+            end: Position2D::at(1, 2),
         }
     }
 
@@ -2707,7 +2937,7 @@ mod tests {
                         reason: None,
                         redacted: false,
                     },
-                    uri: format!("file:///{SECRET}.rs"),
+                    uri: format!("file:///{SECRET}.rs").into(),
                     edits: Some(vec![TextEdit {
                         range: range(),
                         new_text: format!("let k = \"{SECRET}\";"),
@@ -2729,7 +2959,7 @@ mod tests {
             Some("E-[redacted:API_TOKEN]")
         );
         let changes = &action.edit.as_ref().unwrap().changes[0];
-        assert!(changes.uri.contains(SECRET));
+        assert!(changes.uri.as_ref().contains(SECRET));
         assert!(changes.edits.as_ref().unwrap()[0].new_text.contains(SECRET));
     }
 
@@ -2785,10 +3015,7 @@ mod tests {
     fn test_server_text_redacts_inlay_label_and_tooltip() {
         let set = Redactions::new([("API_TOKEN".to_owned(), SECRET.to_owned())]);
         let mut hint = InlayHintEntry {
-            position: Position2D {
-                line: 1,
-                character: 1,
-            },
+            position: Position2D::at(1, 1),
             label: format!(": {SECRET}"),
             kind: None,
             padding_left: None,
@@ -2844,7 +3071,7 @@ mod tests {
             name: format!("call_{SECRET}"),
             kind: 12,
             detail: Some(format!("detail {SECRET}")),
-            uri: format!("file:///{SECRET}.rs"),
+            uri: format!("file:///{SECRET}.rs").into(),
             range: range(),
             selection_range: range(),
             data: Some(serde_json::json!({ "id": SECRET })),
@@ -2854,7 +3081,7 @@ mod tests {
             name: format!("type_{SECRET}"),
             kind: 5,
             detail: None,
-            uri: format!("file:///{SECRET}.rs"),
+            uri: format!("file:///{SECRET}.rs").into(),
             range: range(),
             selection_range: range(),
             data: None,
@@ -2999,21 +3226,16 @@ mod tests {
             Err(InvalidPosition::TooLarge)
         );
         let max = Position::from_client(MAX_POSITION_VALUE, MAX_POSITION_VALUE).unwrap();
-        assert_eq!((max.lsp_line(), max.lsp_character()), (999_999, 999_999));
+        assert_eq!(
+            (max.lsp_line().get(), max.lsp_character().get()),
+            (999_999, 999_999)
+        );
     }
 
     #[test]
-    fn test_position_from_output_position_is_not_capped_and_clamps_zero() {
-        let big = Position::from_server_output(&Position2D {
-            line: MAX_POSITION_VALUE + 7,
-            character: 2_000_000,
-        });
+    fn test_position_from_output_position_is_not_capped() {
+        let big = Position::from_server_output(Position2D::at(MAX_POSITION_VALUE + 7, 2_000_000));
         assert_eq!(big.line().get(), MAX_POSITION_VALUE + 7);
-        let clamped = Position::from_server_output(&Position2D {
-            line: 0,
-            character: 0,
-        });
-        assert_eq!((clamped.line().get(), clamped.character().get()), (1, 1));
     }
 
     #[test]

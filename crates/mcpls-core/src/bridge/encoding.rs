@@ -4,6 +4,7 @@
 //! as well as UTF-8/UTF-16/UTF-32 encoding conversions.
 
 use std::fmt;
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +68,16 @@ impl PositionEncoding {
         Self::from_spelling(kind)
     }
 
+    /// Code units `ch` takes in this encoding: the one width table every
+    /// column scan of this module and its callers uses.
+    pub(crate) const fn units_of(self, ch: char) -> usize {
+        match self {
+            Self::Utf8 => ch.len_utf8(),
+            Self::Utf16 => ch.len_utf16(),
+            Self::Utf32 => 1,
+        }
+    }
+
     /// Convert to the [`lsp_types::PositionEncodingKind`] sent in `initialize`.
     #[must_use]
     pub const fn to_kind(self) -> lsp_types::PositionEncodingKind {
@@ -127,6 +138,347 @@ impl<T> Converted<T> {
     }
 }
 
+/// A 0-based line number, the LSP base.
+///
+/// A distinct type from the 1-based line of [`Position2D`] and
+/// [`Position`], so the two bases cannot be mixed up. This module is the only
+/// place that shifts between them.
+///
+/// # Examples
+///
+/// ```
+/// use mcpls_core::bridge::LspLine;
+///
+/// assert_eq!(LspLine::new(0).get(), 0);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LspLine(u32);
+
+impl LspLine {
+    /// Wraps a 0-based line number.
+    #[must_use]
+    pub const fn new(line: u32) -> Self {
+        Self(line)
+    }
+
+    /// The 0-based line number.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The line named by a 1-based MCP line.
+    #[must_use]
+    pub(crate) const fn from_mcp(line: NonZeroU32) -> Self {
+        Self(line.get().saturating_sub(1))
+    }
+
+    /// The 1-based MCP line number, saturating at `u32::MAX`.
+    #[must_use]
+    pub(crate) const fn to_mcp(self) -> NonZeroU32 {
+        NonZeroU32::MIN.saturating_add(self.0)
+    }
+
+    /// Number of lines from `self` through `last`, both included; at least 1,
+    /// also when `last` precedes `self`, and clamped at `u32::MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mcpls_core::bridge::LspLine;
+    ///
+    /// assert_eq!(LspLine::new(3).lines_through(LspLine::new(5)), 3);
+    /// assert_eq!(LspLine::new(5).lines_through(LspLine::new(3)), 1);
+    /// ```
+    #[must_use]
+    pub const fn lines_through(self, last: Self) -> u32 {
+        last.0.saturating_sub(self.0).saturating_add(1)
+    }
+
+    /// The line `lines` further down, clamped at `u32::MAX`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mcpls_core::bridge::LspLine;
+    ///
+    /// assert_eq!(LspLine::new(2).saturating_add(3), LspLine::new(5));
+    /// assert_eq!(LspLine::new(u32::MAX).saturating_add(1), LspLine::new(u32::MAX));
+    /// ```
+    #[must_use]
+    pub const fn saturating_add(self, lines: u32) -> Self {
+        Self(self.0.saturating_add(lines))
+    }
+}
+
+/// A 0-based UTF-16 column, the unit MCP columns are defined in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Utf16Column(u32);
+
+impl Utf16Column {
+    /// Wraps a 0-based UTF-16 column.
+    #[must_use]
+    pub const fn new(column: u32) -> Self {
+        Self(column)
+    }
+
+    /// The 0-based UTF-16 column.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// The column named by a 1-based MCP character.
+    #[must_use]
+    pub(crate) const fn from_mcp(character: NonZeroU32) -> Self {
+        Self(character.get().saturating_sub(1))
+    }
+
+    /// The 1-based MCP character, saturating at `u32::MAX`.
+    #[must_use]
+    pub(crate) const fn to_mcp(self) -> NonZeroU32 {
+        NonZeroU32::MIN.saturating_add(self.0)
+    }
+
+    /// Byte offset of this column in `text`: the first character boundary at
+    /// or after it, so a column inside a surrogate pair resolves to the end of
+    /// that character.
+    ///
+    /// # Errors
+    ///
+    /// [`OffsetError::PastEnd`] when the column is beyond the end of `text`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mcpls_core::bridge::Utf16Column;
+    ///
+    /// let text = "a\u{1F600}b";
+    /// assert_eq!(Utf16Column::new(1).byte_offset_in(text), Ok(1));
+    /// assert_eq!(Utf16Column::new(2).byte_offset_in(text), Ok(5));
+    /// assert!(Utf16Column::new(9).byte_offset_in(text).is_err());
+    /// ```
+    pub fn byte_offset_in(self, text: &str) -> Result<usize, OffsetError> {
+        ServerColumn::new(self.0, PositionEncoding::Utf16).byte_offset_in(text)
+    }
+
+    /// The column of byte offset `byte` in `text`.
+    ///
+    /// # Errors
+    ///
+    /// [`OffsetError::PastEnd`] when `byte` is beyond the text,
+    /// [`OffsetError::InsideCharacter`] when it is not on a character
+    /// boundary and [`OffsetError::TooLong`] when the column does not fit `u32`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mcpls_core::bridge::Utf16Column;
+    ///
+    /// assert_eq!(Utf16Column::at_byte("a\u{1F600}b", 5), Ok(Utf16Column::new(3)));
+    /// assert!(Utf16Column::at_byte("a\u{1F600}b", 2).is_err());
+    /// ```
+    pub fn at_byte(text: &str, byte: usize) -> Result<Self, OffsetError> {
+        ServerColumn::at_byte(text, byte, PositionEncoding::Utf16).map(|column| Self(column.units))
+    }
+
+    /// The start of the character of `line` that contains this column; a
+    /// column past the end is the line end. A column inside a surrogate pair
+    /// rounds down.
+    pub(super) fn floor_byte_in(self, line: &str) -> ColumnBoundary {
+        let mut total = 0;
+        for step in steps(line, PositionEncoding::Utf16) {
+            if (self.0 as usize) < step.after {
+                return ColumnBoundary {
+                    byte: step.start,
+                    column: Self::saturating(step.before),
+                };
+            }
+            total = step.after;
+        }
+        ColumnBoundary {
+            byte: line.len(),
+            column: Self::saturating(total),
+        }
+    }
+
+    /// The first character boundary of `line` at or after this column,
+    /// scanning forward from `from` and giving up (`None`) once more than
+    /// `max_bytes` lie between them. A column past the line end is the line
+    /// end; a column inside a surrogate pair rounds up.
+    pub(super) fn ceil_byte_in(
+        self,
+        line: &str,
+        from: ColumnBoundary,
+        max_bytes: usize,
+    ) -> Option<usize> {
+        let wanted = self.0 as usize;
+        let base = from.column.0 as usize;
+        if base >= wanted {
+            return Some(from.byte);
+        }
+        let rest = line.get(from.byte..).unwrap_or_default();
+        for step in steps(rest, PositionEncoding::Utf16) {
+            let byte = from.byte.saturating_add(step.end);
+            if base.saturating_add(step.after) >= wanted {
+                return Some(byte);
+            }
+            if step.end > max_bytes {
+                return None;
+            }
+        }
+        Some(line.len())
+    }
+
+    /// Most UTF-8 bytes `self` UTF-16 units can span, so a scan that must
+    /// reach this column never needs to look further.
+    pub(super) const fn max_utf8_prefix_bytes(self) -> usize {
+        (self.0 as usize).saturating_mul(MAX_UTF8_BYTES_PER_UTF16_UNIT)
+    }
+
+    fn saturating(units: usize) -> Self {
+        Self(u32::try_from(units).unwrap_or(u32::MAX))
+    }
+}
+
+/// Most bytes one UTF-16 unit can take in UTF-8 (a BMP character is 3 bytes
+/// for 1 unit).
+const MAX_UTF8_BYTES_PER_UTF16_UNIT: usize = 3;
+
+/// A character boundary of a line with the UTF-16 column before it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ColumnBoundary {
+    pub(super) byte: usize,
+    pub(super) column: Utf16Column,
+}
+
+/// One character of a scanned text with its place in bytes and units.
+struct Step {
+    start: usize,
+    end: usize,
+    before: usize,
+    after: usize,
+}
+
+/// Walks `text` once, giving each character's byte span and the units of
+/// `encoding` before and after it; the single walk every scan here shares.
+fn steps(text: &str, encoding: PositionEncoding) -> impl Iterator<Item = Step> + '_ {
+    text.char_indices()
+        .scan(0_usize, move |units, (start, ch)| {
+            let before = *units;
+            *units = before.saturating_add(encoding.units_of(ch));
+            Some(Step {
+                start,
+                end: start.saturating_add(ch.len_utf8()),
+                before,
+                after: *units,
+            })
+        })
+}
+
+/// A 0-based column in the units of the encoding a server negotiated.
+///
+/// Carries its encoding, so a column cannot be resolved against text with
+/// another encoding's units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ServerColumn {
+    units: u32,
+    encoding: PositionEncoding,
+}
+
+impl ServerColumn {
+    /// Wraps `units` code units of `encoding`.
+    pub(crate) const fn new(units: u32, encoding: PositionEncoding) -> Self {
+        Self { units, encoding }
+    }
+
+    /// Byte offset of this column in `text`.
+    ///
+    /// For UTF-16 and UTF-32, a column inside a multi-unit character resolves
+    /// to the next character boundary.
+    ///
+    /// # Errors
+    ///
+    /// [`OffsetError::PastEnd`] (with `len` in this column's units) beyond the
+    /// end of `text`, and [`OffsetError::InsideCharacter`] for a UTF-8 column
+    /// that is not on a character boundary.
+    pub(crate) fn byte_offset_in(self, text: &str) -> Result<usize, OffsetError> {
+        let wanted = self.units as usize;
+        match self.encoding {
+            PositionEncoding::Utf8 => {
+                if wanted > text.len() {
+                    return Err(OffsetError::PastEnd {
+                        offset: wanted,
+                        len: text.len(),
+                    });
+                }
+                // A UTF-8 column *is* a byte offset taken from untrusted input; it
+                // must land on a boundary before any caller slices `text` with it.
+                if !text.is_char_boundary(wanted) {
+                    return Err(OffsetError::InsideCharacter(wanted));
+                }
+                Ok(wanted)
+            }
+            PositionEncoding::Utf16 | PositionEncoding::Utf32 => {
+                scan_units(text, wanted, self.encoding)
+            }
+        }
+    }
+
+    /// The column of byte offset `byte` in `text`, in `encoding`'s units.
+    ///
+    /// # Errors
+    ///
+    /// [`OffsetError::PastEnd`] if `byte` exceeds `text.len()`,
+    /// [`OffsetError::InsideCharacter`] if it is not on a character boundary,
+    /// and [`OffsetError::TooLong`] if the column does not fit in `u32`.
+    pub(crate) fn at_byte(
+        text: &str,
+        byte: usize,
+        encoding: PositionEncoding,
+    ) -> Result<Self, OffsetError> {
+        if byte > text.len() {
+            return Err(OffsetError::PastEnd {
+                offset: byte,
+                len: text.len(),
+            });
+        }
+        // `text[..byte]` would panic mid-character; a server-reported offset is
+        // untrusted, so the boundary is checked rather than assumed.
+        let Some(prefix) = text.get(..byte) else {
+            return Err(OffsetError::InsideCharacter(byte));
+        };
+        let units = match encoding {
+            PositionEncoding::Utf8 => byte,
+            PositionEncoding::Utf16 | PositionEncoding::Utf32 => {
+                prefix.chars().map(|ch| encoding.units_of(ch)).sum()
+            }
+        };
+        let units = u32::try_from(units).map_err(|_| OffsetError::TooLong)?;
+        Ok(Self::new(units, encoding))
+    }
+}
+
+/// Walks `text` once, returning the first boundary at or after `wanted`
+/// units, or `text.len()` when `wanted` equals the total unit count.
+fn scan_units(text: &str, wanted: usize, encoding: PositionEncoding) -> Result<usize, OffsetError> {
+    let mut units = 0usize;
+    for step in steps(text, encoding) {
+        if step.before >= wanted {
+            return Ok(step.start);
+        }
+        units = step.after;
+    }
+    if units == wanted {
+        Ok(text.len())
+    } else {
+        Err(OffsetError::PastEnd {
+            offset: wanted,
+            len: units,
+        })
+    }
+}
+
 /// Convert MCP position (1-based) to LSP position (0-based), translating the
 /// character column into `encoding`'s units.
 ///
@@ -146,16 +498,11 @@ pub fn mcp_to_lsp_position(
     line_text: Option<&str>,
     encoding: PositionEncoding,
 ) -> Converted<lsp_types::Position> {
-    let column = convert_column(
-        position.lsp_character(),
-        line_text,
-        PositionEncoding::Utf16,
-        encoding,
-    );
+    let column = to_server_column(position.lsp_character(), line_text, encoding);
     Converted {
         value: lsp_types::Position {
-            line: position.lsp_line(),
-            character: column.value,
+            line: position.lsp_line().get(),
+            character: column.value.units,
         },
         fidelity: column.fidelity,
     }
@@ -172,23 +519,49 @@ pub fn lsp_to_mcp_position(
     line_text: Option<&str>,
     encoding: PositionEncoding,
 ) -> Converted<Position2D> {
-    let column = if pos.character == u32::MAX {
-        Converted::exact(u32::MAX)
-    } else {
-        convert_column(pos.character, line_text, encoding, PositionEncoding::Utf16)
-    };
-
+    let column = to_utf16_column(ServerColumn::new(pos.character, encoding), line_text);
     Converted {
-        value: Position2D {
-            line: pos.line.saturating_add(1),
-            character: column.value.saturating_add(1),
-        },
+        value: Position2D::from_lsp(LspLine::new(pos.line), column.value),
         fidelity: column.fidelity,
     }
 }
 
+/// The column `column` names in `encoding`'s units, re-derived from `line_text`.
+fn to_server_column(
+    column: Utf16Column,
+    line_text: Option<&str>,
+    encoding: PositionEncoding,
+) -> Converted<ServerColumn> {
+    let converted = convert_column(column.get(), line_text, PositionEncoding::Utf16, encoding);
+    Converted {
+        value: ServerColumn::new(converted.value, encoding),
+        fidelity: converted.fidelity,
+    }
+}
+
+/// The UTF-16 column `column` names, re-derived from `line_text`; the LSP "end
+/// of line" column `u32::MAX` is exact in every encoding.
+fn to_utf16_column(column: ServerColumn, line_text: Option<&str>) -> Converted<Utf16Column> {
+    let converted = if column.units == u32::MAX {
+        Converted::exact(u32::MAX)
+    } else {
+        convert_column(
+            column.units,
+            line_text,
+            column.encoding,
+            PositionEncoding::Utf16,
+        )
+    };
+    Converted {
+        value: Utf16Column::new(converted.value),
+        fidelity: converted.fidelity,
+    }
+}
+
 /// Re-derive a 0-based `column` from `from` units into `to` units, deciding
-/// fidelity in one place for both conversion directions.
+/// fidelity in one place for both conversion directions. The only code that
+/// reinterprets a passed-through column; reached only through
+/// [`to_server_column`] and [`to_utf16_column`], which keep the units typed.
 fn convert_column(
     column: u32,
     line_text: Option<&str>,
@@ -203,26 +576,18 @@ fn convert_column(
     };
 
     let line_len_in = |encoding| {
-        EncodingConverter::new(encoding)
-            .byte_offset_to_character(text, text.len())
+        ServerColumn::at_byte(text, text.len(), encoding)
             .ok()
+            .map(|end| end.units)
     };
-    // Code units never outnumber bytes, so `column > text.len()` is past the end in any encoding.
-    let past_end =
-        || column as usize > text.len() || line_len_in(from).is_some_and(|len| column > len);
 
-    let exact = (column as usize <= text.len())
-        .then(|| exact_byte_offset(text, column, from))
-        .flatten()
-        .and_then(|byte_offset| {
-            EncodingConverter::new(to)
-                .byte_offset_to_character(text, byte_offset)
-                .ok()
-        });
-    if let Some(converted) = exact {
+    let located = ServerColumn::new(column, from).byte_offset_in(text);
+    if let Ok(byte_offset) = located
+        && let Some(converted) = exact_character(text, byte_offset, column, from, to)
+    {
         return Converted::exact(converted);
     }
-    if past_end()
+    if matches!(located, Err(OffsetError::PastEnd { .. }))
         && let Some(clamped) = line_len_in(to)
     {
         // A server column past its own line end means its text differs from ours.
@@ -238,238 +603,145 @@ fn convert_column(
     Converted::passed_through(column)
 }
 
-/// Resolve `character_offset` (in `encoding`'s units) to a byte offset in
-/// `text`, requiring the mapping to be exact.
+/// Re-express `byte_offset` in `to` units, requiring that `column` in `from`
+/// units named exactly that offset.
 ///
-/// `EncodingConverter::character_to_byte_offset` finds the byte boundary at
-/// or after the requested offset, so an offset that lands inside a
-/// multi-unit character (e.g. a UTF-16 surrogate pair) silently resolves to
-/// the *next* character boundary instead of erroring. Round-tripping the
-/// result back through `byte_offset_to_character` detects that case: if it
-/// doesn't reproduce `character_offset` exactly, the offset wasn't
-/// representable, and `None` signals the caller to fall back to the raw
-/// value rather than use a rounded-forward position.
-fn exact_byte_offset(
+/// `ServerColumn::byte_offset_in` finds the byte boundary at
+/// or after the requested offset, so a column inside a multi-unit character
+/// (e.g. a UTF-16 surrogate pair) resolves to the *next* boundary instead of
+/// erroring. Round-tripping through `from` detects that case, and `None`
+/// tells the caller to fall back rather than use a rounded-forward position.
+fn exact_character(
     text: &str,
-    character_offset: u32,
-    encoding: PositionEncoding,
-) -> Option<usize> {
-    let converter = EncodingConverter::new(encoding);
-    let byte_offset = converter
-        .character_to_byte_offset(text, character_offset)
-        .ok()?;
-    let round_trip = converter.byte_offset_to_character(text, byte_offset).ok()?;
-    (round_trip == character_offset).then_some(byte_offset)
+    byte_offset: usize,
+    column: u32,
+    from: PositionEncoding,
+    to: PositionEncoding,
+) -> Option<u32> {
+    let round_trip = ServerColumn::at_byte(text, byte_offset, from).ok()?;
+    if round_trip.units != column {
+        return None;
+    }
+    ServerColumn::at_byte(text, byte_offset, to)
+        .ok()
+        .map(|converted| converted.units)
 }
 
-/// Byte offsets for a chosen set of code-unit offsets into one label,
-/// resolved in a single pass over the label.
+/// Byte offsets for a chosen set of [`ServerColumn`]s into one label,
+/// resolved in a single pass over the label per encoding.
 ///
 /// Resolves signature-help parameter labels given as offset pairs
-/// (`ParameterInformationLabel::Tuple`) in the negotiated encoding's units.
-/// Per-pair scans would cost O(label) each, which a server naming many
-/// parameters could amplify; a full per-unit table would cost memory
-/// proportional to the label. This keeps one entry per distinct requested
-/// offset.
+/// (`ParameterInformationLabel::Tuple`). Each offset carries its encoding, so
+/// units of one encoding are never read as another's. Per-pair scans would
+/// cost O(label) each, which a server naming many parameters could amplify; a
+/// full per-unit table would cost memory proportional to the label. This keeps
+/// one entry per distinct requested offset.
 #[derive(Debug)]
-pub struct LabelOffsets<'a> {
+pub(super) struct LabelOffsets<'a> {
     label: &'a str,
-    /// `(unit offset, byte offset)` sorted by unit; the byte offset is `None`
-    /// for an offset out of range or inside a multi-unit character.
-    resolved: Vec<(u32, Option<usize>)>,
+    /// One table per encoding that has requested offsets.
+    resolved: Vec<(PositionEncoding, UnitTable)>,
 }
 
-impl<'a> LabelOffsets<'a> {
-    /// Resolves each of `offsets` (code units in `encoding`) against `label`.
-    #[must_use]
-    pub fn new(
-        label: &'a str,
-        offsets: impl IntoIterator<Item = u32>,
-        encoding: PositionEncoding,
-    ) -> Self {
-        let mut wanted: Vec<u32> = offsets.into_iter().collect();
-        wanted.sort_unstable();
-        wanted.dedup();
+/// `(unit offset, byte offset)` sorted by unit; the byte offset is `None` for
+/// an offset out of range or inside a multi-unit character.
+type UnitTable = Vec<(u32, Option<usize>)>;
 
-        let mut resolved = Vec::with_capacity(wanted.len());
-        let mut next = 0;
-        let mut settle = |unit: usize, byte: usize| {
-            while let Some(&offset) = wanted.get(next) {
-                if offset as usize > unit {
-                    break;
-                }
-                resolved.push((offset, (offset as usize == unit).then_some(byte)));
-                next = next.saturating_add(1);
-            }
-        };
-        let mut unit = 0;
-        for (byte, ch) in label.char_indices() {
-            settle(unit, byte);
-            unit = unit.saturating_add(match encoding {
-                PositionEncoding::Utf8 => ch.len_utf8(),
-                PositionEncoding::Utf16 => ch.len_utf16(),
-                PositionEncoding::Utf32 => 1,
-            });
-        }
-        settle(unit, label.len());
-        resolved.extend(
-            wanted
-                .get(next..)
-                .unwrap_or_default()
-                .iter()
-                .map(|&offset| (offset, None)),
-        );
+impl<'a> LabelOffsets<'a> {
+    /// Resolves each of `offsets` against `label` in its own encoding.
+    #[must_use]
+    pub(super) fn new(label: &'a str, offsets: impl IntoIterator<Item = ServerColumn>) -> Self {
+        let offsets: Vec<ServerColumn> = offsets.into_iter().collect();
+        let resolved = PositionEncoding::ALL
+            .into_iter()
+            .filter_map(|encoding| {
+                let mut wanted: Vec<u32> = offsets
+                    .iter()
+                    .filter(|column| column.encoding == encoding)
+                    .map(|column| column.units)
+                    .collect();
+                wanted.sort_unstable();
+                wanted.dedup();
+                (!wanted.is_empty())
+                    .then(|| (encoding, resolve_label_units(label, &wanted, encoding)))
+            })
+            .collect();
         Self { label, resolved }
     }
 
-    /// The substring of the indexed label between
-    /// `start` (inclusive) and `end` (exclusive) code units. `None` when
-    /// either offset was not among those requested, is out of range or inside
-    /// a multi-unit character, or `start > end`.
+    /// The substring of the indexed label between `start` (inclusive) and
+    /// `end` (exclusive). `None` when either column was not among those
+    /// requested, is out of range or inside a multi-unit character, or
+    /// `start` is after `end`.
     #[must_use]
-    pub fn substring(&self, start: u32, end: u32) -> Option<&'a str> {
-        let at = |unit: u32| {
-            let index = self
+    pub(super) fn substring(&self, start: ServerColumn, end: ServerColumn) -> Option<&'a str> {
+        let at = |column: ServerColumn| {
+            let (_, table) = self
                 .resolved
-                .binary_search_by_key(&unit, |&(offset, _)| offset)
+                .iter()
+                .find(|(encoding, _)| *encoding == column.encoding)?;
+            let index = table
+                .binary_search_by_key(&column.units, |&(offset, _)| offset)
                 .ok()?;
-            self.resolved.get(index)?.1
+            table.get(index)?.1
         };
         self.label.get(at(start)?..at(end)?)
     }
 }
 
-/// Position encoding converter for handling UTF-8/UTF-16/UTF-32 conversions.
-///
-/// Different LSP servers may use different character encodings. This converter
-/// handles the conversion between byte offsets and character offsets based on
-/// the negotiated encoding.
-#[derive(Debug, Clone)]
-pub struct EncodingConverter {
-    encoding: PositionEncoding,
+/// Resolves the sorted, deduplicated `wanted` unit offsets of `label` in
+/// `encoding` to byte offsets in one pass.
+fn resolve_label_units(label: &str, wanted: &[u32], encoding: PositionEncoding) -> UnitTable {
+    let mut resolved = Vec::with_capacity(wanted.len());
+    let mut next = 0;
+    let mut settle = |unit: usize, byte: usize| {
+        while let Some(&offset) = wanted.get(next) {
+            if offset as usize > unit {
+                break;
+            }
+            resolved.push((offset, (offset as usize == unit).then_some(byte)));
+            next = next.saturating_add(1);
+        }
+    };
+    let mut unit = 0;
+    for step in steps(label, encoding) {
+        settle(step.before, step.start);
+        unit = step.after;
+    }
+    settle(unit, label.len());
+    resolved.extend(
+        wanted
+            .get(next..)
+            .unwrap_or_default()
+            .iter()
+            .map(|&offset| (offset, None)),
+    );
+    resolved
 }
 
-impl EncodingConverter {
-    /// Create a new encoding converter with the specified encoding.
-    #[must_use]
-    pub const fn new(encoding: PositionEncoding) -> Self {
-        Self { encoding }
-    }
-
-    /// Convert byte offset to character offset in the configured encoding.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The byte offset is not on a character boundary
-    /// - The encoding is unsupported
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "LSP positions are u32; truncation is acceptable"
-    )]
-    pub fn byte_offset_to_character(&self, text: &str, byte_offset: usize) -> Result<u32, String> {
-        if byte_offset > text.len() {
-            let text_len = text.len();
-            return Err(format!(
-                "Byte offset {byte_offset} exceeds text length {text_len}"
-            ));
-        }
-        // `text[..byte_offset]` below panics if `byte_offset` lands mid-character. A
-        // server-reported offset should always be on a boundary, but this is
-        // untrusted external input, so it is checked rather than trusted.
-        if !text.is_char_boundary(byte_offset) {
-            return Err(format!(
-                "Byte offset {byte_offset} is not on a character boundary"
-            ));
-        }
-
-        match self.encoding {
-            PositionEncoding::Utf8 => Ok(byte_offset as u32),
-            PositionEncoding::Utf16 => {
-                let utf16_units = text[..byte_offset].encode_utf16().count();
-                Ok(utf16_units as u32)
-            }
-            PositionEncoding::Utf32 => {
-                let code_points = text[..byte_offset].chars().count();
-                Ok(code_points as u32)
-            }
-        }
-    }
-
-    /// Convert character offset to byte offset in the configured encoding.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The character offset is out of bounds
-    /// - The encoding is unsupported
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "LSP positions are u32; truncation is acceptable"
-    )]
-    pub fn character_to_byte_offset(
-        &self,
-        text: &str,
-        character_offset: u32,
-    ) -> Result<usize, String> {
-        match self.encoding {
-            PositionEncoding::Utf8 => {
-                let byte_offset = character_offset as usize;
-                if byte_offset > text.len() {
-                    let text_len = text.len();
-                    return Err(format!(
-                        "Character offset {character_offset} exceeds text length {text_len}"
-                    ));
-                }
-                // A UTF-8 "character offset" *is* a byte offset, taken
-                // directly from untrusted input (an LSP position from the
-                // server, or a re-derived offset from another encoding). It
-                // must land on a boundary before any caller slices `text`
-                // with it -- see `byte_offset_to_character`'s matching guard.
-                if !text.is_char_boundary(byte_offset) {
-                    return Err(format!(
-                        "Character offset {character_offset} is not on a character boundary"
-                    ));
-                }
-                Ok(byte_offset)
-            }
-            PositionEncoding::Utf16 => {
-                let mut utf16_count = 0u32;
-                for (byte_idx, ch) in text.char_indices() {
-                    if utf16_count >= character_offset {
-                        return Ok(byte_idx);
-                    }
-                    utf16_count = utf16_count.saturating_add(ch.len_utf16() as u32);
-                }
-                if utf16_count == character_offset {
-                    Ok(text.len())
-                } else {
-                    Err(format!(
-                        "Character offset {character_offset} out of bounds (max UTF-16 units: {utf16_count})"
-                    ))
-                }
-            }
-            PositionEncoding::Utf32 => text
-                .char_indices()
-                .nth(character_offset as usize)
-                .map(|(byte_idx, _)| byte_idx)
-                .or_else(|| {
-                    if character_offset == text.chars().count() as u32 {
-                        Some(text.len())
-                    } else {
-                        None
-                    }
-                })
-                .ok_or_else(|| {
-                    let max_code_points = text.chars().count();
-                    format!(
-                        "Character offset {character_offset} out of bounds (max code points: {max_code_points})"
-                    )
-                }),
-        }
-    }
+/// Why an offset has no counterpart in the other unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum OffsetError {
+    /// The offset is beyond the end of the text; `len` is the text length in
+    /// the unit of the failed conversion's input.
+    #[error("offset {offset} is past the end ({len})")]
+    PastEnd {
+        /// The requested offset.
+        offset: usize,
+        /// The text length in the same unit as `offset`.
+        len: usize,
+    },
+    /// The byte offset is not on a character boundary.
+    #[error("offset {0} is inside a character")]
+    InsideCharacter(usize),
+    /// The converted offset does not fit in `u32`.
+    #[error("line longer than u32::MAX code units")]
+    TooLong,
 }
 
+#[cfg(test)]
+mod column_acceptance_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,7 +773,23 @@ mod tests {
         end: u32,
         encoding: PositionEncoding,
     ) -> Option<&str> {
-        LabelOffsets::new(label, [start, end], encoding).substring(start, end)
+        let start = ServerColumn::new(start, encoding);
+        let end = ServerColumn::new(end, encoding);
+        LabelOffsets::new(label, [start, end]).substring(start, end)
+    }
+
+    #[test]
+    fn test_label_substring_resolves_mixed_encodings_per_column() {
+        let label = "é𝄞xy";
+        let utf8 = ServerColumn::new(6, PositionEncoding::Utf8);
+        let utf16 = ServerColumn::new(5, PositionEncoding::Utf16);
+        let utf32 = ServerColumn::new(4, PositionEncoding::Utf32);
+        let offsets = LabelOffsets::new(label, [utf8, utf16, utf32]);
+        assert_eq!(offsets.substring(utf8, utf16), Some("xy"));
+        assert_eq!(offsets.substring(utf8, utf32), Some("xy"));
+        assert_eq!(offsets.substring(utf16, utf16), Some(""));
+        let unrequested = ServerColumn::new(6, PositionEncoding::Utf16);
+        assert_eq!(offsets.substring(utf8, unrequested), None);
     }
 
     #[test]
@@ -551,7 +839,10 @@ mod tests {
         let converted =
             lsp_to_mcp_position(lsp_types::Position { line, character }, line_text, encoding);
         Converted {
-            value: (converted.value.line, converted.value.character),
+            value: (
+                converted.value.line().get(),
+                converted.value.character().get(),
+            ),
             fidelity: converted.fidelity,
         }
     }
@@ -583,12 +874,8 @@ mod tests {
         for line in 1..100 {
             for char in 1..100 {
                 let lsp_pos = lsp_at(line, char, None, PositionEncoding::Utf16).value;
-                let Position2D {
-                    line: mcp_line,
-                    character: mcp_char,
-                } = lsp_to_mcp_position(lsp_pos, None, PositionEncoding::Utf16).value;
-                assert_eq!(line, mcp_line);
-                assert_eq!(char, mcp_char);
+                let mcp = lsp_to_mcp_position(lsp_pos, None, PositionEncoding::Utf16).value;
+                assert_eq!(mcp, Position2D::at(line, char));
             }
         }
     }
@@ -714,73 +1001,79 @@ mod tests {
         assert_eq!(PositionEncoding::from_lsp("invalid"), None);
     }
 
+    fn units_at(encoding: PositionEncoding, text: &str, byte: usize) -> Result<u32, OffsetError> {
+        ServerColumn::at_byte(text, byte, encoding).map(|column| column.units)
+    }
+
+    fn byte_of(encoding: PositionEncoding, text: &str, units: u32) -> Result<usize, OffsetError> {
+        ServerColumn::new(units, encoding).byte_offset_in(text)
+    }
+
     #[test]
     fn test_utf8_encoding() {
-        let converter = EncodingConverter::new(PositionEncoding::Utf8);
+        let converter = PositionEncoding::Utf8;
         let text = "Hello, world!";
 
-        let char_offset = converter.byte_offset_to_character(text, 7).unwrap();
+        let char_offset = units_at(converter, text, 7).unwrap();
         assert_eq!(char_offset, 7);
 
-        let byte_offset = converter.character_to_byte_offset(text, 7).unwrap();
+        let byte_offset = byte_of(converter, text, 7).unwrap();
         assert_eq!(byte_offset, 7);
     }
 
     #[test]
     fn test_utf16_encoding_with_emoji() {
-        let converter = EncodingConverter::new(PositionEncoding::Utf16);
+        let converter = PositionEncoding::Utf16;
         let text = "Hello 😀 world";
 
-        let char_offset = converter.byte_offset_to_character(text, 6).unwrap();
+        let char_offset = units_at(converter, text, 6).unwrap();
         assert_eq!(char_offset, 6);
 
-        let char_offset = converter.byte_offset_to_character(text, 10).unwrap();
+        let char_offset = units_at(converter, text, 10).unwrap();
         assert_eq!(char_offset, 8);
 
-        let byte_offset = converter.character_to_byte_offset(text, 6).unwrap();
+        let byte_offset = byte_of(converter, text, 6).unwrap();
         assert_eq!(byte_offset, 6);
 
-        let byte_offset = converter.character_to_byte_offset(text, 8).unwrap();
+        let byte_offset = byte_of(converter, text, 8).unwrap();
         assert_eq!(byte_offset, 10);
     }
 
     #[test]
     fn test_utf16_encoding_roundtrip() {
-        let converter = EncodingConverter::new(PositionEncoding::Utf16);
+        let converter = PositionEncoding::Utf16;
         let text = "Hello 🌍 world!";
 
         for byte_idx in [0, 6, 10, 11] {
-            let char_offset = converter.byte_offset_to_character(text, byte_idx).unwrap();
-            let back_to_byte = converter
-                .character_to_byte_offset(text, char_offset)
-                .unwrap();
+            let char_offset = units_at(converter, text, byte_idx).unwrap();
+            let back_to_byte = byte_of(converter, text, char_offset).unwrap();
             assert_eq!(byte_idx, back_to_byte);
         }
     }
 
     #[test]
     fn test_utf32_encoding() {
-        let converter = EncodingConverter::new(PositionEncoding::Utf32);
+        let converter = PositionEncoding::Utf32;
         let text = "Hello 😀 world";
 
-        let char_offset = converter.byte_offset_to_character(text, 6).unwrap();
+        let char_offset = units_at(converter, text, 6).unwrap();
         assert_eq!(char_offset, 6);
 
-        let char_offset = converter.byte_offset_to_character(text, 10).unwrap();
+        let char_offset = units_at(converter, text, 10).unwrap();
         assert_eq!(char_offset, 7);
 
-        let byte_offset = converter.character_to_byte_offset(text, 7).unwrap();
+        let byte_offset = byte_of(converter, text, 7).unwrap();
         assert_eq!(byte_offset, 10);
     }
 
     #[test]
     fn test_encoding_edge_cases() {
-        let converter = EncodingConverter::new(PositionEncoding::Utf8);
+        let converter = PositionEncoding::Utf8;
 
-        assert!(converter.byte_offset_to_character("test", 100).is_err());
-        assert!(converter.character_to_byte_offset("test", 100).is_err());
+        assert!(units_at(converter, "test", 100).is_err());
+        assert!(byte_of(converter, "test", 100).is_err());
 
-        let end_offset = converter.byte_offset_to_character("test", 4).unwrap();
+        let end_offset = units_at(converter, "test", 4).unwrap();
         assert_eq!(end_offset, 4);
     }
 
@@ -798,11 +1091,9 @@ mod tests {
             PositionEncoding::Utf16,
             PositionEncoding::Utf32,
         ] {
-            let converter = EncodingConverter::new(encoding);
+            let converter = encoding;
             assert!(
-                converter
-                    .byte_offset_to_character(text, byte_offset)
-                    .is_err(),
+                units_at(converter, text, byte_offset).is_err(),
                 "encoding {encoding:?} must reject a mid-character byte offset instead of panicking"
             );
         }
@@ -894,5 +1185,80 @@ mod tests {
         let (mcp_line, mcp_char) = mcp_at(u32::MAX, u32::MAX, None, PositionEncoding::Utf16).value;
         assert_eq!(mcp_line, u32::MAX);
         assert_eq!(mcp_char, u32::MAX);
+    }
+
+    #[test]
+    fn test_offset_errors_are_typed() {
+        let utf8 = PositionEncoding::Utf8;
+        assert_eq!(
+            units_at(utf8, "test", 100),
+            Err(OffsetError::PastEnd {
+                offset: 100,
+                len: 4
+            })
+        );
+        assert_eq!(
+            units_at(utf8, "a\u{1F600}", 2),
+            Err(OffsetError::InsideCharacter(2))
+        );
+        assert_eq!(
+            byte_of(utf8, "a\u{1F600}", 2),
+            Err(OffsetError::InsideCharacter(2))
+        );
+        let utf16 = PositionEncoding::Utf16;
+        assert_eq!(
+            byte_of(utf16, "a\u{1F600}", 9),
+            Err(OffsetError::PastEnd { offset: 9, len: 3 })
+        );
+        let utf32 = PositionEncoding::Utf32;
+        assert_eq!(
+            byte_of(utf32, "a\u{1F600}", 3),
+            Err(OffsetError::PastEnd { offset: 3, len: 2 })
+        );
+    }
+
+    #[test]
+    fn test_units_of_is_the_width_in_each_encoding() {
+        for (ch, utf8, utf16, utf32) in [
+            ('a', 1, 1, 1),
+            ('\u{e9}', 2, 1, 1),
+            ('\u{20ac}', 3, 1, 1),
+            ('\u{1F600}', 4, 2, 1),
+        ] {
+            assert_eq!(PositionEncoding::Utf8.units_of(ch), utf8, "{ch}");
+            assert_eq!(PositionEncoding::Utf16.units_of(ch), utf16, "{ch}");
+            assert_eq!(PositionEncoding::Utf32.units_of(ch), utf32, "{ch}");
+        }
+    }
+
+    #[test]
+    fn test_floor_byte_in_rounds_a_column_inside_a_surrogate_pair_down() {
+        let line = "a\u{1F600}b";
+        let at = |column| Utf16Column::new(column).floor_byte_in(line);
+        let inside = at(2);
+        assert_eq!((inside.byte, inside.column), (1, Utf16Column::new(1)));
+        let after = at(3);
+        assert_eq!((after.byte, after.column), (5, Utf16Column::new(3)));
+        let past = at(99);
+        assert_eq!((past.byte, past.column), (6, Utf16Column::new(4)));
+        let origin = at(0);
+        assert_eq!((origin.byte, origin.column), (0, Utf16Column::new(0)));
+    }
+
+    #[test]
+    fn test_ceil_byte_in_rounds_up_and_gives_up_past_the_byte_cap() {
+        let line = "a\u{1F600}b";
+        let start = ColumnBoundary {
+            byte: 0,
+            column: Utf16Column::new(0),
+        };
+        let ceil = |column, max| Utf16Column::new(column).ceil_byte_in(line, start, max);
+        assert_eq!(ceil(2, 99), Some(5));
+        assert_eq!(ceil(3, 99), Some(5));
+        assert_eq!(ceil(99, 99), Some(6));
+        assert_eq!(ceil(0, 99), Some(0));
+        assert_eq!(ceil(4, 3), None);
+        let mid = Utf16Column::new(1).floor_byte_in(line);
+        assert_eq!(Utf16Column::new(2).ceil_byte_in(line, mid, 99), Some(5));
     }
 }

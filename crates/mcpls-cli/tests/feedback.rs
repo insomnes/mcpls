@@ -14,7 +14,7 @@ struct Client {
     id: u64,
 }
 
-#[allow(
+#[expect(
     clippy::unwrap_used,
     reason = "test fixture failures must panic with the underlying error"
 )]

@@ -152,6 +152,22 @@ impl Transform for ShortenDescriptions {
     }
 }
 
+/// Remove format annotations for unsigned integers while keeping their bounds.
+struct OmitUnsignedFormat;
+
+impl Transform for OmitUnsignedFormat {
+    fn transform(&mut self, schema: &mut Schema) {
+        if let Some(object) = schema.as_object_mut()
+            && matches!(
+                object.get("format").and_then(Value::as_str),
+                Some("uint" | "uint32" | "uint64")
+            )
+        {
+            object.remove("format");
+        }
+    }
+}
+
 /// Definition name to the number of tools whose input or output schema
 /// carries it.
 struct DefinitionUsage(BTreeMap<String, usize>);
@@ -190,7 +206,18 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
     let mut tools: Vec<&mut Tool> = tools.into_iter().collect();
     let usage = DefinitionUsage::count(&tools);
     for tool in &mut tools {
-        shape_schema(Arc::make_mut(&mut tool.input_schema), &usage);
+        let input = Arc::make_mut(&mut tool.input_schema);
+        shape_schema(input, &usage);
+        if location_tool(tool.name.as_ref()) {
+            let mut value = Value::Object(std::mem::take(input));
+            compact_known_string_enums(
+                &mut value,
+                &["/$defs/LocationContext", "/$defs/ReferenceMode"],
+            );
+            if let Value::Object(shaped) = value {
+                *input = shaped;
+            }
+        }
         if matches!(
             tool.name.as_ref(),
             "get_symbol_context"
@@ -253,6 +280,17 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
     }
 }
 
+fn location_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "get_references"
+            | "get_definition"
+            | "go_to_implementation"
+            | "go_to_type_definition"
+            | "go_to_declaration"
+    )
+}
+
 /// Compact output annotations while retaining the workspace containment warning.
 fn shape_output_schema(tool: &mut Tool, usage: &DefinitionUsage) {
     if let Some(output) = tool.output_schema.as_mut() {
@@ -291,6 +329,9 @@ fn shape_output_schema(tool: &mut Tool, usage: &DefinitionUsage) {
             let mut schema = Schema::from(std::mem::take(Arc::make_mut(output)));
             RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
                 .transform(&mut schema);
+            if tool.name == "get_references" {
+                RecursiveTransform(OmitUnsignedFormat).transform(&mut schema);
+            }
             if let Value::Object(mut shaped) = Value::from(schema) {
                 if tool.name == "workspace_symbol_search"
                     && let Some(description) = containment
@@ -364,6 +405,7 @@ fn shape_client_contract(tool: &mut Tool) {
         "restart_server" => &["$defs", "ServerRestartEntry"],
         "rename_symbol" | "get_references" => &[],
         "get_diagnostics" => &["anyOf", "1", "properties", "results", "items"],
+        _ if location_tool(tool.name.as_ref()) => &[],
         _ => return,
     };
     let mut value = Value::Object(std::mem::take(output));
@@ -410,6 +452,9 @@ fn shape_client_contract(tool: &mut Tool) {
 
 /// Repair only the finite leaves demonstrated to lose types in client readback.
 fn repair_finite_client_leaves(value: &mut Value, tool: &str) {
+    if location_tool(tool) {
+        repair_location_source_union(value, tool);
+    }
     if tool == "get_references" {
         repair_reference_client_leaves(value);
         return;
@@ -504,29 +549,54 @@ fn repair_finite_client_leaves(value: &mut Value, tool: &str) {
     compact_known_string_enums(value, enum_paths);
 }
 
-fn repair_reference_client_leaves(value: &mut Value) {
+/// Keep the two source shapes and the legacy null option in one union.
+fn repair_location_source_union(value: &mut Value, tool: &str) {
+    // Keep each source alternative at the same depth as the legacy null
+    // branch. The inner union has no constraints beyond its alternatives.
+    let item = if tool == "get_references" {
+        "ReferenceLocation"
+    } else {
+        "NavigationObservation"
+    };
+    if let Some(branches) = value
+        .pointer_mut(&format!("/$defs/{item}/properties/source/anyOf"))
+        .and_then(Value::as_array_mut)
+        && let Some(first) = branches.first_mut().and_then(Value::as_object_mut)
+        && first.len() == 1
+        && let Some(Value::Array(alternatives)) = first.remove("anyOf")
+    {
+        branches.splice(..1, alternatives);
+    }
     compact_known_string_enums(
         value,
         &[
             "/$defs/SourceOrigin",
             "/$defs/SourceUnavailableReason",
-            "/$defs/PositionDegradation",
-            "/$defs/PositionSource",
+            "/$defs/SourceSkipReason",
+            "/$defs/NotComputedReason",
+            "/$defs/SymbolFidelity",
+            "/$defs/UnavailableReason",
         ],
+    );
+}
+
+fn repair_reference_client_leaves(value: &mut Value) {
+    compact_known_string_enums(
+        value,
+        &["/$defs/PositionDegradation", "/$defs/PositionSource"],
     );
     if let Some(position) = value.pointer("/$defs/Position2D").cloned()
         && let Some(field) = value.pointer_mut("/$defs/ResolvedSymbol/properties/position")
     {
         *field = position;
     }
-    // These finite leaves are not recursive. Inline every reference before
-    // removing the definitions, including both uses of ReferenceLocation.
+    // Inline finite scalar leaves and resolved positions for client rendering.
+    // Share the excerpt object between source and broader_context.
     for name in [
         "SourceOrigin",
         "SourceUnavailableReason",
         "PositionDegradation",
         "PositionSource",
-        "ReferenceSource",
         "ResolvedSymbol",
     ] {
         if let Some(definition) = value.pointer(&format!("/$defs/{name}")).cloned() {
@@ -1214,9 +1284,22 @@ mod tests {
             .find(|tool| tool.name == "get_references")
             .unwrap();
         let output = serde_json::to_value(tool.output_schema.as_ref().unwrap()).unwrap();
-        let source = &output["$defs"]["ReferenceLocation"]["properties"]["source"]["anyOf"];
-        assert_eq!(source[1]["type"], "null");
-        let alternatives = source[0]["oneOf"].as_array().unwrap();
+        let defs = &output["$defs"];
+        let fields = &defs["ReferenceLocation"]["properties"];
+        let source = fields["source"]["anyOf"].as_array().unwrap();
+        assert!(source.iter().any(|branch| branch["type"] == "null"));
+        assert!(
+            source
+                .iter()
+                .any(|branch| branch["$ref"] == "#/$defs/ReferenceSource")
+        );
+        assert!(
+            source
+                .iter()
+                .any(|branch| branch["$ref"] == "#/$defs/SourceOutcome")
+        );
+        assert_eq!(fields["broader_context"]["$ref"], "#/$defs/ReferenceSource");
+        let alternatives = defs["ReferenceSource"]["oneOf"].as_array().unwrap();
         assert_eq!(alternatives.len(), 2);
         let text = alternatives
             .iter()
@@ -1366,6 +1449,18 @@ mod tests {
             {
                 let mut old = without_annotations(&Value::Object(old.clone()));
                 let mut new = without_annotations(&Value::Object(new.clone()));
+                if location_tool(before.name.as_ref()) {
+                    // Compare all other structure after the lossless reshaping
+                    // of known enums and the nullable source union.
+                    if schema_index == 0 {
+                        compact_known_string_enums(
+                            &mut old,
+                            &["/$defs/LocationContext", "/$defs/ReferenceMode"],
+                        );
+                    } else {
+                        repair_location_source_union(&mut old, before.name.as_ref());
+                    }
+                }
                 if before.name == "workspace_symbol_search" && schema_index == 1 {
                     // The public finite outcome contract is checked separately above.
                     for schema in [&mut old, &mut new] {

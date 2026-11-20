@@ -243,7 +243,9 @@ impl RestartFailure {
             | Error::InvalidHierarchyItemInput(_)
             | Error::PositionBeyondDocument { .. }
             | Error::ServerUnavailable { .. }
-            | Error::InvalidToolParams(_)
+            | Error::InvalidKindFilter(_)
+            | Error::NotFileUri(_)
+            | Error::InvalidTextField(_)
             | Error::FileIo { .. }
             | Error::PathOutsideWorkspace(_)
             | Error::NoWorkspaceRoots(_)
@@ -256,6 +258,11 @@ impl RestartFailure {
             | Error::AllServersFailedToInit { .. }
             | Error::CapabilityNotSupported { .. }
             | Error::WorkspaceIndexing { .. }
+            | Error::SymbolSourceRequiresLocations
+            | Error::UnsupportedSymbolReference
+            | Error::InvalidToolLimit { .. }
+            | Error::InvalidReferencePathFilter
+            | Error::InvalidHierarchyPreparation
             | Error::CallGraphRequestLimit => Self::InitializeFailed { message },
         }
     }
