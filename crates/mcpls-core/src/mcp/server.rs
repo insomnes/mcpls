@@ -4,6 +4,7 @@
 //! as MCP tools using the rmcp SDK.
 
 mod call_graph;
+mod completion;
 mod diagnostics_batch;
 mod diagnostics_delta;
 mod dispatch;
@@ -12,8 +13,9 @@ mod symbol_context;
 use std::borrow::Cow;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
+use completion::{CompletionRefs, ListedCompletion, ResolveCompletionResult, SelectedCompletion};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Json;
@@ -46,28 +48,28 @@ use super::tools::{
     DeclarationParams, DefinitionParams, DiagnosticsParams, DocumentOutlineParams,
     DocumentSymbolsParams, FoldingRangesParams, FormatDocumentParams, FormatRangeParams,
     InlayHintsParams, NavigationParams, PositionParams, PreviewFileMoveParams, RangeParams,
-    ReferencesParams, RenameParams, RestartServerParams, ServerLogsParams, ServerMessagesParams,
-    SymbolTargetInput, SymbolTargetParams, ToolSupportParams, TypeHierarchyWalkParams,
-    WorkspaceDiagnosticsParams, WorkspaceSymbolParams,
+    ReferencesParams, RenameParams, ResolveCompletionParams, RestartServerParams, ServerLogsParams,
+    ServerMessagesParams, SymbolTargetInput, SymbolTargetParams, ToolSupportParams,
+    TypeHierarchyWalkParams, WorkspaceDiagnosticsParams, WorkspaceSymbolParams,
 };
 use crate::bridge::resources::{
     DiagnosticsResourceUri, MAX_SUBSCRIPTIONS, ResolvedResource, make_uri, parse_uri,
 };
 use crate::bridge::{
     AddressableTool, Addressed, BoundedRange, CallHierarchyPrepareResult, CheckedHierarchyItem,
-    ClientPath, CodeActionsResult, CompletionsResult, DiagnosticInfo, DiagnosticsAvailability,
-    DiagnosticsOrigin, DiagnosticsResult, DocumentDiagnosticsResult, DocumentHighlightsResult,
-    DocumentOpenState, DocumentOutlineResult, DocumentSymbolsResult, DocumentVersion,
-    FileMoveResult, FoldingRangesResult, FormatDocumentResult, HierarchyItem, HoverResult,
-    IncomingCallsResult, Indexed, InlayHintsResult, KindFilter, KindFilterField, KindFilterInput,
-    NotificationCache, OutgoingCallsResult, Position, PositionEncoding, PositionRange,
-    ReferencesResult, RenameResult, RestartServerResult, RouteSignals, SelectionRangesResult,
-    ServerLogsResult, ServerMessagesResult, SignatureHelpResult, SymbolTarget, Translator,
-    TypeHierarchyResult, WorkspaceRoots, WorkspaceSymbolResult,
+    ClientPath, CodeActionsResult, CompletionResolution, CompletionsResult, DiagnosticInfo,
+    DiagnosticsAvailability, DiagnosticsOrigin, DiagnosticsResult, DocumentDiagnosticsResult,
+    DocumentHighlightsResult, DocumentOpenState, DocumentOutlineResult, DocumentSymbolsResult,
+    DocumentVersion, FileMoveResult, FoldingRangesResult, FormatDocumentResult, HierarchyItem,
+    HoverResult, IncomingCallsResult, Indexed, InlayHintsResult, KindFilter, KindFilterField,
+    KindFilterInput, NotificationCache, OutgoingCallsResult, Position, PositionEncoding,
+    PositionRange, ReferencesResult, RenameResult, RestartServerResult, RouteSignals,
+    SelectionRangesResult, ServerLogsResult, ServerMessagesResult, SignatureHelpResult,
+    SymbolTarget, Translator, TypeHierarchyResult, WorkspaceRoots, WorkspaceSymbolResult,
 };
 use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix, ToolProfile};
 use crate::redaction::{Redactions, ServerText};
-use crate::util::{MAX_ECHOED_NAME_BYTES, escape_bounded};
+use crate::util::{MAX_ECHOED_NAME_BYTES, escape_bounded, lock_std};
 
 /// Built-in `serverInfo.title`, used when `[mcp].title` is not configured.
 const DEFAULT_SERVER_TITLE: &str = "MCPLS - MCP to LSP Bridge";
@@ -335,6 +337,7 @@ pub struct McplsServer {
     dispatcher: Option<Arc<crate::dispatcher::Dispatcher>>,
     workspace_sessions: Mutex<std::collections::HashMap<String, Arc<Self>>>,
     hierarchy_contexts: HierarchyContexts,
+    completion_refs: Arc<StdMutex<CompletionRefs>>,
     context: Arc<BridgeContext>,
 
     /// `Arc`-wrapped so building a new session in `for_new_session` is a
@@ -730,6 +733,7 @@ impl McplsServer {
             dispatcher: None,
             workspace_sessions: Mutex::new(std::collections::HashMap::new()),
             hierarchy_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            completion_refs: Arc::default(),
             context,
             tool_router,
             stop: CancellationToken::new(),
@@ -876,7 +880,7 @@ impl McplsServer {
     /// # Examples
     ///
     /// ```
-    /// use std::sync::Arc;
+    /// use std::sync::{Arc, Mutex as StdMutex};
     ///
     /// use mcpls_core::bridge::{NotificationCache, Translator, WorkspaceRoots};
     /// use mcpls_core::config::{McpConfig, ProjectConfigStatus};
@@ -922,7 +926,7 @@ impl McplsServer {
     /// # Examples
     ///
     /// ```
-    /// use std::sync::Arc;
+    /// use std::sync::{Arc, Mutex as StdMutex};
     ///
     /// use mcpls_core::bridge::{NotificationCache, Translator, WorkspaceRoots};
     /// use mcpls_core::config::{McpConfig, ProjectConfigStatus};
@@ -956,6 +960,7 @@ impl McplsServer {
             dispatcher: self.dispatcher.clone(),
             workspace_sessions: Mutex::new(std::collections::HashMap::new()),
             hierarchy_contexts: self.hierarchy_contexts.clone(),
+            completion_refs: Arc::default(),
             context,
             tool_router: Arc::clone(&self.tool_router),
             stop: self.stop.clone(),
@@ -1455,7 +1460,7 @@ impl McplsServer {
 
     /// Get code completion suggestions.
     #[tool(
-        description = "Discover API candidates ranked by typed-prefix match and sortText at 1-based UTF-16 positions. limit is 1..100 (default 20); include_documentation defaults to false. trigger is 1..8 bytes or null. After redaction, label/detail/documentation caps are 512/2048/4096 UTF-8 bytes; labels retain payload handling. Return the longest prefix within 65536 compact JSON bytes. omitted_count/truncated/truncated_fields report local omissions/clipping. provider_is_incomplete preserves bool|null. Clipped labels are partial. Bounds exclude the LSP response. positions_degraded:request means an unreliable target. No edits.",
+        description = "Discover API candidates ranked by typed-prefix match and sortText at 1-based UTF-16 positions. limit is 1..100 (default 20). include_documentation and include_completion_refs default false. Use a completion_ref with resolve_completion in the same session. trigger is 1..8 bytes or null. Display caps after redaction: 512/2048/4096 UTF-8 bytes for label/detail/documentation. The ranked prefix fits 65536 compact JSON bytes. omitted_count/truncated/truncated_fields report local limits. provider_is_incomplete preserves bool|null. positions_degraded:request means an unreliable target. No edits.",
         title = "Completions"
     )]
     async fn get_completions(
@@ -1470,50 +1475,102 @@ impl McplsServer {
             trigger,
             limit,
             include_documentation,
+            include_completion_refs,
         }): Parameters<CompletionsParams>,
-    ) -> Result<Json<CompletionsResult>, McpError> {
+    ) -> Result<Json<CompletionsResult<ListedCompletion>>, McpError> {
         let file_path = parse_client_path(file_path)?;
-        let mut result = self
-            .context
-            .translator
-            .handle_completions(
+        let position = parse_position(line, character)?;
+        let translator = &self.context.translator;
+        if !include_completion_refs {
+            let mut result = translator
+                .handle_completions(file_path, position, trigger, limit, include_documentation)
+                .await
+                .map_err(|error| self.render_error(error))?
+                .map_items(|display| ListedCompletion {
+                    display,
+                    completion_ref: None,
+                });
+            self.bound_completion_list(&mut result)?;
+            return Ok(Json(result));
+        }
+
+        let (result, origin) = translator
+            .handle_selectable_completions(
                 file_path,
-                parse_position(line, character)?,
+                position,
                 trigger,
                 limit,
                 include_documentation,
             )
             .await
             .map_err(|error| self.render_error(error))?;
-        result.redact_server_text(&self.context.translator.server_text_redactions());
-        for item in &mut result.items {
-            for (field, value, maximum) in [
-                ("label", Some(&mut item.label), 512),
-                ("detail", item.detail.as_mut(), 2048),
-                ("documentation", item.documentation.as_mut(), 4096),
-            ] {
-                if let Some(value) = value.filter(|value| value.len() > maximum) {
-                    let end = value.floor_char_boundary(maximum);
-                    value.truncate(end);
-                    item.truncated_fields.push(field.to_owned());
-                }
+        let origin = origin.map(Arc::new);
+        let mut selections = Vec::with_capacity(result.items.len());
+        let mut result = result.map_items(|candidate| {
+            let selected = candidate.item.zip(origin.as_ref()).map(|(item, origin)| {
+                (
+                    crate::dispatcher::opaque(),
+                    SelectedCompletion {
+                        item,
+                        origin: Arc::clone(origin),
+                    },
+                )
+            });
+            let completion_ref = selected.as_ref().map(|(reference, _)| reference.clone());
+            selections.push(selected);
+            ListedCompletion {
+                display: candidate.display,
+                completion_ref,
             }
+        });
+        self.bound_completion_list(&mut result)?;
+        let mut refs = lock_std(&self.completion_refs);
+        for (reference, selection) in selections.into_iter().take(result.items.len()).flatten() {
+            refs.retain(reference, selection);
         }
-        loop {
-            result.truncated = result.omitted_count > 0
-                || result
-                    .items
-                    .iter()
-                    .any(|item| !item.truncated_fields.is_empty());
-            let bytes = serde_json::to_vec(&result)
-                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-            if bytes.len() <= 65536 {
-                return Ok(Json(result));
+        drop(refs);
+        Ok(Json(result))
+    }
+
+    /// Resolve the selected completion's deferred display fields.
+    #[tool(
+        description = "Resolve one candidate from get_completions using the original absolute file_path and opaque completion_ref in the same session. Stale reference: list again. Returns status resolved with bounded display fields or unsupported with item:null. No edits or commands.",
+        title = "Resolve Completion"
+    )]
+    async fn resolve_completion(
+        &self,
+        Parameters(ResolveCompletionParams {
+            file_path,
+            completion_ref,
+        }): Parameters<ResolveCompletionParams>,
+    ) -> Result<Json<ResolveCompletionResult>, McpError> {
+        let path = parse_client_path(file_path)?;
+        let translator = &self.context.translator;
+        let path = translator
+            .validate_path(&path)
+            .await
+            .map_err(|error| self.render_error(error))?;
+        let selected = lock_std(&self.completion_refs)
+            .get(&completion_ref)
+            .ok_or_else(completion::stale_reference)?;
+        if selected.origin.path != path.as_path() {
+            return Err(McpError::invalid_params(
+                "completion_ref belongs to a different file_path",
+                None,
+            ));
+        }
+        let redactions = translator.server_text_redactions();
+        match translator
+            .handle_resolve_completion(&path, &selected.origin, &selected.item)
+            .await
+            .map_err(|error| self.render_error(error))?
+        {
+            CompletionResolution::Stale => Err(completion::stale_reference()),
+            CompletionResolution::Unsupported => Ok(Json(ResolveCompletionResult::new(None))),
+            CompletionResolution::Resolved(mut item) => {
+                completion::bound_display(&mut item, &redactions);
+                Ok(Json(ResolveCompletionResult::new(Some(item))))
             }
-            // Each bounded item is larger than any omission-count digit increase.
-            // Removing the tail therefore finds the longest fitting provider prefix.
-            let _ = result.items.pop();
-            result.omitted_count = result.omitted_count.saturating_add(1);
         }
     }
 
@@ -2075,7 +2132,7 @@ impl McplsServer {
 
     /// Get signature help at a position.
     #[tool(
-        description = concat!("Signature help at position. Returns parameter info, active signature/parameter, and documentation while typing a call. ", indexing_note!(), " `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted."),
+        description = concat!("Signature help for a call. Returns signatures, documentation, and active indices. A parameter label may be absent when its provider offsets are invalid. ", indexing_note!(), " `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted."),
         title = "Signature Help"
     )]
     async fn get_signature_help(
@@ -2320,7 +2377,7 @@ impl McplsServer {
 
     /// Get inlay hints for a range.
     #[tool(
-        description = concat!("Inlay hints in range. Returns inferred type/parameter annotations the editor would render inline. Capped at a fixed maximum; `truncated: true` on the result means more hints exist than are returned. The end line must exist in the file; a line past the end is rejected as invalid params. ", indexing_note!(), " ", positions_note_request!()),
+        description = concat!("Inlay hints in range. Positions are 1-based. Kind 1 is a type and kind 2 is a parameter. Capped at a fixed maximum; `truncated: true` on the result means more hints exist than are returned. The end line must exist in the file; a line past the end is rejected as invalid params. ", indexing_note!(), " ", positions_note_request!()),
         title = "Inlay Hints"
     )]
     async fn get_inlay_hints(
@@ -4185,6 +4242,7 @@ mod tests {
                         trigger: None,
                         limit: 20,
                         include_documentation: false,
+                        include_completion_refs: false,
                     }))
                     .await
                     .map(|_| ()),
@@ -5179,6 +5237,7 @@ mod tests {
             trigger: None,
             limit: 20,
             include_documentation: false,
+            include_completion_refs: false,
         });
 
         let result = server.get_completions(params).await;
@@ -6549,6 +6608,7 @@ sleep 0.3
             ("rename_symbol", true, false, true),
             ("preview_file_move", true, false, true),
             ("get_completions", true, false, true),
+            ("resolve_completion", true, false, true),
             ("get_document_symbols", true, false, true),
             ("get_document_outline", true, false, true),
             ("format_document", true, false, true),
@@ -7866,9 +7926,9 @@ sleep 0.3
                 assert_eq!(
                     tools.len(),
                     if profile == ToolProfile::Agent {
-                        36
+                        37
                     } else {
-                        39
+                        40
                     }
                 );
                 let supported = tools_call_over_the_wire(
@@ -7940,7 +8000,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 36);
+            assert_eq!(tools.len(), 37);
             assert!(
                 !tools
                     .iter()
@@ -7954,7 +8014,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 36);
+            assert_eq!(tools.len(), 37);
             assert!(
                 !tools
                     .iter()
@@ -8092,6 +8152,7 @@ sleep 0.3
             assert_eq!(value["items"][0]["detail"], "");
             assert!(value["items"][0]["documentation"].is_null());
             assert_eq!(value["items"][0]["truncated_fields"], serde_json::json!([]));
+            assert!(value["items"][0].get("completion_ref").is_none());
             assert_eq!(value["provider_is_incomplete"], signal);
             assert_eq!(value["omitted_count"], 1);
             assert_eq!(value["truncated"], true);
@@ -8114,6 +8175,153 @@ sleep 0.3
             assert_eq!(value["omitted_count"], 0);
             assert_eq!(value["truncated"], false);
         }
+    }
+
+    async fn serve_selected_completion_provider(
+        mut fake: crate::test_lsp::FakeServer,
+        items: serde_json::Value,
+        seen: Arc<Mutex<Vec<serde_json::Value>>>,
+    ) {
+        use serde_json::json;
+
+        use crate::test_lsp::{read_framed_message, write_error_response, write_response};
+
+        let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+        loop {
+            let request = read_framed_message(&mut wire).await;
+            if request.get("id").is_none() {
+                continue;
+            }
+            seen.lock().await.push(request.clone());
+            match request["method"].as_str().unwrap() {
+                "textDocument/completion" => {
+                    write_response(&mut fake.read_half_stdin, &request["id"], items.clone()).await;
+                }
+                "completionItem/resolve" if request["params"]["data"]["id"] == "first" => {
+                    write_response(&mut fake.read_half_stdin, &request["id"], json!({
+                        "label":"same", "documentation":{"kind":"markdown","value":"selected docs"},
+                        "data":{"id":"first"}, "insertText":"hidden"
+                    })).await;
+                }
+                "completionItem/resolve" => {
+                    write_error_response(
+                        &mut fake.read_half_stdin,
+                        &request["id"],
+                        -32802,
+                        "provider cancelled selection",
+                    )
+                    .await;
+                }
+                method => panic!("unexpected LSP request: {method}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_selected_completion_sends_exact_item_once_and_rejects_stale_reference() {
+        use rmcp::ServiceExt as _;
+        use rmcp::service::ServiceError;
+        use serde_json::json;
+
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    completion_provider: Some(lsp_types::CompletionOptions {
+                        resolve_provider: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let original = json!({"label":"same", "detail":null, "providerExtension":[1, null],
+            "data":{"id":"first"}, "insertText":"insert-only"});
+        let duplicate = json!({"label":"same", "data":{"id":"second"}});
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        let fake = fixture.fake_servers.pop().unwrap();
+        let items = json!([original, duplicate]);
+        let responder = tokio::spawn(serve_selected_completion_provider(fake, items, seen));
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let per_session = fixture.server.for_new_session();
+        let serving = tokio::spawn(async move {
+            per_session
+                .serve(tokio::io::split(server_io))
+                .await
+                .unwrap()
+                .waiting()
+                .await
+                .unwrap();
+        });
+        let client = ().serve(tokio::io::split(client_io)).await.unwrap();
+        let call = |name: &'static str, args: serde_json::Value| {
+            client.call_tool(
+                CallToolRequestParams::new(name).with_arguments(args.as_object().unwrap().clone()),
+            )
+        };
+        let listed = call(
+            "get_completions",
+            json!({
+                "file_path": fixture.file, "line":1, "character":1, "include_completion_refs":true
+            }),
+        )
+        .await
+        .unwrap()
+        .structured_content
+        .unwrap();
+        let select = |reference: &serde_json::Value| {
+            json!({
+                "file_path": fixture.file, "completion_ref":reference
+            })
+        };
+        let first = &listed["items"][0]["completion_ref"];
+        let second = &listed["items"][1]["completion_ref"];
+        assert!(
+            first.is_string() && second.is_string() && first != second,
+            "{listed}"
+        );
+        assert!(listed["items"][0].get("data").is_none(), "{listed}");
+
+        let error = call("resolve_completion", select(second))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("provider cancelled selection"),
+            "{error}"
+        );
+        let resolved = call("resolve_completion", select(first)).await.unwrap();
+        assert_eq!(
+            resolved.structured_content.unwrap(),
+            json!({
+                "status":"resolved","item":{"label":"same","kind":null,"detail":null,
+                "documentation":"selected docs","truncated_fields":[]}
+            })
+        );
+
+        std::fs::write(&fixture.file, "fn replaced() {}").unwrap();
+        let error = call("resolve_completion", select(first)).await.unwrap_err();
+        assert_matches!(error, ServiceError::McpError(error) if error.code == ErrorCode::INVALID_PARAMS && error.message.contains("stale"));
+        let another_session = tools_call_over_the_wire(
+            fixture.server.for_new_session(),
+            json!({"name":"resolve_completion","arguments":select(second)}),
+        )
+        .await;
+        assert_eq!(
+            another_session["error"]["data"]["code"],
+            "stale_completion_ref"
+        );
+
+        let seen = requests.lock().await;
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(seen[0]["method"], "textDocument/completion");
+        assert_eq!(seen[1]["params"], duplicate);
+        assert_eq!(seen[2]["params"], original);
+        responder.abort();
+        serving.abort();
     }
 
     #[tokio::test]
@@ -8168,6 +8376,8 @@ sleep 0.3
             serde_json::json!({"limit": "20"}),
             serde_json::json!({"include_documentation": null}),
             serde_json::json!({"include_documentation": 1}),
+            serde_json::json!({"include_completion_refs": null}),
+            serde_json::json!({"include_completion_refs": 1}),
             serde_json::json!({"unexpected": true}),
         ] {
             let (result, requests) = completions_wire_call(serde_json::json!([]), options).await;
@@ -9830,6 +10040,14 @@ sleep 0.3
                     trigger: None,
                     limit: 20,
                     include_documentation: false,
+                    include_completion_refs: false,
+                }))
+                .await
+                .map(|_| ()),
+            McpTool::ResolveCompletion => server
+                .resolve_completion(Parameters(ResolveCompletionParams {
+                    file_path: file.to_path_buf(),
+                    completion_ref: "unavailable".to_owned(),
                 }))
                 .await
                 .map(|_| ()),
@@ -10131,7 +10349,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 36);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 37);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

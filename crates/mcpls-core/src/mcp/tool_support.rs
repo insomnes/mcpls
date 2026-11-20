@@ -49,6 +49,7 @@ pub(super) enum McpTool {
     RenameSymbol,
     PreviewFileMove,
     GetCompletions,
+    ResolveCompletion,
     GetDocumentSymbols,
     GetDocumentOutline,
     FormatDocument,
@@ -82,7 +83,7 @@ pub(super) enum McpTool {
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 39] = [
+    pub(super) const ALL: [Self; 40] = [
         Self::GetSymbolContext,
         Self::GetHover,
         Self::GetDefinition,
@@ -93,6 +94,7 @@ impl McpTool {
         Self::RenameSymbol,
         Self::PreviewFileMove,
         Self::GetCompletions,
+        Self::ResolveCompletion,
         Self::GetDocumentSymbols,
         Self::GetDocumentOutline,
         Self::FormatDocument,
@@ -168,6 +170,7 @@ impl McpTool {
             Self::RenameSymbol => ("rename_symbol", Document(ToolKind::Rename)),
             Self::PreviewFileMove => ("preview_file_move", Document(ToolKind::FileMove)),
             Self::GetCompletions => ("get_completions", Document(ToolKind::Completions)),
+            Self::ResolveCompletion => ("resolve_completion", Document(ToolKind::Completions)),
             Self::GetDocumentSymbols => {
                 ("get_document_symbols", Document(ToolKind::DocumentSymbols))
             }
@@ -227,6 +230,11 @@ impl McpTool {
     /// The capability this tool's call is gated on, or `None` when it is
     /// ungated or answered locally.
     pub(super) const fn capability(self) -> Option<Capability> {
+        // A continuation checks its retained provider, and reports an
+        // unsupported resolve as a result.
+        if matches!(self, Self::ResolveCompletion) {
+            return None;
+        }
         match self.spec().backend {
             ToolBackend::Document(kind) | ToolBackend::Workspace(kind) => {
                 Capability::for_tool(kind)

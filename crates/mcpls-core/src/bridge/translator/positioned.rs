@@ -625,7 +625,7 @@ impl Translator {
         }
     }
 
-    async fn positioned_params<P: FromPosition>(
+    pub(super) async fn positioned_params<P: FromPosition>(
         &self,
         server_id: &ServerId,
         uri: &lsp_types::Uri,

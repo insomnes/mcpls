@@ -698,7 +698,7 @@ impl LspClient {
     /// Send request and wait for response with timeout.
     ///
     /// Automatically retries up to 3 times when the server returns error code
-    /// -32802 (`ServerCancelled`, except file-move previews) or -32801 (`ContentModified`,
+    /// -32802 (`ServerCancelled`, except file moves and selected completion resolve) or -32801 (`ContentModified`,
     /// only for methods in `CONTENT_MODIFIED_RETRY_METHODS`) -- gated by
     /// `data.retriggerRequest` when present -- using exponential backoff
     /// starting at 500 ms. Both codes share the same attempt budget: a
@@ -861,12 +861,16 @@ impl LspClient {
     }
 
     /// Whether `response` permits a retry. A cancellation stops a file-move
-    /// preview. A modified document permits retry only for methods in
+    /// preview or selected completion resolve. A modified document permits retry only for methods in
     /// [`CONTENT_MODIFIED_RETRY_METHODS`]. A server can disable either retry.
     fn retries(response: &JsonRpcError, method: &str) -> bool {
         let method = LspRequestMethod::from(method);
         let retryable = match LspErrorCodes::from(response.code) {
-            LspErrorCodes::ServerCancelled => method != LspRequestMethod::WorkspaceWillRenameFiles,
+            LspErrorCodes::ServerCancelled => !matches!(
+                method,
+                LspRequestMethod::WorkspaceWillRenameFiles
+                    | LspRequestMethod::CompletionItemResolve
+            ),
             LspErrorCodes::ContentModified => CONTENT_MODIFIED_RETRY_METHODS.contains(&method),
             _ => false,
         };

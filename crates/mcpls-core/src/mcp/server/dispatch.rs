@@ -258,6 +258,9 @@ impl McplsServer {
                 | "get_tool_support"
         );
         let arguments = request.arguments.get_or_insert_default();
+        if name == "resolve_completion" {
+            super::completion::validate_resolve_arguments(arguments)?;
+        }
         if name == "get_workspace_diagnostics" {
             workspace_diagnostics_server(arguments)?;
         }
@@ -492,6 +495,7 @@ impl McplsServer {
                 "get_server_logs"
                     | "get_server_messages"
                     | "get_cached_diagnostics"
+                    | "resolve_completion"
                     | "restart_server"
             );
         let tool = super::McpTool::ALL
@@ -547,7 +551,9 @@ impl McplsServer {
         } else {
             std::collections::HashMap::new()
         };
-        let binding_tool = if bundle_calls {
+        let binding_tool = if name == "resolve_completion" {
+            None
+        } else if bundle_calls {
             Some(crate::config::ToolKind::CallHierarchy)
         } else {
             tool
@@ -923,6 +929,7 @@ impl McplsServer {
         server
             .diagnostics_generation
             .clone_from(&lease.resident.generation);
+        server.completion_refs = self.completion_refs.clone();
         let server = Arc::new(server);
         sessions.insert(lease.resident.generation.clone(), server.clone());
         drop(sessions);

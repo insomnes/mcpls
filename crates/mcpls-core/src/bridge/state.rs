@@ -1481,12 +1481,32 @@ impl DocumentTracker {
     /// - The `didOpen`/`didChange` notification fails to send
     /// - Resource limits are exceeded
     pub async fn ensure_open(&self, request: OpenRequest<'_>) -> Result<Uri> {
+        let _path_guard = self.lock_path(request.path.as_path()).await;
+        self.ensure_open_locked(request).await
+    }
+
+    async fn ensure_open_locked(&self, request: OpenRequest<'_>) -> Result<Uri> {
         let path = request.path.as_path();
-        let _path_guard = self.lock_path(path).await;
         let generation = self.generation(request.server);
         let decision = self.disk_phase(request.gate(), request.access).await?;
         self.sync_phase(path, request.server, request.client, decision, generation)
             .await
+    }
+
+    /// Refresh a tracked document and pin its observed version for a follow-up request.
+    /// Keep its ordinary synchronization lock until the caller drops the guard.
+    pub(crate) async fn pin_current(
+        &self,
+        request: OpenRequest<'_>,
+        expected: SweepState,
+    ) -> Result<Option<PathLockGuard<'_>>> {
+        let path = request.path.as_path();
+        let guard = self.lock_path(path).await;
+        if self.sweep_state(path, request.server) != Some(expected) {
+            return Ok(None);
+        }
+        self.ensure_open_locked(request).await?;
+        Ok((self.sweep_state(path, request.server) == Some(expected)).then_some(guard))
     }
 
     /// Disk-verification phase of `ensure_open`: decides the version `path`
@@ -2073,7 +2093,7 @@ impl Drop for InFlightGuard {
 /// other caller holds a clone of the same `Arc` -- see the `Drop` impl for
 /// why that check is race-free.
 #[derive(Debug)]
-struct PathLockGuard<'a> {
+pub struct PathLockGuard<'a> {
     path_locks: &'a StdMutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>,
     path: PathBuf,
     arc: Arc<AsyncMutex<()>>,

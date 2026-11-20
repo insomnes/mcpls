@@ -1021,6 +1021,24 @@ impl LspServer {
         command
     }
 
+    /// Completion may defer display fields until one item is selected.
+    fn completion_capabilities() -> lsp_types::CompletionClientCapabilities {
+        lsp_types::CompletionClientCapabilities {
+            dynamic_registration: Some(false),
+            completion_item: Some(lsp_types::ClientCompletionItemOptions {
+                documentation_format: Some(vec![
+                    lsp_types::MarkupKind::Markdown,
+                    lsp_types::MarkupKind::PlainText,
+                ]),
+                resolve_support: Some(lsp_types::ClientCompletionItemResolveOptions {
+                    properties: vec!["detail".to_owned(), "documentation".to_owned()],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     /// Folding ranges with columns (`lineFoldingOnly: false`), the three
     /// standard kinds, and collapsed text.
     fn folding_range_capabilities() -> lsp_types::FoldingRangeClientCapabilities {
@@ -1100,6 +1118,7 @@ impl LspServer {
                         lsp_types::MarkupKind::PlainText,
                     ]),
                 }),
+                completion: Some(Self::completion_capabilities()),
                 definition: Some(lsp_types::DefinitionClientCapabilities {
                     dynamic_registration: Some(false),
                     link_support: Some(true),

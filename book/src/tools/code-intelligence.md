@@ -297,8 +297,9 @@ Returns API-discovery completion candidates at a position. Add `trigger` (for ex
 ```
 
 By default, return the first 20 provider candidates without documentation. Set `limit`
-to an integer from 1 through 100, and set `include_documentation: true` to request
-documentation. Null and invalid values for these options are rejected.
+to an integer from 1 through 100. Set `include_documentation: true` to show
+documentation the provider included in the list. Null and invalid option
+values are rejected.
 
 ```json
 { "file_path": "/work/app/src/billing.rs", "line": 57, "character": 18, "limit": 40, "include_documentation": true }
@@ -306,9 +307,9 @@ documentation. Null and invalid values for these options are rejected.
 
 Each item has `label`, numeric `kind` (2 method, 3 function, 5 field, 6 variable,
 7 class, 9 module), `detail`, `documentation`, and `truncated_fields`. Missing
-kind, detail, and documentation are null. Disabled documentation is null; enabled
-empty documentation stays an empty string. Provider order and duplicate labels
-are preserved. Results do not include insertion text, snippets, or completion edits.
+kind, detail, and documentation are null. Disabled documentation is null.
+Enabled empty documentation stays an empty string. Duplicate labels are
+preserved. Results omit insertion text, snippets, and completion edits.
 
 After existing display-prose redaction, labels, details, and documentation have
 UTF-8 byte limits of 512, 2048, and 4096. Clipping keeps the longest Unicode-scalar
@@ -317,7 +318,7 @@ A clipped label is partial and must not be used as an exact source replacement.
 Labels retain their existing identifier-payload redaction semantics.
 
 The final compact structured-result JSON is at most 65536 UTF-8 bytes, including
-JSON escaping and all metadata. The result retains the longest provider prefix
+JSON escaping and all metadata. The result retains the longest ranked prefix
 that fits. `omitted_count` counts provider candidates excluded by count or byte
 limits. `truncated` is true exactly when candidates were omitted or retained
 fields were clipped. Selecting documentation off does not itself mean truncation.
@@ -333,6 +334,37 @@ response, provider work, process memory, or the complete MCP envelope. Completio
 requests retain their 10-second cap regardless of `request_timeout_seconds`.
 
 Every provider response is ranked before count and byte limits, including responses with 100 or fewer items. Ranking uses the identifier immediately before the UTF-16 cursor: Unicode alphanumeric characters, underscore, and dollar. The last 256 characters are lowercased. `filterText` (else label) matches by prefix, subsequence, then nonmatch; each tier sorts by case-sensitive `sortText` (else label), with stable equal keys. An empty or unavailable prefix sorts all candidates by `sortText` or label. The default limit is 20; `limit` accepts 1 through 100. Documentation is disabled unless `include_documentation:true`. After redaction, labels, details, and documentation are clipped to 512, 2048, and 4096 UTF-8 bytes. The longest ranked prefix within 65536 compact JSON bytes is retained. `omitted_count`, `truncated`, and `truncated_fields` describe local omissions and clipping. `provider_is_incomplete` retains the provider boolean, or null for bare arrays and null responses. Insertion text, snippets, and edits are omitted. These bounds do not bound the original LSP response or provider work.
+
+Set `include_completion_refs: true` to receive opaque `completion_ref` values
+for selectable items. This option defaults to false and is independent of
+`include_documentation`. Duplicate labels have distinct references.
+The list includes reference bytes in its existing output budget and makes
+zero resolve requests. A large provider item or degraded request position can
+leave an item without a reference.
+
+## resolve_completion
+
+Retrieve deferred detail or documentation for one selected completion. Pass
+the original absolute `file_path` from the list request and copy the candidate's
+`completion_ref` unchanged. Use the same stdio or initialized HTTP session.
+Both tool profiles expose this tool.
+
+```json
+{ "file_path": "/work/app/src/billing.ts", "completion_ref": "<copy from get_completions>" }
+```
+
+`resolved` returns `item` with `label`, `kind`, `detail`, `documentation`, and
+`truncated_fields`. The same display redaction and field limits apply.
+Markup documentation is returned as text. `unsupported` returns a null item
+when the live provider does not advertise resolve. Provider failures return
+MCP errors. Resolve sends one request to the original provider, even if
+documentation was omitted from the listing. It runs no completion search
+and returns no insertion text, edits, commands, or provider data.
+
+References can be evicted from the session's bounded memory. An expired or
+unknown reference, provider restart, or detected change to the query
+document produces a stale-reference error. To retry, list again with
+`include_completion_refs: true` and select from the new results.
 
 ## get_inlay_hints
 

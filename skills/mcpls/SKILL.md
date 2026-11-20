@@ -40,7 +40,7 @@ For the complete MCP tool and parameter reference, see
 If the bridge is configured with `mcp.tool_prefix`, every tool name listed there gains
 that prefix (`{tool_prefix}_{tool}`).
 
-The default `[mcp].tool_profile = "agent"` exposes 36 tools. Set `tool_profile = "full"` to restore all 39 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; tools remain visible when a selected server lacks the required capability. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 37 tools. Set `tool_profile = "full"` to restore all 40 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; tools remain visible when a selected server lacks the required capability. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 `rename_symbol` resolves a name or position and prepares on the rename server when supported.
 Its `proposed` result includes the queried `position`, `preparation`, and `changes`.
@@ -71,6 +71,19 @@ Batch `results` preserve input order and duplicates. Each item has `input_index`
 Batch output retains at most 100 diagnostics per file, 256 overall, 8192 compact JSON UTF-8 bytes per complete diagnostic, and 131072 bytes per structured result. Budgets allocate in input order and omit whole diagnostics. Error objects use at most 1024 bytes; shortening sets item `truncated`. Outer `truncated` means at least one item was shortened. An empty published report means clean only when untruncated; pending, evicted, failed, or truncated outcomes do not establish cleanliness. One batch call does not guarantee less backend work or stronger freshness. Existing single-file output stays compatible.
 
 `get_completions` returns API-discovery candidates ranked by typed-prefix match and sortText, without insertion text or snippet edits. `limit` accepts integers 1 through 100 (default 20); `include_documentation` defaults to false. Null or invalid option values fail. Disabled or absent documentation is null; enabled empty documentation remains empty.
+
+Set `include_completion_refs: true` to select one candidate for deferred detail
+or documentation. Pass its exact `completion_ref` and the original absolute
+`file_path` to `resolve_completion` in the same stdio or initialized HTTP session.
+Duplicate labels have distinct references. The reference may be absent for an
+oversized provider item or degraded query position. Reference bytes count
+toward the list budget. Listing makes zero resolve requests.
+
+`resolve_completion` returns bounded display fields when `status` is `resolved`.
+An `unsupported` provider returns a null item. Provider failures return MCP
+errors. The tool runs no completion search and applies no edits or commands.
+List again after a stale-reference error, which can follow a provider restart,
+detected document change, session change, or bounded memory eviction.
 
 Completion labels, details, and documentation are clipped at 512, 2048, and 4096 UTF-8 bytes after existing display redaction. Labels retain identifier-payload redaction semantics. Clipping keeps a Unicode-scalar prefix without an ellipsis; a clipped label is partial, not an exact source replacement. Each item lists clipped fields in `truncated_fields`, in label/detail/documentation order.
 

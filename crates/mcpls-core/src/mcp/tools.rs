@@ -760,6 +760,9 @@ position_wire! {
         #[schemars(description = "Include bounded documentation; default false.")]
         #[serde(default)]
         include_documentation: bool,
+        #[schemars(description = "Include references for selecting one item in this session; default false.")]
+        #[serde(default)]
+        include_completion_refs: bool,
     }
 }
 
@@ -776,6 +779,8 @@ pub struct CompletionsParams {
     pub limit: usize,
     /// Include documentation only when true; default false.
     pub include_documentation: bool,
+    /// Include completion references only when true; default false.
+    pub include_completion_refs: bool,
 }
 
 const fn completion_limit() -> usize {
@@ -798,8 +803,20 @@ impl TryFrom<CompletionsWire> for CompletionsParams {
             trigger: wire.trigger,
             limit: wire.limit,
             include_documentation: wire.include_documentation,
+            include_completion_refs: wire.include_completion_refs,
         })
     }
+}
+
+/// Parameters for the `resolve_completion` tool.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveCompletionParams {
+    /// Original absolute path from the completion query.
+    pub file_path: PathBuf,
+    /// Reference returned with the selected completion item.
+    #[schemars(length(min = 1, max = 256))]
+    pub completion_ref: String,
 }
 
 /// Parameters for the `get_folding_ranges` tool.

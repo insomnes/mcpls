@@ -106,6 +106,14 @@ Do not add this as a second `typescript` entry next to the default one. Two entr
 
 The native server reports diagnostics through pull requests only, does not support type hierarchy, and loads no tsconfig plugins.
 
+## Deferred completion documentation
+
+To read JSDoc deferred by `typescript-language-server`, list candidates with
+`include_completion_refs: true` and select one with `resolve_completion`.
+The provider may return documentation at resolve time even when the listing
+shows a null documentation field. Use the same MCP session and file path.
+See [Completion tools](../tools/code-intelligence.md#resolve_completion).
+
 ## What's Next
 
 Next, see how mcpls makes sure no language server process outlives it: [Process Lifetime](process-lifetime.md).

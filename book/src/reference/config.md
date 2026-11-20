@@ -2,7 +2,7 @@
 
 In this chapter you find every key of `mcpls.toml`, with type, default and rules. For a guided introduction read [Configuration](../guide/configuration.md) first. Unknown keys are rejected at startup.
 
-The default `[mcp].tool_profile = "agent"` exposes 36 tools. Set `tool_profile = "full"` to restore all 39 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; tools remain visible when a selected server lacks the required capability. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 37 tools. Set `tool_profile = "full"` to restore all 40 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; tools remain visible when a selected server lacks the required capability. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 ## File structure
 
@@ -28,7 +28,7 @@ Controls the tool catalog and the text mcpls reports about itself. Every field i
 | `title` | `serverInfo.title` | `MCPLS - MCP to LSP Bridge` | 128 bytes |
 | `description` | `serverInfo.description` | The crate description | 1024 bytes |
 | `instructions` | `ServerInfo.instructions` | Built-in capability text | 4096 bytes |
-| `tool_profile` | Static tool catalog (`agent` or `full`) | `agent` (36 tools) | — |
+| `tool_profile` | Static tool catalog (`agent` or `full`) | `agent` (37 tools) | — |
 | `tool_prefix` | Every tool name, as `{tool_prefix}_{tool}` | No prefix | 32 bytes |
 
 Limits are in UTF-8 bytes. A whitespace-only value is rejected as empty; omit the key instead. `instructions` replaces the built-in text rather than appending to it. `tool_prefix` may contain only ASCII letters, digits, `_` and `-`, and must start and end with a letter or digit.
@@ -314,7 +314,7 @@ Restricts a server to exactly the listed routing values; unset means catch-all, 
 | `diagnostics` | `get_diagnostics` and `get_cached_diagnostics` |
 | `rename` | `rename_symbol` |
 | `file_move` | `preview_file_move` |
-| `completions` | `get_completions` |
+| `completions` | `get_completions`, `resolve_completion` |
 | `signature_help` | `get_signature_help` |
 | `document_symbols` | `get_document_symbols` |
 | `workspace_symbols` | `workspace_symbol_search` |

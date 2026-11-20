@@ -927,9 +927,9 @@ pub struct Completion {
 
 /// Result of a completions request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CompletionsResult {
+pub struct CompletionsResult<T = Completion> {
     /// List of completion items.
-    pub items: Vec<Completion>,
+    pub items: Vec<T>,
     /// Explicit provider completeness signal; null for bare arrays and null responses.
     #[schemars(required, extend("type" = ["boolean", "null"]))]
     pub provider_is_incomplete: Option<bool>,
@@ -942,6 +942,18 @@ pub struct CompletionsResult {
     /// Tells whether the queried position or only the returned offsets are affected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub positions_degraded: Option<PositionDegradation>,
+}
+
+impl<T> CompletionsResult<T> {
+    pub(crate) fn map_items<U>(self, map: impl FnMut(T) -> U) -> CompletionsResult<U> {
+        CompletionsResult {
+            items: self.items.into_iter().map(map).collect(),
+            provider_is_incomplete: self.provider_is_incomplete,
+            omitted_count: self.omitted_count,
+            truncated: self.truncated,
+            positions_degraded: self.positions_degraded,
+        }
+    }
 }
 
 /// A document symbol.

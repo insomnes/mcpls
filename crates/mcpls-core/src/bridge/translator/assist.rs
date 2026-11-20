@@ -1,6 +1,10 @@
 //! Completions, signature help, and inlay hints handlers.
 
-use lsp_types::CompletionTriggerKind;
+use std::path::PathBuf;
+
+use lsp_types::{CompletionTriggerKind, Request};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::Translator;
 use super::dto::{
@@ -8,11 +12,15 @@ use super::dto::{
     PositionRange, SignatureHelpResult, SignatureInfo, SignatureParameter, lsp_kind_to_u32,
 };
 use super::navigation::ItemBudget;
-use super::positioned::Positioned;
+use super::positioned::{Positioned, budgeted};
 use super::routing::{Capability, IndexingGate};
 use crate::bridge::encoding::{LabelOffsets, PositionEncoding, ServerColumn, Utf16Column};
-use crate::bridge::{ClientPath, Indexed};
+use crate::bridge::state::SweepState;
+use crate::bridge::{Access, ClientPath, Indexed, OpenRequest, WorkspacePath};
+use crate::config::ServerId;
 use crate::error::Result;
+use crate::lsp::{ConnectionId, LspClient};
+use crate::util::lock_std;
 
 /// Convert LSP `Documentation` to a plain string.
 fn extract_documentation(doc: lsp_types::Documentation) -> String {
@@ -87,18 +95,102 @@ fn typed_prefix(line: &str, utf16_column: Utf16Column) -> &str {
 /// Ranks every response by [`PrefixMatch`]
 /// against `prefix` and then by `sortText` (else label) before the cut, so a
 /// match for what was typed survives the caller's count and byte limits.
-fn rank_completions(
-    mut items: Vec<lsp_types::CompletionItem>,
+fn rank_completions<T>(
+    mut items: Vec<T>,
     prefix: &str,
-) -> Vec<lsp_types::CompletionItem> {
+    get_item: impl Fn(&T) -> &lsp_types::CompletionItem,
+) -> Vec<T> {
     let prefix = fold_prefix(prefix);
-    items.sort_by_cached_key(|item| {
+    items.sort_by_cached_key(|candidate| {
+        let item = get_item(candidate);
         let filter = item.filter_text.as_deref().unwrap_or(&item.label);
         let rank = item.sort_text.as_deref().unwrap_or(&item.label);
         (PrefixMatch::of(&prefix, filter), rank.to_owned())
     });
     items
 }
+
+fn completion_context(trigger: CompletionTrigger) -> lsp_types::CompletionContext {
+    lsp_types::CompletionContext {
+        trigger_kind: CompletionTriggerKind::TriggerCharacter,
+        trigger_character: Some(trigger.into_string()),
+    }
+}
+
+/// Completion presentation, shared by listing and selected-item resolve.
+fn display_completion(item: lsp_types::CompletionItem, include_documentation: bool) -> Completion {
+    Completion {
+        label: item.label,
+        kind: item.kind.map(lsp_kind_to_u32),
+        detail: item.detail,
+        documentation: if include_documentation {
+            item.documentation.map(extract_documentation)
+        } else {
+            None
+        },
+        truncated_fields: vec![],
+    }
+}
+
+fn completion_result<T>(
+    items: Vec<T>,
+    limit: usize,
+    provider_is_incomplete: Option<bool>,
+    positions_degraded: Option<super::dto::PositionDegradation>,
+) -> CompletionsResult<T> {
+    let omitted_count = items.len().saturating_sub(limit);
+    CompletionsResult {
+        items: items.into_iter().take(limit).collect(),
+        provider_is_incomplete,
+        omitted_count,
+        truncated: omitted_count > 0,
+        positions_degraded,
+    }
+}
+
+/// Request completion without discarding provider extensions or explicit nulls.
+struct RawCompletionRequest;
+
+impl Request for RawCompletionRequest {
+    const METHOD: lsp_types::LspRequestMethod<'static> = lsp_types::CompletionRequest::METHOD;
+    const MESSAGE_DIRECTION: lsp_types::MessageDirection =
+        lsp_types::CompletionRequest::MESSAGE_DIRECTION;
+    type Params = lsp_types::CompletionParams;
+    type Result = Option<RawCompletionResponse>;
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum RawCompletionResponse {
+    Array(Vec<Value>),
+    List {
+        #[serde(rename = "isIncomplete")]
+        is_incomplete: bool,
+        items: Vec<Value>,
+    },
+}
+
+/// The file and live LSP connection that produced one completion list.
+pub struct CompletionOrigin {
+    pub(crate) path: PathBuf,
+    server: ServerId,
+    connection: ConnectionId,
+    document: SweepState,
+}
+
+pub struct CompletionCandidate {
+    pub(crate) display: Completion,
+    pub(crate) item: Option<Box<[u8]>>,
+}
+
+pub enum CompletionResolution {
+    Stale,
+    Unsupported,
+    Resolved(Completion),
+}
+
+/// Raw data retained for a single candidate. Each session also caps the total entry count.
+const MAX_COMPLETION_ITEM_BYTES: usize = 32 * 1024;
 
 /// Most parameters kept per signature; the rest are dropped (logged).
 const MAX_SIGNATURE_PARAMETERS: usize = 256;
@@ -205,10 +297,7 @@ impl Translator {
         limit: usize,
         include_documentation: bool,
     ) -> Result<CompletionsResult> {
-        let context = trigger.map(|trigger_char| lsp_types::CompletionContext {
-            trigger_kind: CompletionTriggerKind::TriggerCharacter,
-            trigger_character: Some(trigger_char.into_string()),
-        });
+        let context = trigger.map(completion_context);
 
         let Positioned {
             result: response,
@@ -231,36 +320,162 @@ impl Translator {
             None => (vec![], None),
         };
 
-        let prefix = self
-            .document_tracker
-            .line_text(doc.path(), position.lsp_line())
-            .map_or_default(|line| typed_prefix(&line, position.lsp_character()).to_owned());
-        let items = rank_completions(items, &prefix);
-        let omitted_count = items.len().saturating_sub(limit);
-
-        let result = CompletionsResult {
-            items: items
-                .into_iter()
-                .take(limit)
-                .map(|item| Completion {
-                    label: item.label,
-                    kind: item.kind.map(lsp_kind_to_u32),
-                    detail: item.detail,
-                    documentation: if include_documentation {
-                        item.documentation.map(extract_documentation)
-                    } else {
-                        None
-                    },
-                    truncated_fields: vec![],
-                })
-                .collect(),
+        let prefix = self.completion_prefix(doc.path(), position);
+        let items = rank_completions(items, &prefix, |item| item);
+        Ok(completion_result(
+            items,
+            limit,
             provider_is_incomplete,
-            omitted_count,
-            truncated: omitted_count > 0,
-            positions_degraded: ctx.positions_degraded(),
-        };
+            ctx.positions_degraded(),
+        )
+        .map_items(|item| display_completion(item, include_documentation)))
+    }
 
-        Ok(result)
+    pub(crate) async fn handle_selectable_completions(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        trigger: Option<CompletionTrigger>,
+        limit: usize,
+        include_documentation: bool,
+    ) -> Result<(
+        CompletionsResult<CompletionCandidate>,
+        Option<CompletionOrigin>,
+    )> {
+        let doc = self
+            .prepare_positioned_document(
+                &file_path,
+                IndexingGate::Required(Capability::Completions),
+                &[position],
+            )
+            .await?;
+        let document = self
+            .document_tracker
+            .sweep_state(doc.path(), doc.server_id());
+        let (ctx, params) = self
+            .positioned_params::<lsp_types::CompletionParams>(
+                doc.server_id(),
+                doc.uri(),
+                position,
+                trigger.map(completion_context),
+            )
+            .await;
+        let response = budgeted::<RawCompletionRequest>(doc.client(), params).await?;
+
+        let (items, provider_is_incomplete) = match response {
+            Some(RawCompletionResponse::Array(items)) => (items, None),
+            Some(RawCompletionResponse::List {
+                is_incomplete,
+                items,
+            }) => (items, Some(is_incomplete)),
+            None => (vec![], None),
+        };
+        let items = items
+            .into_iter()
+            .map(|raw| Ok((lsp_types::CompletionItem::deserialize(&raw)?, raw)))
+            .collect::<Result<Vec<_>>>()?;
+        let prefix = self.completion_prefix(doc.path(), position);
+        let items = rank_completions(items, &prefix, |(item, _)| item);
+        let positions_degraded = ctx.positions_degraded();
+        let origin = document
+            .filter(|state| matches!(state, SweepState::Current { .. }))
+            .filter(|state| {
+                positions_degraded.is_none()
+                    && self
+                        .document_tracker
+                        .sweep_state(doc.path(), doc.server_id())
+                        == Some(*state)
+            })
+            .map(|document| CompletionOrigin {
+                path: doc.path().to_path_buf(),
+                server: doc.server_id().clone(),
+                connection: doc.client().connection_id(),
+                document,
+            });
+        let items = completion_result(items, limit, provider_is_incomplete, positions_degraded)
+            .map_items(|(item, raw)| {
+                let item_bytes = origin
+                    .as_ref()
+                    .and_then(|_| serde_json::to_vec(&raw).ok())
+                    .filter(|bytes| bytes.len() <= MAX_COMPLETION_ITEM_BYTES)
+                    .map(Vec::into_boxed_slice);
+                CompletionCandidate {
+                    display: display_completion(item, include_documentation),
+                    item: item_bytes,
+                }
+            });
+        Ok((items, origin))
+    }
+
+    fn completion_prefix(&self, path: &std::path::Path, position: Position) -> String {
+        self.document_tracker
+            .line_text(path, position.lsp_line())
+            .map_or_default(|line| typed_prefix(&line, position.lsp_character()).to_owned())
+    }
+
+    fn completion_connection(&self, origin: &CompletionOrigin) -> Option<(LspClient, bool)> {
+        let mut servers = lock_std(&self.servers);
+        let client = servers.client(&origin.server)?;
+        if client.connection_id() != origin.connection {
+            return None;
+        }
+        let server = servers.server_mut(&origin.server)?;
+        if server.is_dead().unwrap_or(true) {
+            return None;
+        }
+        let supported = server
+            .capabilities()
+            .completion_provider
+            .as_ref()
+            .is_some_and(|options| options.resolve_provider == Some(true));
+        drop(servers);
+        Some((client, supported))
+    }
+
+    pub(crate) async fn handle_resolve_completion(
+        &self,
+        path: &WorkspacePath,
+        origin: &CompletionOrigin,
+        item: &[u8],
+    ) -> Result<CompletionResolution> {
+        let Some((client, supported)) = self.completion_connection(origin) else {
+            return Ok(CompletionResolution::Stale);
+        };
+        let _in_flight = self.document_tracker.mark_in_flight(path.as_path());
+        let Some(_document) = self
+            .document_tracker
+            .pin_current(
+                OpenRequest::new(
+                    path,
+                    &self.workspace_roots,
+                    &origin.server,
+                    &client,
+                    Access::Probe,
+                ),
+                origin.document,
+            )
+            .await?
+        else {
+            return Ok(CompletionResolution::Stale);
+        };
+        // Refreshing the document can await I/O. Revalidate the connection before sending.
+        if self.completion_connection(origin).is_none() {
+            return Ok(CompletionResolution::Stale);
+        }
+        if !supported {
+            return Ok(CompletionResolution::Unsupported);
+        }
+        let raw: Value = serde_json::from_slice(item)?;
+        let item: lsp_types::CompletionItem = client
+            .request(
+                lsp_types::CompletionResolveRequest::METHOD.as_str(),
+                raw,
+                client.completion_timeout(),
+            )
+            .await?;
+        Ok(CompletionResolution::Resolved(display_completion(
+            item, true,
+        )))
     }
 
     /// Handle signature help request (`textDocument/signatureHelp`).
@@ -739,7 +954,7 @@ mod tests {
 
     #[test]
     fn test_cap_keeps_the_typed_prefix_match_that_sorts_last() {
-        let items = rank_completions(flooded_items(), "getEl");
+        let items = rank_completions(flooded_items(), "getEl", |item| item);
         assert_eq!(items.len(), 300);
         assert_eq!(items[0].label, "getElementById");
     }
@@ -751,7 +966,7 @@ mod tests {
             .collect();
         items.push(completion_item("gxexteyl"));
         items.push(completion_item("getElement"));
-        let items = rank_completions(items, "getEl");
+        let items = rank_completions(items, "getEl", |item| item);
         assert_eq!(&labels(&items)[..2], ["getElement", "gxexteyl"]);
     }
 
@@ -764,7 +979,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let items = rank_completions(items, "");
+        let items = rank_completions(items, "", |item| item);
         assert_eq!(items[0].label, "z149");
         assert_eq!(items[99].label, "z50");
     }
@@ -777,7 +992,7 @@ mod tests {
             filter_text: Some("getElementById".to_owned()),
             ..Default::default()
         };
-        let items = rank_completions(items, "getEl");
+        let items = rank_completions(items, "getEl", |item| item);
         assert_eq!(items[0].label, "shown");
     }
 
@@ -788,7 +1003,7 @@ mod tests {
             .map(|index| completion_item(&format!("m{index:03}")))
             .collect();
 
-        let items = rank_completions(items, "zzz");
+        let items = rank_completions(items, "zzz", |item| item);
         assert_eq!(items[0].label, "m000");
         assert_eq!(items[99].label, "m099");
     }
@@ -800,7 +1015,7 @@ mod tests {
         assert_eq!(folded.chars().count(), MAX_PREFIX_CHARS);
         assert!(folded.chars().all(|character| character == 'a'));
 
-        let items = rank_completions(flooded_items(), &huge);
+        let items = rank_completions(flooded_items(), &huge, |item| item);
         assert_eq!(items.len(), 300);
     }
 

@@ -30,6 +30,7 @@ use crate::util::lock_std;
 
 mod addressing;
 mod assist;
+pub use assist::{CompletionOrigin, CompletionResolution};
 mod availability;
 pub mod call_graph;
 mod call_hierarchy;

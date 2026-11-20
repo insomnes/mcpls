@@ -78,7 +78,7 @@ Ask the assistant:
 
 > Which mcpls tools do you have?
 
-It lists 36 default tools (39 with the full profile) such as `get_hover`, `get_definition`, `get_references` and `get_diagnostics`. If the list is empty, see [Troubleshooting](../guide/troubleshooting.md#mcpls-does-not-appear-in-the-client).
+It lists 37 default tools (40 with the full profile) such as `get_hover`, `get_definition`, `get_references` and `get_diagnostics`. If the list is empty, see [Troubleshooting](../guide/troubleshooting.md#mcpls-does-not-appear-in-the-client).
 
 ## What's Next
 

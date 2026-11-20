@@ -3005,7 +3005,7 @@
   {
     "name": "get_completions",
     "title": "Completions",
-    "description": "Discover API candidates ranked by typed-prefix match and sortText at 1-based UTF-16 positions. limit is 1..100 (default 20); include_documentation defaults to false. trigger is 1..8 bytes or null. After redaction, label/detail/documentation caps are 512/2048/4096 UTF-8 bytes; labels retain payload handling. Return the longest prefix within 65536 compact JSON bytes. omitted_count/truncated/truncated_fields report local omissions/clipping. provider_is_incomplete preserves bool|null. Clipped labels are partial. Bounds exclude the LSP response. positions_degraded:request means an unreliable target. No edits.",
+    "description": "Discover API candidates ranked by typed-prefix match and sortText at 1-based UTF-16 positions. limit is 1..100 (default 20). include_documentation and include_completion_refs default false. Use a completion_ref with resolve_completion in the same session. trigger is 1..8 bytes or null. Display caps after redaction: 512/2048/4096 UTF-8 bytes for label/detail/documentation. The ranked prefix fits 65536 compact JSON bytes. omitted_count/truncated/truncated_fields report local limits. provider_is_incomplete preserves bool|null. positions_degraded:request means an unreliable target. No edits.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -3017,6 +3017,10 @@
         },
         "file_path": {
           "type": "string"
+        },
+        "include_completion_refs": {
+          "default": false,
+          "type": "boolean"
         },
         "include_documentation": {
           "default": false,
@@ -3050,8 +3054,11 @@
     },
     "outputSchema": {
       "$defs": {
-        "Completion": {
+        "ListedCompletion": {
           "properties": {
+            "completion_ref": {
+              "type": "string"
+            },
             "detail": {
               "type": [
                 "string",
@@ -3108,7 +3115,7 @@
       "properties": {
         "items": {
           "items": {
-            "$ref": "#/$defs/Completion"
+            "$ref": "#/$defs/ListedCompletion"
           },
           "type": "array"
         },
@@ -5811,7 +5818,7 @@
   {
     "name": "get_inlay_hints",
     "title": "Inlay Hints",
-    "description": "Inlay hints in range. Returns inferred type/parameter annotations the editor would render inline. Capped at a fixed maximum; `truncated: true` on the result means more hints exist than are returned. The end line must exist in the file; a line past the end is rejected as invalid params. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact.",
+    "description": "Inlay hints in range. Positions are 1-based. Kind 1 is a type and kind 2 is a parameter. Capped at a fixed maximum; `truncated: true` on the result means more hints exist than are returned. The end line must exist in the file; a line past the end is rejected as invalid params. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded` (non-UTF-16 servers): `\"request\"` means an unconverted query may identify a different symbol; do not trust it. `\"response\"` means returned `character` offsets may be inexact.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -5857,10 +5864,8 @@
     "outputSchema": {
       "$defs": {
         "InlayHintEntry": {
-          "description": "A single inlay hint entry.",
           "properties": {
             "kind": {
-              "description": "LSP numeric inlay-hint kind (1 = Type, 2 = Parameter, or a\nserver-defined custom value).",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -5869,29 +5874,24 @@
               ]
             },
             "label": {
-              "description": "Label text for the hint.",
               "type": "string"
             },
             "padding_left": {
-              "description": "Whether to add a space before the hint.",
               "type": [
                 "boolean",
                 "null"
               ]
             },
             "padding_right": {
-              "description": "Whether to add a space after the hint.",
               "type": [
                 "boolean",
                 "null"
               ]
             },
             "position": {
-              "$ref": "#/$defs/Position2D",
-              "description": "Position of the hint (1-based MCP)."
+              "$ref": "#/$defs/Position2D"
             },
             "tooltip": {
-              "description": "Tooltip text.",
               "type": [
                 "string",
                 "null"
@@ -5905,7 +5905,6 @@
           "type": "object"
         },
         "Position2D": {
-          "description": "Position in a document (1-based for MCP).",
           "properties": {
             "character": {
               "format": "uint32",
@@ -5913,7 +5912,6 @@
               "type": "integer"
             },
             "line": {
-              "description": "Line number (1-based).",
               "format": "uint32",
               "minimum": 1,
               "type": "integer"
@@ -5926,7 +5924,6 @@
           "type": "object"
         },
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -5942,14 +5939,12 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "hints": {
-          "description": "List of inlay hints.",
           "items": {
             "$ref": "#/$defs/InlayHintEntry"
           },
           "type": "array"
         },
         "indexing_in_progress": {
-          "description": "`true` if the routed server reported workspace indexing in progress during this read.",
           "type": "boolean"
         },
         "positions_degraded": {
@@ -5960,11 +5955,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          ]
         },
         "truncated": {
-          "description": "Whether `hints` was capped below the server's full response.",
           "type": "boolean"
         }
       },
@@ -7734,7 +7727,7 @@
   {
     "name": "get_signature_help",
     "title": "Signature Help",
-    "description": "Signature help at position. Returns parameter info, active signature/parameter, and documentation while typing a call. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
+    "description": "Signature help for a call. Returns signatures, documentation, and active indices. A parameter label may be absent when its provider offsets are invalid. `indexing_in_progress: true`: the routed server was still indexing, so an empty or partial result may be incomplete. `positions_degraded: \"request\"` (non-UTF-16 servers only) means the queried position was sent unconverted, so the result may not match the position asked about and should not be trusted.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7766,7 +7759,6 @@
     "outputSchema": {
       "$defs": {
         "PositionDegradation": {
-          "description": "How a non-UTF-16 server's `character` offsets became inexact in a result.",
           "oneOf": [
             {
               "const": "response",
@@ -7779,21 +7771,17 @@
           ]
         },
         "SignatureInfo": {
-          "description": "A single signature overload.",
           "properties": {
             "documentation": {
-              "description": "Optional documentation for the signature.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "label": {
-              "description": "Full label of the signature.",
               "type": "string"
             },
             "parameters": {
-              "description": "Parameters of the signature.",
               "items": {
                 "$ref": "#/$defs/SignatureParameter"
               },
@@ -7807,17 +7795,14 @@
           "type": "object"
         },
         "SignatureParameter": {
-          "description": "A single parameter in a signature.",
           "properties": {
             "documentation": {
-              "description": "Optional documentation for the parameter.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "label": {
-              "description": "Label of the parameter; absent when the server gave an offset pair that does not resolve.",
               "type": [
                 "string",
                 "null"
@@ -7830,7 +7815,6 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "active_parameter": {
-          "description": "Index of the active parameter within the active signature.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -7839,7 +7823,6 @@
           ]
         },
         "active_signature": {
-          "description": "Index of the active signature.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -7848,7 +7831,6 @@
           ]
         },
         "indexing_in_progress": {
-          "description": "`true` if the routed server reported workspace indexing in progress during this read.",
           "type": "boolean"
         },
         "positions_degraded": {
@@ -7859,11 +7841,9 @@
             {
               "type": "null"
             }
-          ],
-          "description": "Set only when some `character` offsets are inexact (non-UTF-16 servers); omitted otherwise."
+          ]
         },
         "signatures": {
-          "description": "Available signatures.",
           "items": {
             "$ref": "#/$defs/SignatureInfo"
           },
@@ -12071,6 +12051,97 @@
     },
     "annotations": {
       "title": "Rename Symbol",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "resolve_completion",
+    "title": "Resolve Completion",
+    "description": "Resolve one candidate from get_completions using the original absolute file_path and opaque completion_ref in the same session. Stale reference: list again. Returns status resolved with bounded display fields or unsupported with item:null. No edits or commands.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "completion_ref": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "file_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_path",
+        "completion_ref"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "item": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "documentation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "truncated_fields": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "label",
+            "kind",
+            "detail",
+            "documentation",
+            "truncated_fields"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "resolved",
+            "unsupported"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "item"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Resolve Completion",
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true
