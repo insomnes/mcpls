@@ -42,7 +42,7 @@ pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
         "dispatcher_context":{"type":"string"}}});
     let point = json!({"type":"object","required":["line","character"],"description":"Use enclosing positions_base and positions_encoding.","properties":{
         "line":{"type":"integer","minimum":0,"maximum":4_294_967_295_u64},"character":{"type":"integer","minimum":0,"maximum":4_294_967_295_u64}}});
-    let range = json!({"type":"object","required":["start","end"],"properties":{"start":{"$ref":"#/$defs/Position2D"},"end":{"$ref":"#/$defs/Position2D"}}});
+    let range = json!({"type":"object","required":["start","end"],"properties":{"start":{"$ref":"#/$defs/GraphPosition"},"end":{"$ref":"#/$defs/GraphPosition"}}});
     let mut schema = json!({"type":"object","required":["status","direction","root","nodes","edges","limits","usage","warnings","stop_reasons","truncated","indexing_in_progress","analysis_freshness","atomic_snapshot"],"properties":{
         "status":{"enum":["ok","no_item","selection_required","preparation_incomplete"]},
         "direction":{"enum":["incoming","outgoing"]},
@@ -64,7 +64,7 @@ pub(super) fn shape_schema(router: &mut ToolRouter<McplsServer>) {
         "positions_base":{"const":0},
         "resolved_symbol":{"type":"object"},"analysis_freshness":{"const":"unknown"},"atomic_snapshot":{"const":false}
     }});
-    schema["$defs"] = json!({"HierarchyItem":hierarchy,"Range":range,"Position2D":point});
+    schema["$defs"] = json!({"HierarchyItem":hierarchy,"Range":range,"GraphPosition":point});
     for (field, names) in [
         (
             "limits",

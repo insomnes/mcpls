@@ -240,35 +240,28 @@ pub(super) fn shape_tool_schemas<'a>(tools: impl IntoIterator<Item = &'a mut Too
             RecursiveTransform(ShortenDescriptions(DescriptionCap::dropping(0)))
                 .transform(&mut schema);
             if let Value::Object(mut shaped) = Value::from(schema) {
-                if matches!(
-                    tool.name.as_ref(),
-                    "get_definition"
-                        | "get_incoming_calls"
-                        | "get_outgoing_calls"
-                        | "go_to_implementation"
-                        | "go_to_type_definition"
-                        | "go_to_declaration"
-                ) {
-                    // Keep absolute-path and coordinate conventions at the input boundary.
-                    let fields: &[&str] = if matches!(
-                        tool.name.as_ref(),
-                        "get_incoming_calls" | "get_outgoing_calls"
-                    ) {
+                // Preserve coordinate conventions and the query's byte-based limit.
+                let fields: &[&str] = match tool.name.as_ref() {
+                    "get_incoming_calls" | "get_outgoing_calls" => {
                         &["file_path", "line", "character", "item", "symbol_target"]
-                    } else {
-                        &["file_path", "line", "character"]
-                    };
-                    for field in fields {
-                        if let Some(description) = conventions
-                            .as_ref()
-                            .and_then(|p| p.get(*field))
-                            .and_then(|p| p.get("description"))
-                            .cloned()
-                            && let Some(Value::Object(property)) =
-                                shaped.get_mut("properties").and_then(|p| p.get_mut(*field))
-                        {
-                            property.insert("description".into(), description);
-                        }
+                    }
+                    "get_definition"
+                    | "go_to_implementation"
+                    | "go_to_type_definition"
+                    | "go_to_declaration" => &["file_path", "line", "character"],
+                    "workspace_symbol_search" => &["query"],
+                    _ => &[],
+                };
+                for field in fields {
+                    if let Some(description) = conventions
+                        .as_ref()
+                        .and_then(|p| p.get(*field))
+                        .and_then(|p| p.get("description"))
+                        .cloned()
+                        && let Some(Value::Object(property)) =
+                            shaped.get_mut("properties").and_then(|p| p.get_mut(*field))
+                    {
+                        property.insert("description".into(), description);
                     }
                 }
                 *Arc::make_mut(&mut tool.input_schema) = shaped;

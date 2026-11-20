@@ -2108,6 +2108,26 @@
     },
     "outputSchema": {
       "$defs": {
+        "GraphPosition": {
+          "description": "Use enclosing positions_base and positions_encoding.",
+          "properties": {
+            "character": {
+              "maximum": 4294967295,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "line": {
+              "maximum": 4294967295,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "line",
+            "character"
+          ],
+          "type": "object"
+        },
         "HierarchyItem": {
           "properties": {
             "data": {
@@ -2152,33 +2172,13 @@
           ],
           "type": "object"
         },
-        "Position2D": {
-          "description": "Use enclosing positions_base and positions_encoding.",
-          "properties": {
-            "character": {
-              "maximum": 4294967295,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "line": {
-              "maximum": 4294967295,
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "line",
-            "character"
-          ],
-          "type": "object"
-        },
         "Range": {
           "properties": {
             "end": {
-              "$ref": "#/$defs/Position2D"
+              "$ref": "#/$defs/GraphPosition"
             },
             "start": {
-              "$ref": "#/$defs/Position2D"
+              "$ref": "#/$defs/GraphPosition"
             }
           },
           "required": [
@@ -12334,6 +12334,7 @@
           "type": "integer"
         },
         "query": {
+          "description": "Search query for symbol names (partial matching, at most 1000 bytes).",
           "type": "string"
         },
         "workspace_path": {

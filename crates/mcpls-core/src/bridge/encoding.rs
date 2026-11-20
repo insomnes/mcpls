@@ -459,8 +459,8 @@ impl ServerColumn {
     }
 }
 
-/// Walks `text` once, returning the first boundary at or after `wanted`
-/// units, or `text.len()` when `wanted` equals the total unit count.
+/// Walks `text` once and returns the first boundary at or after `wanted`
+/// units. A column inside the last character rounds up to `text.len()`.
 fn scan_units(text: &str, wanted: usize, encoding: PositionEncoding) -> Result<usize, OffsetError> {
     let mut units = 0usize;
     for step in steps(text, encoding) {
@@ -469,7 +469,7 @@ fn scan_units(text: &str, wanted: usize, encoding: PositionEncoding) -> Result<u
         }
         units = step.after;
     }
-    if units == wanted {
+    if units >= wanted {
         Ok(text.len())
     } else {
         Err(OffsetError::PastEnd {
@@ -1133,12 +1133,16 @@ mod tests {
     /// pair (2 UTF-16 units); MCP column 2 (1-based) sits between them.
     #[test]
     fn test_mcp_to_lsp_position_mid_surrogate_falls_back() {
-        let line_text = "𝄞x";
-        let lsp_pos = lsp_at(1, 2, Some(line_text), PositionEncoding::Utf8);
-        // Falls back to the raw (unconverted) MCP character rather than
-        // rounding forward to byte offset 4 (right after the astral char).
-        assert_eq!(lsp_pos.value.character, 1);
-        assert_eq!(lsp_pos.fidelity, ColumnFidelity::PassedThrough);
+        for line_text in ["𝄞x", "𝄞"] {
+            let lsp_pos = lsp_at(1, 2, Some(line_text), PositionEncoding::Utf8);
+            // Check a surrogate pair followed by text and at the end of a line.
+            assert_eq!(lsp_pos.value.character, 1, "{line_text}");
+            assert_eq!(
+                lsp_pos.fidelity,
+                ColumnFidelity::PassedThrough,
+                "{line_text}"
+            );
+        }
     }
 
     /// CRLF line endings: `line_text` (as sourced by callers via `str::lines`)

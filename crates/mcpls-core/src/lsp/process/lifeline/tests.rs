@@ -279,12 +279,13 @@ async fn test_reaping_the_leader_tells_the_watchdog_to_forget_it() {
 /// A pid the watchdog was told about but that now belongs to an unrelated
 /// process must survive the sweep once the leader was forgotten.
 async fn sweep_with_stale_leader(forget: bool, options: &Options) -> bool {
-    let mut stale = std::process::Command::new("sleep")
+    let mut stale = Command::new("sleep")
         .arg("605")
         .process_group(0)
+        .kill_on_drop(true)
         .spawn()
         .unwrap();
-    let stale_pid = Pid::from_raw(stale.id().try_into().unwrap()).unwrap();
+    let stale_pid = Pid::from_raw(stale.id().unwrap().try_into().unwrap()).unwrap();
     let (stderr_hold, _unused) = std::io::pipe().unwrap();
     let anchor = Anchor::start(&stderr_hold).unwrap();
     let watchdog = Watchdog::start(
@@ -309,9 +310,20 @@ async fn sweep_with_stale_leader(forget: bool, options: &Options) -> bool {
 
     lifeline.terminate(None, LIFELINE_SWEEP_BUDGET).await;
 
-    let survived = stale.try_wait().unwrap().is_none();
-    stale.kill().unwrap();
-    stale.wait().unwrap();
+    let survived = if forget {
+        stale.try_wait().unwrap().is_none()
+    } else {
+        // The watchdog can exit before the signal has terminated the target.
+        timeout(LIFELINE_SWEEP_BUDGET, stale.wait())
+            .await
+            .map_or(true, |status| {
+                status.unwrap();
+                false
+            })
+    };
+    if survived {
+        stale.kill().await.unwrap();
+    }
     survived
 }
 

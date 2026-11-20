@@ -871,8 +871,7 @@ pub struct WorkspaceSymbolParams {
     /// Attach portable targets to retained entries; default false.
     #[serde(default)]
     pub include_targets: bool,
-    /// Search query for symbol names (supports partial matching), at most 1000 bytes.
-    #[schemars(description = "Search query for symbol names (supports partial matching).")]
+    /// Search query for symbol names (partial matching, at most 1000 bytes).
     pub query: String,
     /// Optional filter by symbol kind: a name (function, class, variable,
     /// etc.) or the numeric LSP `SymbolKind` value from a result's `kind`
