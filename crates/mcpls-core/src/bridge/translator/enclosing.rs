@@ -85,6 +85,15 @@ pub enum LocationContext {
     SymbolSource,
 }
 
+impl From<ResultContext> for LocationContext {
+    fn from(context: ResultContext) -> Self {
+        match context {
+            ResultContext::None => Self::None,
+            ResultContext::EnclosingSymbol => Self::EnclosingSymbol,
+        }
+    }
+}
+
 /// How much ancestry an [`EnclosingSymbol`] name path carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

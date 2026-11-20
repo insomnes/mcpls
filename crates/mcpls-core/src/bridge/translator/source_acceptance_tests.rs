@@ -79,14 +79,14 @@ impl Fixture {
 
 #[derive(Clone, Copy)]
 enum Call {
-    References,
+    References(Option<usize>),
     Definition,
 }
 
 impl Call {
     const fn method(self) -> &'static str {
         match self {
-            Self::References => "textDocument/references",
+            Self::References(_) => "textDocument/references",
             Self::Definition => "textDocument/definition",
         }
     }
@@ -125,10 +125,22 @@ async fn run(
         let path = main.to_string_lossy().into_owned();
         tokio::spawn(async move {
             match call {
-                Call::References => translator
-                    .handle_references(client_path(path), pos(1, 1), true, context)
-                    .await
-                    .map(|references| serde_json::to_value(references.result).unwrap()),
+                Call::References(limit) => {
+                    let mut options = crate::bridge::ReferenceOptions::default();
+                    if let Some(limit) = limit {
+                        options.limit = limit;
+                    }
+                    translator
+                        .handle_references_with_options(
+                            client_path(path),
+                            pos(1, 1),
+                            true,
+                            context,
+                            options,
+                        )
+                        .await
+                        .map(|references| serde_json::to_value(references.result).unwrap())
+                }
                 Call::Definition => translator
                     .handle_definition(client_path(path), pos(1, 1), context)
                     .await
@@ -220,7 +232,7 @@ async fn test_references_symbol_source_charges_one_enclosing_body_once() {
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(Some(locations.len())),
         LocationContext::SymbolSource,
         &main,
         Value::Array(locations),
@@ -247,7 +259,7 @@ async fn test_references_default_context_emits_neither_source_nor_enclosing_symb
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::None,
         &main,
         json!([location_at(&uri, (0, 3), (0, 7))]),
@@ -269,7 +281,7 @@ async fn test_references_enclosing_symbol_context_emits_no_source() {
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::EnclosingSymbol,
         &main,
         json!([location_at(&uri, (0, 3), (0, 7))]),
@@ -294,7 +306,7 @@ async fn test_references_top_level_item_has_no_span() {
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::SymbolSource,
         &main,
         json!([location_at(&uri, (2, 6), (2, 7))]),
@@ -449,7 +461,7 @@ async fn test_symbol_source_out_of_workspace_item_is_neither_opened_nor_sliced()
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::SymbolSource,
         &main,
         json!([location_at(
@@ -484,7 +496,7 @@ async fn test_symbol_source_caps_a_long_body_at_200_lines() {
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::SymbolSource,
         &main,
         json!([location_at(&uri, (1, 4), (1, 10))]),
@@ -507,7 +519,7 @@ async fn test_symbol_source_cuts_a_minified_line_on_a_char_boundary() {
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::SymbolSource,
         &main,
         json!([location_at(&uri, (0, 2), (0, 4))]),
@@ -554,7 +566,7 @@ async fn test_symbol_source_skips_an_over_budget_span_and_keeps_filling_greedily
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::SymbolSource,
         &main,
         Value::Array(locations),
@@ -610,7 +622,7 @@ async fn test_symbol_source_spends_the_call_budget_in_file_first_seen_order() {
 
     let result = noop_run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::SymbolSource,
         &main,
         locations,
@@ -643,7 +655,7 @@ async fn test_symbol_source_reports_a_document_that_moved_during_the_lookup() {
 
     let result = run(
         &mut fx,
-        Call::References,
+        Call::References(None),
         LocationContext::SymbolSource,
         &main,
         json!([location_at(&uri, (0, 3), (0, 7))]),

@@ -634,7 +634,7 @@ mod tests {
 
     use super::*;
     use crate::bridge::translator::dto::ReferencesResult;
-    use crate::bridge::translator::enclosing::LocationContext;
+    use crate::bridge::translator::enclosing::{LocationContext, ResultContext};
     use crate::bridge::translator::testing::*;
     use crate::config::ServerId;
     use crate::test_lsp::client_path;
@@ -904,9 +904,8 @@ mod tests {
                             .handle_definition_with_source(
                                 path,
                                 pos(1, 1),
-                                LocationContext::None,
+                                ResultContext::None,
                                 include_source,
-                                false,
                             )
                             .await
                     }
@@ -915,9 +914,8 @@ mod tests {
                             .handle_implementation_with_source(
                                 path,
                                 pos(1, 1),
-                                LocationContext::None,
+                                ResultContext::None,
                                 include_source,
-                                false,
                             )
                             .await
                     }
@@ -926,9 +924,8 @@ mod tests {
                             .handle_type_definition_with_source(
                                 path,
                                 pos(1, 1),
-                                LocationContext::None,
+                                ResultContext::None,
                                 include_source,
-                                false,
                             )
                             .await
                     }
@@ -937,9 +934,8 @@ mod tests {
                             .handle_declaration_with_source(
                                 path,
                                 pos(1, 1),
-                                LocationContext::None,
+                                ResultContext::None,
                                 include_source,
-                                false,
                             )
                             .await
                     }

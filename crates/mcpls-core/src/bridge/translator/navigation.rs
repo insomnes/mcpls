@@ -11,7 +11,7 @@ use super::dto::{
     HoverResult, IndexCoverage, Location, LocationSource, LocationsResult, NavigationResult,
     NavigationSource, Position, PositionDegradation, Range, ReferenceLocation, ReferencesResult,
 };
-use super::enclosing::{Contextualized, LocationContext};
+use super::enclosing::{Contextualized, LocationContext, ResultContext};
 use super::encoding_ctx::EncodingCtx;
 use super::positioned::{FromPosition, GotoRequest, Positioned};
 use super::routing::{Capability, IndexingGate};
@@ -626,11 +626,44 @@ impl Translator {
             .await)
     }
 
-    /// Navigate with optional bounded source, without changing native defaults.
+    /// Find definition locations with optional bounded location excerpts.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mcpls_core::bridge::{ClientPath, Position, ResultContext, Translator};
+    /// use mcpls_core::error::Result;
+    ///
+    /// # async fn lookup(t: &Translator, path: ClientPath, position: Position) -> Result<()> {
+    /// let context = ResultContext::None;
+    /// t.handle_definition_with_source(path.clone(), position, context, true).await?;
+    /// t.handle_implementation_with_source(path.clone(), position, context, true).await?;
+    /// t.handle_type_definition_with_source(path.clone(), position, context, true).await?;
+    /// t.handle_declaration_with_source(path, position, context, true).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// # Errors
     /// Returns the existing navigation error if semantic navigation fails.
-    pub(crate) async fn handle_definition_with_source(
+    pub async fn handle_definition_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<NavigationResult> {
+        self.handle_definition_with_source_context(
+            file_path,
+            position,
+            context.into(),
+            include_source,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_definition_with_source_context(
         &self,
         file_path: ClientPath,
         position: Position,
@@ -644,11 +677,28 @@ impl Translator {
             .await)
     }
 
-    /// Navigate with optional bounded source, without changing native defaults.
+    /// Find implementation locations with optional bounded location excerpts.
     ///
     /// # Errors
     /// Returns the existing navigation error if semantic navigation fails.
-    pub(crate) async fn handle_implementation_with_source(
+    pub async fn handle_implementation_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<NavigationResult> {
+        self.handle_implementation_with_source_context(
+            file_path,
+            position,
+            context.into(),
+            include_source,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_implementation_with_source_context(
         &self,
         file_path: ClientPath,
         position: Position,
@@ -664,11 +714,28 @@ impl Translator {
             .await)
     }
 
-    /// Navigate with optional bounded source, without changing native defaults.
+    /// Find type definition locations with optional bounded location excerpts.
     ///
     /// # Errors
     /// Returns the existing navigation error if semantic navigation fails.
-    pub(crate) async fn handle_type_definition_with_source(
+    pub async fn handle_type_definition_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<NavigationResult> {
+        self.handle_type_definition_with_source_context(
+            file_path,
+            position,
+            context.into(),
+            include_source,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_type_definition_with_source_context(
         &self,
         file_path: ClientPath,
         position: Position,
@@ -684,11 +751,28 @@ impl Translator {
             .await)
     }
 
-    /// Navigate with optional bounded source, without changing native defaults.
+    /// Find declaration locations with optional bounded location excerpts.
     ///
     /// # Errors
     /// Returns the existing navigation error if semantic navigation fails.
-    pub(crate) async fn handle_declaration_with_source(
+    pub async fn handle_declaration_with_source(
+        &self,
+        file_path: ClientPath,
+        position: Position,
+        context: ResultContext,
+        include_source: bool,
+    ) -> Result<NavigationResult> {
+        self.handle_declaration_with_source_context(
+            file_path,
+            position,
+            context.into(),
+            include_source,
+            false,
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_declaration_with_source_context(
         &self,
         file_path: ClientPath,
         position: Position,

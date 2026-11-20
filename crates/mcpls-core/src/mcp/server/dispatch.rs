@@ -226,6 +226,13 @@ impl McplsServer {
                 | "get_tool_support"
         );
         let arguments = request.arguments.get_or_insert_default();
+        if name == "get_references"
+            && arguments.get("mode").and_then(Value::as_str) == Some("files")
+            && arguments.get("context").and_then(Value::as_str) == Some("symbol_source")
+        {
+            // Reject before selecting a workspace or resolving a named or opaque target.
+            return Err(self.render_error(crate::Error::SymbolSourceRequiresLocations));
+        }
         if name == "get_call_graph" {
             // Graph selectors inherit null-as-absent addressing. Required
             // direction and the new numeric options still reject null.

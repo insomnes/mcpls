@@ -40,7 +40,7 @@ In this chapter you find every boundary mcpls enforces or cannot cross, in one p
 | Per-response disk read for position conversion | 4 times `max_file_size`, at most 256 MiB |
 | Reference selection | Default 10; `limit` 1 through 10000; absolute lexical `path_filter` |
 | Reference source context | 100 candidates; 16 files; 1 MiB/file; 4 MiB read/copy; 2 KiB/excerpt; 64 KiB excerpt text; 2 s best-effort deadline |
-| `symbol_source` | 200 lines and 16 KiB per item; per call 64 KiB of text, 256 distinct spans and 16 MiB of document text examined; the rest is `call_budget` |
+| `symbol_source` | 200 lines and 16 KiB per item; per call 64 KiB of text, 256 distinct spans and a 16 MiB scan budget plus one crossing cut; new spans over budget report `call_budget` |
 | Text arguments | `new_name`, `query` 1,000 bytes; `symbol_name` 256 bytes; `trigger` 8 bytes; line and character 1 to 1,000,000 |
 | `workspace/configuration` reply to a server | 256 items and 4 MiB of serialized result array; more items are answered `-32602`, a larger reply `-32603` |
 | Result lists | Capped per tool; `truncated: true` marks a cut |

@@ -1175,7 +1175,7 @@ impl McplsServer {
             AddressableTool::Definition,
             |file_path, position| async move {
                 let mut result = translator
-                    .handle_definition_with_source(
+                    .handle_definition_with_source_context(
                         file_path,
                         position,
                         context,
@@ -2062,7 +2062,7 @@ impl McplsServer {
             target,
             AddressableTool::Implementation,
             |file_path, position| {
-                translator.handle_implementation_with_source(
+                translator.handle_implementation_with_source_context(
                     file_path,
                     position,
                     context,
@@ -2093,7 +2093,7 @@ impl McplsServer {
             target,
             AddressableTool::TypeDefinition,
             |file_path, position| {
-                translator.handle_type_definition_with_source(
+                translator.handle_type_definition_with_source_context(
                     file_path,
                     position,
                     context,
@@ -2128,7 +2128,7 @@ impl McplsServer {
         self.structured_result(
             self.context
                 .translator
-                .handle_declaration_with_source(
+                .handle_declaration_with_source_context(
                     file_path,
                     parse_position(line, character)?,
                     context,
@@ -9298,6 +9298,46 @@ sleep 0.3
             removed.get("error").is_some(),
             "removed tool must return an unknown-tool error: {removed}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_reference_files_reject_symbol_source_before_addressing() {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                lsp_types::ServerCapabilities {
+                    references_provider: Some(lsp_types::ReferencesProvider::Bool(true)),
+                    document_symbol_provider: Some(lsp_types::DocumentSymbolProvider::Bool(true)),
+                    ..Default::default()
+                },
+            )],
+            McpConfig::default(),
+        );
+        let provider = &mut fixture.fake_servers[0].write_stdout;
+        for mut arguments in [
+            serde_json::json!({"file_path": fixture.file, "symbol_name": "missing"}),
+            serde_json::json!({"symbol_target": {"file_path": fixture.file, "symbol_ref": "opaque"}}),
+        ] {
+            arguments["mode"] = serde_json::json!("files");
+            arguments["context"] = serde_json::json!("symbol_source");
+            let call = tools_call_over_the_wire(
+                fixture.server.for_new_session(),
+                serde_json::json!({"name": "get_references", "arguments": arguments}),
+            );
+            let reply = tokio::select! {
+                biased;
+                message = provider.read_u8() => panic!("unexpected LSP activity: {message:?}"),
+                reply = call => reply,
+            };
+            assert_eq!(reply["error"]["code"], -32602);
+            assert_eq!(
+                reply["error"]["message"],
+                "context:symbol_source requires mode:locations"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

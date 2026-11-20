@@ -9,6 +9,7 @@ This fork is version `0.10.0+insomnes.1`. It merges the complete upstream
 
 - The five location tools support `context:"symbol_source"`. The symbol-body pass
   uses bounded tracked text and deduplicates spans within the retained locations.
+  The 16 MiB scan budget permits one cut to cross the limit.
 - The bridge uses typed positions, URIs, workspace queries, parameter errors, and
   a shared five-level log and message enumeration.
 - The LSP client limits `workspace/configuration` replies to 256 items and 4 MiB.
