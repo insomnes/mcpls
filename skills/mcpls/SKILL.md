@@ -173,11 +173,13 @@ or combine the envelope with legacy selectors. Failed reuse requires renewed
 discovery from current evidence. Reuse proves neither analyzer freshness nor
 access to another workspace. See [portable target inputs and errors](https://bug-ops.github.io/mcpls/tools/symbol-context.html#copy-a-portable-target).
 
-Request `include_source:true` or `context:"enclosing_symbol"` only when excerpts
-or enclosing names answer the next question. Files-mode reference summaries add
-metadata and can be larger than a small locations response. Use them to choose
-files, then narrow `path_filter` for exact occurrences if needed; otherwise query
-locations directly. Increase `limit` or narrow the filter when output is cut.
+Start with locations when you only need positions. Use the
+[source options](#optional-navigation-source) when the question needs text, or
+`context:"enclosing_symbol"` when you only need the enclosing symbol's name.
+Files-mode reference summaries add metadata and can be larger than a small
+locations response. Use them to choose files, then narrow `path_filter` for
+exact occurrences if needed. Query locations directly for a small set of known
+occurrences. Increase `limit` or narrow the filter when output is cut.
 Counts preserve duplicates and provider order; incomplete counts are lower
 bounds for the received response, never proof of complete workspace coverage.
 Smaller output does not establish less provider work. Read-only navigation
@@ -185,9 +187,9 @@ provides no authority to edit, acquire unauthorized source, or restart servers.
 
 ### Small reference queries
 
-`get_references` defaults to 10 locations and `include_source:false`. It preserves
-provider order and duplicates. Set `limit` (integer 1 through 10000) for a larger
-answer, and `include_source:true` for bounded source excerpts on returned locations.
+`get_references` defaults to 10 locations with both excerpt flags off. It
+preserves provider order and duplicates. Set `limit` (integer 1 through 10000)
+for a larger answer. Set `broader_context:true` for bounded excerpts.
 Use `"limit":100,"include_source":true` to request the previous default behavior.
 
 An absolute `path_filter` selects one file or a directory subtree by lexical path
@@ -199,14 +201,14 @@ prove workspace coverage or provide a representative usage audit. Continuation
 is deferred; use a larger limit or narrower filter for follow-up queries.
 Smaller output does not guarantee less LSP backend work.
 
-With `context` omitted or `"none"`, default requests skip optional excerpt reads,
-copies, and enclosing-symbol enrichment. Required synchronization and position
-normalization still occur. Set `context:"enclosing_symbol"` for enclosing context.
-Source outcomes have status `text` or `unavailable`; text includes `start_line`
+With both excerpt flags off, requests skip excerpt reads and copies. With
+`context` omitted or `"none"`, requests skip enclosing-symbol enrichment.
+Required synchronization and position normalization still occur.
+Excerpt outcomes have status `text` or `unavailable`. Text includes `start_line`
 (1-based), `origin` (`tracked` or `disk`), and `shortened`. Source snapshots and
 LSP locations are not atomic. External paths and symlink escapes disclose no source.
 
-Explicit source requests retain fixed limits: 100 candidate locations, 16 files,
+Reference excerpts have fixed limits of 100 candidate locations, 16 files,
 1 MiB per file, 4 MiB aggregate source read/copy allowance, 2 KiB per excerpt,
 64 KiB total excerpt text, and a two-second best-effort deadline. Exhausted limits
 preserve locations with unavailable reasons or shortened context. An in-flight
@@ -218,7 +220,9 @@ Use `mode:"files"` to choose the next file to inspect. The default mode is
 is empty and `file_summary.files` contains groups in first-seen provider order.
 Each group has the exact provider `uri`, `count` including duplicates, and the
 first matching `example` with the usual location, warning, context, and optional
-source fields. Different URI spellings remain separate, even for the same file.
+source fields. Excerpt flags apply to the selected `example` locations.
+`context:"symbol_source"` requires `mode:"locations"` and fails in files mode.
+Different URI spellings remain separate, even for the same file.
 
 `limit` bounds groups in this mode, with the same default 10 and range 1..10000.
 Filtering precedes grouping. Counts include all matching locations in the
@@ -238,8 +242,9 @@ a nonempty response emptied by filtering does not.
 
 The compact UTF-8 JSON for the entire `file_summary`, including example context
 and source, is limited to 65536 bytes. Output keeps a prefix of whole groups.
-Only selected examples receive normalization and optional enrichment; final byte
-trimming can omit some selected groups. Existing source and context limits apply.
+Only selected examples receive normalization and optional enrichment. An excerpt
+outcome counts toward the byte limit even when it reports `unavailable`. Final
+byte trimming can omit selected groups. Existing source and context limits apply.
 The `limits` fields are `max_processed_locations`, `max_uri_bytes`, `max_files`,
 and `max_output_bytes`, with the values above. This bounds additional local work
 and output; it does not bound the already received LSP response or backend work.
@@ -251,25 +256,75 @@ symbol address, then add `{"path_filter":"/work/app/src/usage.rs"}` to a new
 locations query. URI aliases can map to the same filter path. Unsupported URIs
 remain visible with `file_path:null` and
 `path_filter_unavailable:"unsupported_uri"`. This also applies when the decoded
-path cannot be represented as a UTF-8 JSON string. Requested source failures remain
-explicit. Source and positions do not form an atomic snapshot.
+path cannot be represented as a UTF-8 JSON string. Retained examples report
+requested excerpt failures. Source and positions do not form an atomic snapshot.
 
 ### Optional navigation source
 
-`get_definition`, `go_to_implementation`, `go_to_type_definition`, and
-`go_to_declaration` accept `include_source` (boolean, default `false`).
-Declaration remains position-only; the other three also accept symbol names.
+`get_definition`, `get_references`, `go_to_implementation`,
+`go_to_type_definition`, and `go_to_declaration` support these options. Both
+boolean excerpt flags, `broader_context` and `include_source`, default to `false`.
+`go_to_declaration` requires a position. The other four also accept symbol names.
+
+Choose the smallest response that answers the question. Reuse returned text
+when it is sufficient and skip a follow-up source read.
+
+**Locations only.** Use `get_definition` without source options to find where a
+use leads.
 
 ```json
-{"file_path":"/work/app/src/billing.rs","symbol_name":"process_payment","include_source":true}
+{"file_path":"/work/app/src/checkout.rs","line":42,"character":9}
 ```
 
-Every retained location then has `source.status` equal to `text` or `unavailable`.
-Text includes `text`, `start_line` (1-based), `origin` (`tracked` or `disk`),
-`sha256`, and `shortened`. The lowercase SHA-256 identifies the complete unredacted
-observed file bytes, including bytes outside the excerpt. It does not identify
-an analyzed snapshot or prove current disk freshness. Tracked source takes
-precedence over a contained disk read; duplicate canonical files share one observation.
+**Nearby lines.** Use `get_references` with `broader_context:true` to inspect
+what happens near a few call sites.
+
+```json
+{"file_path":"/work/app/src/billing.rs","symbol_name":"process_payment","limit":3,"broader_context":true}
+```
+
+**Symbol body.** Use `go_to_implementation` with `context:"symbol_source"` to
+inspect the bounded implementation body.
+
+```json
+{"file_path":"/work/app/src/checkout.rs","line":42,"character":9,"context":"symbol_source"}
+```
+
+**Body and nearby lines.** Add `broader_context:true` to `go_to_implementation`
+only if you also need lines around the returned implementation location.
+
+```json
+{"file_path":"/work/app/src/checkout.rs","line":42,"character":9,"context":"symbol_source","broader_context":true}
+```
+
+| `context` | Excerpt flags | Fields on the location |
+|---|---|---|
+| Default (`"none"`) or `"enclosing_symbol"` | Both off | No source fields |
+| Default or `"enclosing_symbol"` | Legacy `include_source:true` alone | Bounded excerpt in `source` |
+| Default or `"enclosing_symbol"` | `broader_context:true`, including when both flags are true | One bounded excerpt in `broader_context` |
+| `"symbol_source"` | Both off | Bounded body outcome in `source` |
+| `"symbol_source"` | Either or both flags true | Body outcome in `source` and one excerpt outcome in `broader_context` |
+
+For references, the body comes from the symbol that encloses the occurrence.
+A top-level reference has no body span. For go-to tools, mcpls uses the returned
+target symbol's span or falls back to the server's target range when available.
+Each requested outcome can be unavailable independently. For bodies, check
+`source.status` for `included`, `same_as`, or `not_computed`. Check `truncated`
+on included text, and follow `same_as.item` to the earlier location that holds
+the text.
+
+An excerpt has status `text` or `unavailable`. See
+[Small reference queries](#small-reference-queries) for reference excerpt limits.
+
+#### Go-to excerpt details
+
+The following fields, limits, and guarantees apply to excerpts from the four
+go-to tools. A text outcome includes `text`, `start_line` (1-based),
+`origin` (`tracked` or `disk`), `sha256`, and `shortened`. The lowercase SHA-256
+identifies the complete unredacted observed file bytes, including bytes outside
+the excerpt. It does not identify an analyzed snapshot or prove current disk
+freshness. Tracked source takes precedence over a contained disk read.
+Duplicate canonical files share one observation.
 
 The preferred window includes the location's starting line and up to two lines
 on each side. Columns and the location's ending line do not select source.
@@ -288,7 +343,7 @@ an in-flight OS operation can overrun it. These limits do not bound the original
 LSP request or total response time. Final configured secret redaction preserves
 the same text limits, with whole-line fallback or an unavailable outcome.
 
-Unavailable outcomes contain only `status` and `reason`: `candidate_limit`,
+Unavailable excerpts contain only `status` and `reason`: `candidate_limit`,
 `file_limit`, `source_budget`, `text_budget`, `deadline`, `access_denied`,
 `read_failed`, `file_too_large`, `invalid_utf8`, or `line_unavailable`.
 They respectively mean the candidate cap, file cap, acquisition allowance,
@@ -296,13 +351,13 @@ display allowance, deadline, containment authorization, file I/O, file size,
 UTF-8 decoding, or source line prevented text. Candidate positions beyond 100
 always report `candidate_limit`. Partial successes and failures coexist.
 
-The selected workspace context authorizes source; external paths, non-file URIs,
+The selected workspace context authorizes excerpts. External paths, non-file URIs,
 and symlink escapes yield `access_denied`. Lexical `out_of_workspace` remains
-advisory. Source failures preserve locations, order, duplicates, ranges,
+advisory. Excerpt failures preserve locations, order, duplicates, ranges,
 `resolved_symbol`, enclosing context, `positions_degraded`, and `truncated`.
-Disabled source omits the field and additional acquisition, copying, and hashing.
-Source alone adds no LSP opens or semantic requests. Observations are read-only
-and have no atomic consistency guarantee with LSP locations or later reads.
+With both excerpt flags off, mcpls skips excerpt acquisition, copying, and hashing.
+Excerpt enrichment alone adds no LSP opens or semantic requests. Source and LSP
+locations are separate observations that can describe different revisions.
 
 `get_tool_support` also provides diagnostics; this does not waive owner-required
 first-language capability checks described above.
