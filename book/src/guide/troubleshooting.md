@@ -106,7 +106,7 @@ timeout_seconds = 120
 request_timeout_seconds = 60
 ```
 
-A single request is retried when the server answers "content modified" (`-32802`): up to 4 attempts with a 3.5 second total backoff, so the worst case for one call is `4 * request_timeout_seconds + 3.5` seconds. Keep `workspace.roots` narrow so the server does not index unrelated directories.
+The [request retry policy](../advanced/lifecycle.md#4-steady-state) allows up to four attempts with 3.5 seconds of total backoff. A retry sequence can take up to `4 * request_timeout_seconds + 3.5` seconds. A file-move preview sends one `workspace/willRenameFiles` request. Keep `workspace.roots` narrow so the server can focus its indexing on your project.
 
 ### Queries wait after restart_server
 

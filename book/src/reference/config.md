@@ -257,7 +257,7 @@ A file with no mapping fails with `no LSP server configured for language: plaint
 
 `timeout_seconds` bounds the `initialize` handshake only. Raise it for servers that load a large project before answering, such as OmniSharp on a big solution.
 
-`request_timeout_seconds` bounds one request attempt. When a server answers "content modified" (`-32802`), mcpls retries up to 4 attempts in total with 0.5 s, 1 s and 2 s of backoff, so the worst-case latency of one tool call is `4 * request_timeout_seconds + 3.5` seconds, plus `timeout_seconds` if a respawn is needed. Completions are further capped at 10 seconds. The shutdown request during teardown uses a fixed 5 seconds.
+`request_timeout_seconds` bounds one request attempt. Under the [request retry policy](../advanced/lifecycle.md#4-steady-state), a retry sequence can use four attempts with backoffs of 0.5, 1 and 2 seconds. A respawn can add up to `timeout_seconds` for a new handshake. A file-move preview sends one `workspace/willRenameFiles` request. Completion attempts are capped at 10 seconds. The shutdown request during teardown uses a fixed 5 seconds.
 
 ### `initialization_options` and `settings`
 
