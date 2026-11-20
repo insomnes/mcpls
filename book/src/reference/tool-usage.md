@@ -49,7 +49,8 @@ hour.
 SELECT datetime(hour_utc, 'unixepoch') AS hour_utc,
        workspace, tool, outcome, call_count, total_duration_us, max_duration_us
 FROM usage_hourly
-WHERE hour_utc >= (unixepoch() / 3600 - 23) * 3600
+WHERE hour_utc BETWEEN (unixepoch() / 3600 - 23) * 3600
+                   AND (unixepoch() / 3600) * 3600
 ORDER BY hour_utc DESC, workspace, tool, outcome;
 ```
 

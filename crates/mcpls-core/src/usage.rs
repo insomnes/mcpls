@@ -270,7 +270,8 @@ pub fn observe_validation(roots: &WorkspaceRoots, path: &Path) {
 pub fn observe_runtime(roots: &WorkspaceRoots) {
     let _ = OBSERVATION.try_with(|current| {
         if let Some(observation) = current.as_ref().filter(|call| call.standalone)
-            && let [root] = roots.canonical()
+            && let [root, rest @ ..] = roots.canonical()
+            && rest.iter().all(|other| other == root)
         {
             observation.observe(root);
         }

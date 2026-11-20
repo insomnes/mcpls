@@ -97,6 +97,59 @@ async fn stdio_flushes_only_tool_calls_with_validated_scope() {
     assert_eq!(history(&db).unwrap(), expected);
 }
 
+#[tokio::test]
+async fn runtime_calls_use_one_distinct_canonical_workspace() {
+    let root = TempDir::new().unwrap();
+    let workspace = root.path().join("workspace");
+    let alias = root.path().join("alias");
+    let other = root.path().join("other");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&other).unwrap();
+    symlink(&workspace, &alias).unwrap();
+    let config = root.path().join("mcpls.toml");
+    let requests = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": {"name": "usage-test", "version": "1"}
+        }}),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "get_server_logs", "arguments": {}
+        }}),
+    ];
+    let canonical = workspace.canonicalize().unwrap();
+    for (second, expected) in [
+        (&alias, canonical.to_str().unwrap()),
+        (&other, "unattributed"),
+    ] {
+        fs::write(
+            &config,
+            format!(
+                "lsp_servers = []\n[workspace]\nroots = {}\n",
+                json!([workspace, second])
+            ),
+        )
+        .unwrap();
+        let state = tempfile::tempdir_in(root.path()).unwrap();
+        let responses = run_stdio(root.path(), &config, state.path(), &requests, true)
+            .await
+            .unwrap();
+        assert!(responses[0].get("result").is_some());
+        let result = responses[1].get("result").unwrap();
+        assert_ne!(result["isError"], true);
+        let db = state.path().join("mcpls/usage.sqlite");
+        assert_eq!(
+            history(&db).unwrap(),
+            [(
+                expected.into(),
+                "get_server_logs".into(),
+                "success".into(),
+                1
+            )]
+        );
+    }
+}
+
 async fn run_stdio(
     root: &Path,
     config: &Path,
