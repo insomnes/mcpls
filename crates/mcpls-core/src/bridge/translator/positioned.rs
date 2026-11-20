@@ -40,6 +40,7 @@ pub(super) trait RequestTimeout {
 }
 
 impl RequestTimeout for lsp_types::WorkspaceSymbolParams {}
+impl RequestTimeout for lsp_types::RenameFilesParams {}
 
 impl RequestTimeout for lsp_types::CodeAction {
     fn timeout(client: &LspClient) -> Duration {

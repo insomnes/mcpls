@@ -9382,6 +9382,7 @@
             "typeDefinitionProvider",
             "callHierarchyProvider",
             "renameProvider",
+            "workspace.fileOperations.willRename",
             "documentFormattingProvider",
             "codeActionProvider",
             "documentSymbolProvider",
@@ -11458,6 +11459,310 @@
     },
     "annotations": {
       "title": "Prepare Type Hierarchy",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true
+    }
+  },
+  {
+    "name": "preview_file_move",
+    "title": "Preview File Move",
+    "description": "Preview dependent edits for moving an existing file to an unused path in an existing directory in the same workspace. Use absolute paths. The source language's server must statically register willRenameFiles for the source. Empty changes without dropped means the server proposed no edits. full:true includes exact normalized raw edits. Nonempty dropped means incomplete. positions_degraded:response means inexact edit columns. Preview diffs use observed source and analysis_freshness is unknown. No files are moved or edited.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "file_path": {
+          "description": "Absolute path to the existing source file.",
+          "type": "string"
+        },
+        "full": {
+          "default": false,
+          "description": "Include exact normalized raw edits alongside bounded previews (default: false).",
+          "type": "boolean"
+        },
+        "new_file_path": {
+          "description": "Absolute path to the absent destination in an existing directory.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_path",
+        "new_file_path"
+      ],
+      "type": "object"
+    },
+    "outputSchema": {
+      "$defs": {
+        "AnalysisFreshness": {
+          "oneOf": [
+            {
+              "const": "unknown",
+              "type": "string"
+            }
+          ]
+        },
+        "DocumentChanges": {
+          "properties": {
+            "analysis_freshness": {
+              "$ref": "#/$defs/AnalysisFreshness"
+            },
+            "edit_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "edits": {
+              "items": {
+                "$ref": "#/$defs/TextEdit"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "preview": {
+              "$ref": "#/$defs/EditPreview"
+            },
+            "preview_source": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PreviewSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "supplied_version": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SuppliedVersion"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "uri",
+            "edit_count",
+            "preview",
+            "analysis_freshness"
+          ],
+          "type": "object"
+        },
+        "DroppedEdits": {
+          "properties": {
+            "exceeds_item_cap": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "invalid_path": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "out_of_workspace": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "shadowed_by_changes": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unsupported_file_operation": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unsupported_snippet_edit": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "EditPreview": {
+          "properties": {
+            "diff": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "redacted": {
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/$defs/PreviewStatus"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        "Position2D": {
+          "properties": {
+            "character": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "line": {
+              "format": "uint32",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "line",
+            "character"
+          ],
+          "type": "object"
+        },
+        "PositionDegradation": {
+          "oneOf": [
+            {
+              "const": "response",
+              "type": "string"
+            },
+            {
+              "const": "request",
+              "type": "string"
+            }
+          ]
+        },
+        "PreviewSource": {
+          "properties": {
+            "origin": {
+              "$ref": "#/$defs/SourceOrigin"
+            },
+            "sha256": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "origin",
+            "sha256"
+          ],
+          "type": "object"
+        },
+        "PreviewStatus": {
+          "oneOf": [
+            {
+              "const": "complete",
+              "type": "string"
+            },
+            {
+              "const": "truncated",
+              "type": "string"
+            },
+            {
+              "const": "unavailable",
+              "type": "string"
+            }
+          ]
+        },
+        "Range": {
+          "properties": {
+            "end": {
+              "$ref": "#/$defs/Position2D"
+            },
+            "start": {
+              "$ref": "#/$defs/Position2D"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        },
+        "SourceOrigin": {
+          "oneOf": [
+            {
+              "const": "tracked",
+              "type": "string"
+            },
+            {
+              "const": "disk",
+              "type": "string"
+            }
+          ]
+        },
+        "SuppliedVersion": {
+          "properties": {
+            "version": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version"
+          ],
+          "type": "object"
+        },
+        "TextEdit": {
+          "properties": {
+            "new_text": {
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/Range"
+            }
+          },
+          "required": [
+            "range",
+            "new_text"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/DocumentChanges"
+          },
+          "type": "array"
+        },
+        "dropped": {
+          "$ref": "#/$defs/DroppedEdits"
+        },
+        "positions_degraded": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositionDegradation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "changes"
+      ],
+      "type": "object"
+    },
+    "annotations": {
+      "title": "Preview File Move",
       "readOnlyHint": true,
       "destructiveHint": false,
       "idempotentHint": true

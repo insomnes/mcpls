@@ -34,7 +34,8 @@ This fork is version `0.10.0+insomnes.1`. It merges the complete upstream
 - `get_references` accepts `include_targets:true` to attach portable occurrence targets or unavailable reasons to retained locations. Files mode omits portable targets. Copy each complete target into definition or context navigation without reconstructing coordinates.
 - Portable symbol targets retain their existing format, consumers, workspace and source validation, runtime binding, and acquisition budgets. Multi-server symbols normalize with each producer's encoding before target acquisition.
 - The fork retains its exact `globset = 0.4.20` pin and Unicode regex matching for Watchman registration patterns.
-- Shared HTTP workspaces, workspace isolation, Watchman, call graphs, bounded navigation and edit previews, private local feedback, and both tool profiles are retained. The agent profile exposes 34 tools; the full profile exposes 37. The catalogue allows 165000 compact bytes total for the added feedback lifecycle tools. Per-tool and description budgets remain 9000 and 35000 bytes.
+- `preview_file_move` proposes dependent edits for a single file move within one workspace. It uses the source language's `file_move` route and checks the server's static `workspace/willRenameFiles` filters.
+- Shared HTTP workspaces, workspace isolation, Watchman, call graphs, bounded navigation and edit previews, private local feedback, and both tool profiles are retained. The static agent and full profiles expose 35 and 38 tools respectively. The unprefixed catalogue allows 167000 compact bytes total, 9000 per tool, and 35000 for schema descriptions.
 
 ## Navigation source options
 

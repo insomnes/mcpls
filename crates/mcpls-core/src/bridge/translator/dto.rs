@@ -790,6 +790,17 @@ pub struct DocumentChanges {
     pub edits: Option<Vec<TextEdit>>,
 }
 
+/// Dependent edits proposed before a file move.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileMoveResult {
+    /// Proposed text edits and counts of withheld entries.
+    #[serde(flatten)]
+    pub edit: WorkspaceEditDescription,
+    /// Warning when any returned position could not be normalized exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions_degraded: Option<PositionDegradation>,
+}
+
 /// Result of a rename request.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RenameResult {
@@ -2325,6 +2336,12 @@ impl ServerText for DocumentChanges {
             redactions.redact_in_place(diff);
             self.preview.redacted |= *diff != before;
         }
+    }
+}
+
+impl ServerText for FileMoveResult {
+    fn redact_server_text(&mut self, redactions: &Redactions) {
+        self.edit.redact_server_text(redactions);
     }
 }
 

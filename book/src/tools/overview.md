@@ -12,18 +12,18 @@ In this chapter you learn the conventions every mcpls tool shares: how code is a
 |------|-------|
 | [Read and navigate code](code-intelligence.md) | `get_symbol_context`, `get_hover`, `get_definition`, `get_references`, `get_completions`, `get_document_symbols`, `get_document_outline`, `workspace_symbol_search`, `get_document_highlights`, `get_signature_help`, `get_inlay_hints` |
 | [Diagnostics and formatting](diagnostics.md) | `get_diagnostics`, `diagnostics_delta`, `get_cached_diagnostics`, `format_document`, `format_range`, `get_folding_ranges`, `get_selection_ranges` |
-| [Refactor](refactoring.md) | `rename_symbol`, `get_code_actions` |
+| [Refactor](refactoring.md) | `rename_symbol`, `preview_file_move`, `get_code_actions` |
 | [Hierarchies and navigation](hierarchies.md) | `go_to_implementation`, `go_to_type_definition`, `go_to_declaration`, `get_incoming_calls`, `get_outgoing_calls`, `get_call_graph`, `prepare_type_hierarchy`, `get_supertypes`, `get_subtypes` |
 | [Manage feedback](#local-feedback) | `feedback_add`, `feedback_list`, `feedback_resolve`, `feedback_reopen` |
 | [Monitor and control servers](server-control.md) | `get_server_logs`, `get_server_messages`, `get_tool_support`, `restart_server` |
 
-`feedback_add` appends explicit feedback to local storage. `feedback_resolve` and `feedback_reopen` update its local resolution state. `restart_server` stops and starts language server processes. Other tools are read-only. Tools that produce edits (`rename_symbol`, `format_document`, `format_range`, `get_code_actions`) return them without applying them.
+`feedback_add` appends explicit feedback to local storage. `feedback_resolve` and `feedback_reopen` update its local resolution state. `restart_server` stops and starts language server processes. Other tools are read-only. Tools that produce edits (`rename_symbol`, `preview_file_move`, `format_document`, `format_range`, `get_code_actions`) return them without applying them.
 
 If you set `mcp.tool_prefix`, every name above gains the prefix, as in `{tool_prefix}_get_hover`.
 
 The table includes full-profile-only tools: `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`.
 
-The default `[mcp].tool_profile = "agent"` exposes 34 tools. Set `tool_profile = "full"` to restore all 37 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
+The default `[mcp].tool_profile = "agent"` exposes 35 tools. Set `tool_profile = "full"` to restore all 38 tools, including `get_folding_ranges`, `get_selection_ranges`, and `prepare_type_hierarchy`. Other values are rejected. The catalog is fixed for the session; unsupported server capabilities remain visible and return errors when called. `tools/list`, dispatch, and `get_tool_support` use the same catalog and configured prefix. Shared tool schemas are identical in both profiles.
 
 ## Choose the smallest useful answer
 

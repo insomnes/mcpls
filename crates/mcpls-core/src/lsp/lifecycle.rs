@@ -1153,11 +1153,7 @@ impl LspServer {
                 }),
                 ..Default::default()
             }),
-            workspace: Some(lsp_types::WorkspaceClientCapabilities {
-                workspace_folders: Some(true),
-                configuration: settings.map(|_| true),
-                ..Default::default()
-            }),
+            workspace: Some(Self::workspace_capabilities(settings)),
             // Required per LSP 3.17 before a server may send $/progress at all -- see this fn's doc.
             window: Some(lsp_types::WindowClientCapabilities {
                 work_done_progress: Some(true),
@@ -1165,6 +1161,21 @@ impl LspServer {
             }),
             // Required for rust-analyzer to ever emit experimental/serverStatus; other servers ignore this unrecognized key.
             experimental: Some(serde_json::json!({ "serverStatusNotification": true })),
+            ..Default::default()
+        }
+    }
+
+    fn workspace_capabilities(
+        settings: Option<&LspSettings>,
+    ) -> lsp_types::WorkspaceClientCapabilities {
+        lsp_types::WorkspaceClientCapabilities {
+            workspace_folders: Some(true),
+            configuration: settings.map(|_| true),
+            file_operations: Some(lsp_types::FileOperationClientCapabilities {
+                dynamic_registration: Some(false),
+                will_rename: Some(true),
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }

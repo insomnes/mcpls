@@ -45,9 +45,10 @@ use super::tools::{
     CachedDiagnosticsParams, CallHierarchyCallsParams, CodeActionsParams, CompletionsParams,
     DeclarationParams, DefinitionParams, DiagnosticsParams, DocumentOutlineParams,
     DocumentSymbolsParams, FoldingRangesParams, FormatDocumentParams, FormatRangeParams,
-    InlayHintsParams, NavigationParams, PositionParams, RangeParams, ReferencesParams,
-    RenameParams, RestartServerParams, ServerLogsParams, ServerMessagesParams, SymbolTargetInput,
-    SymbolTargetParams, ToolSupportParams, TypeHierarchyWalkParams, WorkspaceSymbolParams,
+    InlayHintsParams, NavigationParams, PositionParams, PreviewFileMoveParams, RangeParams,
+    ReferencesParams, RenameParams, RestartServerParams, ServerLogsParams, ServerMessagesParams,
+    SymbolTargetInput, SymbolTargetParams, ToolSupportParams, TypeHierarchyWalkParams,
+    WorkspaceSymbolParams,
 };
 use crate::bridge::resources::{
     DiagnosticsResourceUri, MAX_SUBSCRIPTIONS, ResolvedResource, make_uri, parse_uri,
@@ -57,12 +58,12 @@ use crate::bridge::{
     ClientPath, CodeActionsResult, CompletionsResult, DiagnosticInfo, DiagnosticsAvailability,
     DiagnosticsOrigin, DiagnosticsResult, DocumentDiagnosticsResult, DocumentHighlightsResult,
     DocumentOpenState, DocumentOutlineResult, DocumentSymbolsResult, DocumentVersion,
-    FoldingRangesResult, FormatDocumentResult, HierarchyItem, HoverResult, IncomingCallsResult,
-    Indexed, InlayHintsResult, KindFilter, KindFilterField, KindFilterInput, NotificationCache,
-    OutgoingCallsResult, Position, PositionEncoding, PositionRange, ReferencesResult, RenameResult,
-    RestartServerResult, RouteSignals, SelectionRangesResult, ServerLogsResult,
-    ServerMessagesResult, SignatureHelpResult, SymbolTarget, Translator, TypeHierarchyResult,
-    WorkspaceRoots, WorkspaceSymbolResult,
+    FileMoveResult, FoldingRangesResult, FormatDocumentResult, HierarchyItem, HoverResult,
+    IncomingCallsResult, Indexed, InlayHintsResult, KindFilter, KindFilterField, KindFilterInput,
+    NotificationCache, OutgoingCallsResult, Position, PositionEncoding, PositionRange,
+    ReferencesResult, RenameResult, RestartServerResult, RouteSignals, SelectionRangesResult,
+    ServerLogsResult, ServerMessagesResult, SignatureHelpResult, SymbolTarget, Translator,
+    TypeHierarchyResult, WorkspaceRoots, WorkspaceSymbolResult,
 };
 use crate::config::{McpConfig, ProjectConfigStatus, ToolPrefix, ToolProfile};
 use crate::redaction::{Redactions, ServerText};
@@ -1399,6 +1400,29 @@ impl McplsServer {
         }
         .await;
         self.structured_result(answer)
+    }
+
+    /// Preview edits proposed by the language server for a single file move.
+    #[tool(
+        description = "Preview dependent edits for moving an existing file to an unused path in an existing directory in the same workspace. Use absolute paths. The source language's server must statically register willRenameFiles for the source. Empty changes without dropped means the server proposed no edits. full:true includes exact normalized raw edits. Nonempty dropped means incomplete. positions_degraded:response means inexact edit columns. Preview diffs use observed source and analysis_freshness is unknown. No files are moved or edited.",
+        title = "Preview File Move"
+    )]
+    async fn preview_file_move(
+        &self,
+        Parameters(PreviewFileMoveParams {
+            file_path,
+            new_file_path,
+            full,
+        }): Parameters<PreviewFileMoveParams>,
+    ) -> Result<Json<FileMoveResult>, McpError> {
+        let file_path = parse_client_path(file_path)?;
+        let new_file_path = parse_client_path(new_file_path)?;
+        self.structured_result(
+            self.context
+                .translator
+                .handle_file_move(file_path, new_file_path, full)
+                .await,
+        )
     }
 
     /// Get code completion suggestions.
@@ -6495,6 +6519,7 @@ sleep 0.3
             ("get_diagnostics", true, false, true),
             ("diagnostics_delta", true, false, true),
             ("rename_symbol", true, false, true),
+            ("preview_file_move", true, false, true),
             ("get_completions", true, false, true),
             ("get_document_symbols", true, false, true),
             ("get_document_outline", true, false, true),
@@ -7886,7 +7911,7 @@ sleep 0.3
             )
             .await;
             let tools = listed["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 34);
+            assert_eq!(tools.len(), 35);
             assert!(
                 !tools
                     .iter()
@@ -7900,7 +7925,7 @@ sleep 0.3
             let tools = supported["result"]["structuredContent"]["tools"]
                 .as_array()
                 .unwrap();
-            assert_eq!(tools.len(), 34);
+            assert_eq!(tools.len(), 35);
             assert!(
                 !tools
                     .iter()
@@ -9375,6 +9400,11 @@ sleep 0.3
             Capability::PrepareRename => {
                 serde_json::json!({ "renameProvider": { "prepareProvider": true } })
             }
+            Capability::FileMove => serde_json::json!({
+                "workspace": {"fileOperations": {"willRename": {"filters": [
+                    {"scheme": "file", "pattern": {"glob": "**/*.{RS,TS}", "matches": "file", "options": {"ignoreCase": true}}}
+                ]}}}
+            }),
             _ => serde_json::json!({ capability.as_str(): true }),
         };
         serde_json::from_value(json).unwrap()
@@ -9385,6 +9415,82 @@ sleep 0.3
         dir: tempfile::TempDir,
         file: PathBuf,
         fake_servers: Vec<crate::test_lsp::FakeServer>,
+    }
+
+    #[tokio::test]
+    async fn file_move_preview_returns_the_provider_edit_over_mcp() {
+        use serde_json::json;
+
+        use crate::test_lsp::{read_framed_message, write_response};
+
+        let mut fixture = support_fixture(
+            vec![(
+                "rust",
+                "rust",
+                capabilities_advertising(Capability::FileMove),
+            )],
+            McpConfig {
+                tool_prefix: Some("local".parse().unwrap()),
+                ..Default::default()
+            },
+        );
+        let canonical_root = dunce::canonicalize(fixture.dir.path()).unwrap();
+        let original = std::fs::read(&fixture.file).unwrap();
+        let destination = canonical_root.join("moved #1.txt");
+        let old_uri = crate::bridge::path_to_uri(&canonical_root.join("a.rs")).unwrap();
+        let new_uri = crate::bridge::path_to_uri(&destination).unwrap();
+        let importer = canonical_root.join("main.rs");
+        let importer_source = "mod a;\n";
+        std::fs::write(&importer, importer_source).unwrap();
+        let importer_uri = crate::bridge::path_to_uri(&importer).unwrap();
+        let mut fake = fixture.fake_servers.pop().unwrap();
+
+        let arguments = json!({
+            "name": "local_preview_file_move",
+            "arguments": {"file_path": fixture.file, "new_file_path": destination, "full": true}
+        });
+        let call = tools_call_over_the_wire(fixture.server.for_new_session(), arguments);
+        let response = async {
+            let mut wire = tokio::io::BufReader::new(&mut fake.write_stdout);
+            let request = loop {
+                let message = read_framed_message(&mut wire).await;
+                if message.get("id").is_some() {
+                    break message;
+                }
+                assert_ne!(message["method"], "workspace/didRenameFiles");
+            };
+            assert_eq!(request["method"], "workspace/willRenameFiles");
+            assert_eq!(
+                request["params"],
+                json!({"files": [{"oldUri": old_uri, "newUri": new_uri}]})
+            );
+            assert!(new_uri.as_ref().ends_with("/moved%20%231.txt"));
+            write_response(
+                &mut fake.read_half_stdin,
+                &request["id"],
+                json!({"changes": {(importer_uri.as_ref()): [{
+                    "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 5}},
+                    "newText": "moved"
+                }]}}),
+            ).await;
+        };
+        let (reply, ()) = tokio::join!(call, response);
+        let proposal = &reply["result"]["structuredContent"];
+        assert_eq!(proposal["changes"][0]["uri"], importer_uri.as_ref());
+        assert_eq!(proposal["changes"][0]["edit_count"], 1);
+        assert_eq!(proposal["changes"][0]["analysis_freshness"], "unknown");
+        assert_eq!(proposal["changes"][0]["preview"]["status"], "complete");
+        assert_eq!(
+            proposal["changes"][0]["edits"][0],
+            json!({
+                "range": {"start": {"line": 1, "character": 5}, "end": {"line": 1, "character": 6}},
+                "new_text": "moved"
+            })
+        );
+        assert!(proposal.get("dropped").is_none());
+        assert_eq!(std::fs::read(&fixture.file).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(importer).unwrap(), importer_source);
+        assert!(!destination.exists());
     }
 
     /// One live (registered, non-dead) catch-all server per `(id, language,
@@ -9566,6 +9672,14 @@ sleep 0.3
                     full: true,
                     target: position().into(),
                     new_name: NewName::new("renamed").unwrap(),
+                }))
+                .await
+                .map(|_| ()),
+            McpTool::PreviewFileMove => server
+                .preview_file_move(Parameters(PreviewFileMoveParams {
+                    file_path: file.to_path_buf(),
+                    new_file_path: file.with_file_name("moved.rs"),
+                    full: false,
                 }))
                 .await
                 .map(|_| ()),
@@ -9874,7 +9988,7 @@ sleep 0.3
         let report = report_json(&fixture.server, None).await;
 
         assert_eq!(report["languages"], serde_json::json!(["python", "rust"]));
-        assert_eq!(report["tools"].as_array().unwrap().len(), 34);
+        assert_eq!(report["tools"].as_array().unwrap().len(), 35);
 
         let hover = tool_entry(&report, "get_hover");
         assert_eq!(hover["coverage"], "some");

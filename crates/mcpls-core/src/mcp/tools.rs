@@ -732,6 +732,19 @@ impl TryFrom<RenameWire> for RenameParams {
     }
 }
 
+/// Parameters for the `preview_file_move` tool.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewFileMoveParams {
+    /// Absolute path to the existing source file.
+    pub file_path: PathBuf,
+    /// Absolute path to the absent destination in an existing directory.
+    pub new_file_path: PathBuf,
+    /// Include exact normalized raw edits alongside bounded previews (default: false).
+    #[serde(default)]
+    pub full: bool,
+}
+
 position_wire! {
     /// Wire form of [`CompletionsParams`].
     #[schemars(description = "Parameters for getting code completion suggestions.")]

@@ -306,6 +306,7 @@ fn shape_output_schema(tool: &mut Tool, usage: &DefinitionUsage) {
                 | "get_supertypes"
                 | "get_subtypes"
                 | "rename_symbol"
+                | "preview_file_move"
                 | "format_document"
                 | "format_range"
                 | "get_code_actions"
@@ -908,10 +909,8 @@ mod tests {
     }
 
     use super::super::server::McplsServer;
+    use crate::mcp::TOOLS_LIST_TOTAL_BUDGET_BYTES;
 
-    /// Total serialized `tools` array budget, including local feedback.
-    // One added tool gets the existing 9,000-byte per-tool allowance.
-    const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 165_000;
     /// Largest serialized single `Tool` (compact bytes).
     const TOOL_BUDGET_BYTES: usize = 9_000;
     /// Sum of all schema `description` bytes.

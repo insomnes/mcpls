@@ -1,5 +1,7 @@
 //! Workspace selection wraps the unchanged per-runtime tool implementations.
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 
 #[cfg(feature = "transport-http")]
@@ -9,6 +11,7 @@ use super::{
     PathBuf, ResolvedResource, RoleServer, SubscriptionContext, Target, ToolCallContext,
     ToolRouter, parse_client_path, parse_uri,
 };
+use crate::bridge::file_move_parent;
 use crate::dispatcher::{DispatchError, Lease};
 
 fn selector(
@@ -30,6 +33,14 @@ fn selector(
 
 fn completed(value: Value) -> CallToolResponse {
     rmcp::model::CallToolResult::structured(value).into()
+}
+
+async fn canonical_move_endpoint(path: &Path) -> Result<PathBuf, McpError> {
+    let (parent, name) = file_move_parent(path).map_err(|_| DispatchError::invalid(path).wire())?;
+    let canonical = tokio::fs::canonicalize(parent)
+        .await
+        .map_err(|_| DispatchError::invalid(path).wire())?;
+    Ok(canonical.join(name))
 }
 
 fn hierarchy(value: &mut Value) {
@@ -360,15 +371,37 @@ impl McplsServer {
             return self.configured_support(dispatcher);
         }
 
+        let move_destination = if name == "preview_file_move" {
+            Some(
+                selector(arguments, "new_file_path")?
+                    .ok_or_else(|| McpError::invalid_params("new_file_path is required", None))?,
+            )
+        } else {
+            None
+        };
         let (lease, origin) = self
-            .select_tool_runtime(dispatcher, arguments, file.as_ref(), workspace.as_ref())
+            .select_tool_runtime(
+                dispatcher,
+                arguments,
+                file.as_ref(),
+                workspace.as_ref(),
+                move_destination.as_deref(),
+            )
             .await?;
         // Identity selection uses canonical paths; the scoped translator must
         // receive that same spelling after approval, including symlink aliases.
         let file = if let Some(file) = file {
-            let canonical = tokio::fs::canonicalize(&file)
-                .await
-                .map_err(|_| DispatchError::invalid(&file).wire())?;
+            let canonical = if let Some(destination) = &move_destination {
+                arguments.insert(
+                    "new_file_path".into(),
+                    json!(canonical_move_endpoint(destination).await?),
+                );
+                canonical_move_endpoint(&file).await?
+            } else {
+                tokio::fs::canonicalize(&file)
+                    .await
+                    .map_err(|_| DispatchError::invalid(&file).wire())?
+            };
             if envelope_file.is_some() {
                 if let Some(envelope) = arguments
                     .get_mut("symbol_target")
@@ -626,6 +659,7 @@ impl McplsServer {
         arguments: &mut serde_json::Map<String, Value>,
         file: Option<&PathBuf>,
         workspace: Option<&PathBuf>,
+        move_destination: Option<&Path>,
     ) -> Result<(Lease, Option<(crate::config::ServerId, String)>), McpError> {
         let item = arguments.get_mut("item").filter(|item| !item.is_null());
         let continuation = if let Some(item) = item {
@@ -677,6 +711,20 @@ impl McplsServer {
                     if selected.root() != other.root() {
                         return Err(McpError::invalid_params(
                             "file_path and workspace_path select different workspaces",
+                            Some(json!({"code":"workspace_invalid","retryable":false})),
+                        ));
+                    }
+                }
+                if let Some(destination) = move_destination {
+                    let (parent, _) = file_move_parent(destination)
+                        .map_err(|_| DispatchError::invalid(destination).wire())?;
+                    let other = dispatcher
+                        .select(parent.to_path_buf(), true)
+                        .await
+                        .map_err(DispatchError::wire)?;
+                    if !selected.same_workspace(&other) {
+                        return Err(McpError::invalid_params(
+                            "file_path and new_file_path select different workspaces",
                             Some(json!({"code":"workspace_invalid","retryable":false})),
                         ));
                     }

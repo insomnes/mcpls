@@ -28,3 +28,7 @@ pub(crate) use session::ResourceValidity;
 pub use session::SubscriptionRegistry;
 #[cfg(test)]
 pub(crate) use session::{SessionHandle, Target};
+
+/// Maximum compact byte count of an unprefixed `tools/list` array.
+#[cfg(test)]
+pub(crate) const TOOLS_LIST_TOTAL_BUDGET_BYTES: usize = 167_000;

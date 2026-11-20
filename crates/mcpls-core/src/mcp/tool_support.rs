@@ -44,6 +44,7 @@ pub(super) enum McpTool {
     GetDiagnostics,
     DiagnosticsDelta,
     RenameSymbol,
+    PreviewFileMove,
     GetCompletions,
     GetDocumentSymbols,
     GetDocumentOutline,
@@ -78,7 +79,7 @@ pub(super) enum McpTool {
 
 impl McpTool {
     /// Every tool, in registration order.
-    pub(super) const ALL: [Self; 37] = [
+    pub(super) const ALL: [Self; 38] = [
         Self::GetSymbolContext,
         Self::GetHover,
         Self::GetDefinition,
@@ -86,6 +87,7 @@ impl McpTool {
         Self::GetDiagnostics,
         Self::DiagnosticsDelta,
         Self::RenameSymbol,
+        Self::PreviewFileMove,
         Self::GetCompletions,
         Self::GetDocumentSymbols,
         Self::GetDocumentOutline,
@@ -156,6 +158,7 @@ impl McpTool {
             Self::GetDiagnostics => ("get_diagnostics", Document(ToolKind::Diagnostics)),
             Self::DiagnosticsDelta => ("diagnostics_delta", Document(ToolKind::Diagnostics)),
             Self::RenameSymbol => ("rename_symbol", Document(ToolKind::Rename)),
+            Self::PreviewFileMove => ("preview_file_move", Document(ToolKind::FileMove)),
             Self::GetCompletions => ("get_completions", Document(ToolKind::Completions)),
             Self::GetDocumentSymbols => {
                 ("get_document_symbols", Document(ToolKind::DocumentSymbols))

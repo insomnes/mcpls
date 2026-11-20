@@ -216,6 +216,8 @@ spelled_enum! {
         CallHierarchy => "callHierarchyProvider",
         /// `renameProvider` (`textDocument/rename`).
         Rename => "renameProvider",
+        /// `workspace.fileOperations.willRename` (`workspace/willRenameFiles`).
+        FileMove => "workspace.fileOperations.willRename",
         /// `documentFormattingProvider` (`textDocument/formatting`).
         FormatDocument => "documentFormattingProvider",
         /// `codeActionProvider` (`textDocument/codeAction`).
@@ -261,6 +263,7 @@ impl Capability {
             Self::TypeDefinition => ToolKind::TypeDefinition,
             Self::CallHierarchy => ToolKind::CallHierarchy,
             Self::Rename | Self::PrepareRename => ToolKind::Rename,
+            Self::FileMove => ToolKind::FileMove,
             Self::FormatDocument => ToolKind::FormatDocument,
             Self::CodeActions => ToolKind::CodeActions,
             Self::DocumentSymbols => ToolKind::DocumentSymbols,
@@ -314,10 +317,23 @@ impl Capability {
         }
     }
 
+    pub(super) const fn file_move_registration(
+        caps: &lsp_types::ServerCapabilities,
+    ) -> Option<&lsp_types::FileOperationRegistrationOptions> {
+        let Some(workspace) = caps.workspace.as_ref() else {
+            return None;
+        };
+        let Some(operations) = workspace.file_operations.as_ref() else {
+            return None;
+        };
+        operations.will_rename.as_ref()
+    }
+
     /// Whether `caps` advertises support for this capability.
     #[expect(clippy::too_many_lines, reason = "one match arm per capability")]
     pub(crate) const fn is_supported(self, caps: &lsp_types::ServerCapabilities) -> bool {
         match self {
+            Self::FileMove => Self::file_move_registration(caps).is_some(),
             Self::Completions => caps.completion_provider.is_some(),
             Self::SignatureHelp => caps.signature_help_provider.is_some(),
             Self::InlayHints => matches!(

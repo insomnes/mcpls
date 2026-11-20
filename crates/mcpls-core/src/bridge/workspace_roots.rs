@@ -253,6 +253,28 @@ fn path_io_error(path: &Path, source: io::Error) -> Error {
     }
 }
 
+/// A move endpoint must name a file directly. `Path::file_name` alone
+/// ignores a trailing separator or `/.`, which require a directory on disk.
+pub fn file_move_parent(path: &Path) -> Result<(&Path, &std::ffi::OsStr), Error> {
+    if path.is_absolute()
+        && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        && path
+            .as_os_str()
+            .as_encoded_bytes()
+            .ends_with(name.as_encoded_bytes())
+    {
+        return Ok((parent, name));
+    }
+    Err(malformed_move_path(path, "expected an absolute file path"))
+}
+
+fn malformed_move_path(path: &Path, reason: &'static str) -> Error {
+    Error::MalformedPath {
+        path: path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidInput, reason),
+    }
+}
+
 /// The process working directory in its physical form plus the logical
 /// (`$PWD`) spelling when that names the same directory.
 ///
@@ -744,6 +766,65 @@ impl WorkspaceRoots {
                 task: BackgroundTask::PathValidation,
                 source,
             })?
+    }
+
+    pub(crate) async fn validate_file_move(
+        &self,
+        source: ClientPath,
+        destination: ClientPath,
+    ) -> Result<(WorkspacePath, PathBuf), Error> {
+        let roots = self.clone();
+        tokio::task::spawn_blocking(move || {
+            file_move_parent(source.as_path())?;
+            let (parent, name) = file_move_parent(destination.as_path())?;
+            let old = roots.validate_blocking(&source)?;
+            // Renaming a leaf symlink would move the link, but the URI would
+            // refer to its target after canonicalization.
+            let file_type = std::fs::symlink_metadata(source.as_path())
+                .map_err(|error| path_io_error(source.as_path(), error))?
+                .file_type();
+            if !file_type.is_file() {
+                return Err(Error::NotARegularFile(source.as_path().to_path_buf()));
+            }
+            let parent = roots.validate_blocking(&ClientPath::try_from(parent.to_path_buf())?)?;
+            if !parent.as_path().is_dir() {
+                return Err(malformed_move_path(
+                    destination.as_path(),
+                    "destination parent is not a directory",
+                ));
+            }
+
+            // Prefer the most specific root for both endpoints when the
+            // configuration contains nested roots.
+            let root_of = |path: &Path| {
+                roots
+                    .canonical
+                    .iter()
+                    .filter(|root| is_within(path, root, CaseRule::Exact))
+                    .max_by_key(|root| root.components().count())
+            };
+            let new = parent.as_path().join(name);
+            if root_of(old.as_path()) != root_of(&new) {
+                return Err(malformed_move_path(
+                    destination.as_path(),
+                    "source and destination select different workspace roots",
+                ));
+            }
+
+            match std::fs::symlink_metadata(&new) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((old, new)),
+                Err(error) => Err(path_io_error(destination.as_path(), error)),
+                Ok(_) => Err(malformed_move_path(
+                    destination.as_path(),
+                    "destination already exists",
+                )),
+            }
+        })
+        .await
+        .map_err(|source| Error::TaskFailed {
+            task: BackgroundTask::PathValidation,
+            source,
+        })?
     }
 
     /// Validates a client path against the roots on the calling thread.

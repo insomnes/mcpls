@@ -1,6 +1,6 @@
 # Refactoring
 
-In this chapter you learn the tools that propose changes: renames and code actions. They return edits and never write to disk, so the assistant stays in control of what changes and you stay in control of what is approved.
+Refactoring tools propose edits for symbol renames, file moves and code actions. The client decides whether to apply them.
 
 ## Prerequisites
 
@@ -65,9 +65,32 @@ A non-empty `dropped` means the rename is incomplete even when `changes` is not 
 
 An ambiguous `symbol_name` never produces edits; mcpls returns the candidates instead.
 
+## preview_file_move
+
+Preview the edits a language server proposes before moving one file.
+Supply the absolute path of an existing regular file and a destination that does not exist.
+The destination directory must exist. Both paths must resolve under the same workspace root and, in dispatcher mode, select the same workspace.
+
+```json
+{
+  "file_path": "/work/app/lib.ts",
+  "new_file_path": "/work/app/users.ts"
+}
+```
+
+For example, TypeScript Language Server can propose updating an import in `main.ts` from `./lib` to `./users`.
+mcpls routes the request by source language, using the configured `file_move` handle or the language's catch-all server.
+That server must statically register `workspace/willRenameFiles` with a filter that matches the source.
+`get_tool_support` reports the advertised capability by language. Each call checks the filter against the selected file.
+
+A successful response with `changes: []` and no `dropped` means the server proposed no edits. An absent or nonmatching registration returns an unsupported-capability error.
+See [Observed-source previews](#observed-source-previews) for result fields and `full: true`.
+Check `dropped` and `positions_degraded` before using the edits.
+The preview leaves both the file move and any proposed edits to the client.
+
 ## Observed-source previews
 
-`rename_symbol`, `format_document`, `format_range`, and `get_code_actions` return readable previews by default.
+`rename_symbol`, `preview_file_move`, `format_document`, `format_range`, and `get_code_actions` return readable previews by default.
 Set `full: true` to also receive exact normalized raw `edits`, including unredacted replacement text.
 Default responses omit `edits`. These refactoring and formatting tools do not apply source edits or execute action commands. Separately, `feedback_add` appends explicit reports to a private local JSONL file; `feedback_resolve` and `feedback_reopen` update their local resolution state.
 

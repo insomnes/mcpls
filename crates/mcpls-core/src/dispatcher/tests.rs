@@ -14,7 +14,7 @@ use tempfile::TempDir;
 
 use super::Dispatcher;
 use crate::config::ServerConfig;
-use crate::mcp::McplsServer;
+use crate::mcp::{McplsServer, TOOLS_LIST_TOTAL_BUDGET_BYTES};
 
 type Client = RunningService<rmcp::RoleClient, ()>;
 
@@ -153,7 +153,7 @@ async fn lazy_catalog_and_worktree_isolation() {
     let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
     let (client, task) = connect(fixture.server(dispatcher.clone())).await;
     let before = client.peer().list_all_tools().await.unwrap();
-    assert_eq!(before.len(), 35);
+    assert_eq!(before.len(), 36);
     let support = call(&client, "get_tool_support", json!({})).await.unwrap();
     assert_eq!(support["basis"], "configured");
     let status = call(
@@ -188,6 +188,33 @@ async fn lazy_catalog_and_worktree_isolation() {
         serde_json::to_value(before).unwrap(),
         serde_json::to_value(client.peer().list_all_tools().await.unwrap()).unwrap()
     );
+    dispatcher.shutdown().await;
+    client.cancel().await.unwrap();
+    task.await.unwrap();
+}
+
+/// A move between worktrees fails before starting either language server.
+#[tokio::test]
+async fn file_move_preview_rejects_cross_worktree_destination() {
+    let fixture = Fixture::new(4);
+    let dispatcher = Dispatcher::new(fixture.config.clone()).unwrap();
+    let (client, task) = connect(fixture.server(dispatcher.clone())).await;
+    let source = fixture.main.join("file.py");
+    let destination = fixture.linked.join("moved.py");
+    let original = std::fs::read(&source).unwrap();
+    error_code(
+        call(
+            &client,
+            "preview_file_move",
+            json!({"file_path": source, "new_file_path": destination}),
+        )
+        .await
+        .unwrap_err(),
+        "workspace_invalid",
+    );
+    assert_eq!(fixture.events(), [] as [Value; 0]);
+    assert_eq!(std::fs::read(source).unwrap(), original);
+    assert!(!destination.exists());
     dispatcher.shutdown().await;
     client.cancel().await.unwrap();
     task.await.unwrap();
@@ -744,13 +771,16 @@ async fn dispatcher_catalog_budget_and_static_null_support() {
         );
         let tools = client.peer().list_all_tools().await.unwrap();
         let expected = if profile == crate::config::ToolProfile::Full {
-            38
+            39
         } else {
-            35
+            36
         };
         assert_eq!(tools.len(), expected);
         let size = serde_json::to_vec(&tools).unwrap().len();
-        assert!(size <= 165_000, "dispatcher catalog uses {size} bytes");
+        assert!(
+            size <= TOOLS_LIST_TOTAL_BUDGET_BYTES,
+            "dispatcher catalog uses {size} bytes"
+        );
         dispatcher.shutdown().await;
         client.cancel().await.unwrap();
         task.await.unwrap();

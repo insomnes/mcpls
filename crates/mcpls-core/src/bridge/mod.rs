@@ -77,15 +77,15 @@ pub use translator::{
 };
 pub(crate) use translator::{
     CallGraphOptions, CallGraphStart, CallHierarchyPrepareResult, CallPathFilter,
-    CodeActionsResult, DiagnosticsRole, HierarchyOrigin, IncomingCallsResult, InlayHintsResult,
-    Interest, MAX_COMPANION_FILES, MAX_SWEPT_FILES_PER_TICK, NotificationReceivers,
-    NotificationWiring, OutgoingCallsResult, SWEEP_INTERVAL, ServerLogsResult,
-    ServerMessagesResult, SignatureHelpResult, SweepContext, SweepMemo, ToolSupportSnapshot,
-    WorkspaceSymbolResult, call_graph,
+    CodeActionsResult, DiagnosticsRole, FileMoveResult, HierarchyOrigin, IncomingCallsResult,
+    InlayHintsResult, Interest, MAX_COMPANION_FILES, MAX_SWEPT_FILES_PER_TICK,
+    NotificationReceivers, NotificationWiring, OutgoingCallsResult, SWEEP_INTERVAL,
+    ServerLogsResult, ServerMessagesResult, SignatureHelpResult, SweepContext, SweepMemo,
+    ToolSupportSnapshot, WorkspaceSymbolResult, call_graph,
 };
 #[cfg(test)]
 pub(crate) use workspace_roots::{CanonicalizeFn, ProcessCwd};
 pub(crate) use workspace_roots::{
-    EditUriVerdict, join_relative_root, lexically_normalize, probe_root,
+    EditUriVerdict, file_move_parent, join_relative_root, lexically_normalize, probe_root,
 };
 pub use workspace_roots::{WorkspacePath, WorkspaceRoots};

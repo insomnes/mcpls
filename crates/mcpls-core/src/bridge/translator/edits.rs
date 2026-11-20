@@ -1,6 +1,7 @@
-//! Rename, prepare-rename, format-document, format-range, and code-actions handlers.
+//! Rename, file-move preview, formatting, and code-actions handlers.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use lsp_types::FormattingOptions;
 use tokio::task::JoinSet;
@@ -9,9 +10,9 @@ use super::Translator;
 use super::diagnostics::diagnostic_to_mcp;
 use super::dto::{
     BoundedRange, CodeAction, CodeActionsResult, CommandDescription, DocumentChanges, DroppedEdits,
-    FormatDocumentResult, NewName, Position, Position2D, PositionDegradation, PrepareRenameOutcome,
-    PrepareRenameResult, RenameOutcome, RenamePreparation, RenameResult, SuppliedVersion, TabSize,
-    TextEdit, WorkspaceEditDescription,
+    FileMoveResult, FormatDocumentResult, NewName, Position, Position2D, PositionDegradation,
+    PrepareRenameOutcome, PrepareRenameResult, RenameOutcome, RenamePreparation, RenameResult,
+    SuppliedVersion, TabSize, TextEdit, WorkspaceEditDescription,
 };
 use super::encoding_ctx::EncodingCtx;
 use super::kind_filter::CodeActionKindFilter;
@@ -19,12 +20,14 @@ use super::navigation::ItemBudget;
 use super::positioned::{Positioned, budgeted, budgeted_classified, document_request};
 use super::previews::{Previews, suppress_degraded};
 use super::routing::{Capability, FileLocalCapability, IndexingGate};
-use crate::bridge::{ClientPath, EditUriVerdict, WorkspaceRoots};
+use crate::bridge::state::path_to_uri;
+use crate::bridge::{Access, ClientPath, EditUriVerdict, WorkspaceRoots};
 use crate::config::ServerId;
-use crate::error::{ErrorChain, Result, is_invalid_offset};
+use crate::error::{Error, ErrorChain, Result, is_invalid_offset};
 use crate::escape_control;
 use crate::lsp::{LspClient, UnclassifiedError};
 use crate::redaction::Redactions;
+use crate::util::lock_std;
 
 /// Preserve optional version-field presence before typed LSP decoding.
 struct EditRequest<R>(std::marker::PhantomData<R>);
@@ -56,6 +59,37 @@ fn versions(value: &serde_json::Value) -> Vec<Option<SuppliedVersion>> {
 
 fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T> {
     serde_json::from_value(value).map_err(crate::Error::from)
+}
+
+fn file_move_filter_matches(filter: &lsp_types::FileOperationFilter, source: &str) -> bool {
+    if filter
+        .scheme
+        .as_deref()
+        .is_some_and(|scheme| scheme != "file")
+        || filter
+            .pattern
+            .matches
+            .as_ref()
+            .is_some_and(|kind| *kind != lsp_types::FileOperationPatternKind::File)
+    {
+        return false;
+    }
+    let ignore_case = filter
+        .pattern
+        .options
+        .and_then(|options| options.ignore_case)
+        .unwrap_or_default();
+    crate::lsp::watching::compile_glob(&filter.pattern.glob, ignore_case)
+        .is_some_and(|matcher| matcher.is_match(source))
+}
+
+fn file_move_path_for_glob(path: &Path) -> std::borrow::Cow<'_, str> {
+    let path = path.to_string_lossy();
+    if cfg!(windows) {
+        std::borrow::Cow::Owned(path.replace('\\', "/"))
+    } else {
+        path
+    }
 }
 
 /// Convert a raw LSP `WorkspaceEdit` into MCP `DocumentChanges`.
@@ -576,6 +610,65 @@ fn prepare_rename_rejection(
 }
 
 impl Translator {
+    pub(crate) async fn handle_file_move(
+        &self,
+        file_path: ClientPath,
+        new_file_path: ClientPath,
+        full: bool,
+    ) -> Result<FileMoveResult> {
+        let (source, destination) = self
+            .workspace_roots
+            .validate_file_move(file_path, new_file_path)
+            .await?;
+        let capability = Capability::FileMove;
+        let (server_id, client) = self
+            .resolve_client_for_file(source.as_path(), capability.tool_kind())
+            .await?;
+        let registration = {
+            let servers = lock_std(&self.servers);
+            servers
+                .server(&server_id)
+                .and_then(|server| Capability::file_move_registration(server.capabilities()))
+                .cloned()
+        };
+        let source_for_glob = file_move_path_for_glob(source.as_path());
+        if !registration.is_some_and(|registration| {
+            registration
+                .filters
+                .iter()
+                .any(|filter| file_move_filter_matches(filter, &source_for_glob))
+        }) {
+            return Err(Error::CapabilityNotSupported {
+                server_id,
+                capability,
+            });
+        }
+        self.wait_for_indexing_ready(&server_id).await?;
+        let new_uri = path_to_uri(&destination)?;
+        let doc = self
+            .open_prepared(server_id, client, &source, Access::Use)
+            .await?;
+        let ctx = self.encoding_ctx(doc.server_id());
+        let response = budgeted::<EditRequest<lsp_types::WillRenameFilesRequest>>(
+            doc.client(),
+            lsp_types::RenameFilesParams {
+                files: vec![lsp_types::FileRename {
+                    old_uri: doc.uri().clone(),
+                    new_uri,
+                }],
+            },
+        )
+        .await?;
+        let mut edit = self
+            .preview_workspace_edit(response, &ctx, doc.server_id(), full, "file move edit")
+            .await?;
+        edit.changes.retain(|document| document.edit_count != 0);
+        Ok(FileMoveResult {
+            edit,
+            positions_degraded: ctx.positions_degraded(),
+        })
+    }
+
     /// Handle rename request.
     ///
     /// # Errors
@@ -668,25 +761,9 @@ impl Translator {
         )
         .await?;
 
-        let supplied = versions(&response);
-        let response: Option<lsp_types::WorkspaceEdit> = decode(response)?;
-        let mut previews = Previews::new(self, doc.server_id(), full);
-        let (mut changes, dropped) = if let Some(edit) = response {
-            convert_workspace_edit(
-                edit,
-                &ctx,
-                &self.workspace_roots,
-                "rename edit",
-                &mut ItemBudget::new(),
-                Some(&mut previews),
-                &supplied,
-            )
-            .await
-        } else {
-            (vec![], DroppedEdits::default())
-        };
-
-        suppress_degraded(changes.iter_mut(), ctx.positions_degraded());
+        let WorkspaceEditDescription { changes, dropped } = self
+            .preview_workspace_edit(response, &ctx, doc.server_id(), full, "rename edit")
+            .await?;
         Ok(RenameResult {
             position: queried_position,
             outcome: RenameOutcome::Proposed {
@@ -696,6 +773,35 @@ impl Translator {
             },
             positions_degraded: ctx.positions_degraded(),
         })
+    }
+
+    async fn preview_workspace_edit(
+        &self,
+        response: serde_json::Value,
+        ctx: &EncodingCtx,
+        server_id: &ServerId,
+        full: bool,
+        edit_kind: &str,
+    ) -> Result<WorkspaceEditDescription> {
+        let supplied = versions(&response);
+        let response: Option<lsp_types::WorkspaceEdit> = decode(response)?;
+        let mut previews = Previews::new(self, server_id, full);
+        let (mut changes, dropped) = if let Some(edit) = response {
+            convert_workspace_edit(
+                edit,
+                ctx,
+                &self.workspace_roots,
+                edit_kind,
+                &mut ItemBudget::new(),
+                Some(&mut previews),
+                &supplied,
+            )
+            .await
+        } else {
+            (Vec::new(), DroppedEdits::default())
+        };
+        suppress_degraded(changes.iter_mut(), ctx.positions_degraded());
+        Ok(WorkspaceEditDescription { changes, dropped })
     }
 
     /// Handle a prepare rename request: whether the symbol at `position` can

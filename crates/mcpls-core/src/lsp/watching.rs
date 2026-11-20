@@ -369,7 +369,7 @@ impl Backend {
 
 // Globset owns glob parsing. Its pinned regex representation encodes non-ASCII
 // literals as UTF-8 byte escapes; restore only those literals for Unicode regexes.
-fn compile_glob(pattern: &str) -> Option<regex::Regex> {
+pub(crate) fn compile_glob(pattern: &str, ignore_case: bool) -> Option<regex::Regex> {
     let glob = GlobBuilder::new(pattern)
         .literal_separator(true)
         .backslash_escape(false)
@@ -404,6 +404,7 @@ fn compile_glob(pattern: &str) -> Option<regex::Regex> {
     }
     regex::RegexBuilder::new(&expression)
         .unicode(true)
+        .case_insensitive(ignore_case)
         .dot_matches_new_line(true)
         .build()
         .ok()
@@ -546,7 +547,7 @@ impl Registrations {
                             .and_then(|k| u8::try_from(k).ok())
                             .ok_or_else(invalid)?,
                     };
-                    let matcher = compile_glob(pattern).ok_or_else(invalid)?;
+                    let matcher = compile_glob(pattern, false).ok_or_else(invalid)?;
                     watchers.push(Watcher {
                         matcher,
                         kinds,

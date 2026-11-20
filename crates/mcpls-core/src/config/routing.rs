@@ -84,7 +84,7 @@ impl From<LanguageId> for ServerId {
 /// use mcpls_core::config::ToolKind;
 ///
 /// assert_eq!(ToolKind::Hover.as_str(), "hover");
-/// assert_eq!(ToolKind::ALL.len(), 21);
+/// assert_eq!(ToolKind::ALL.len(), 22);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +104,8 @@ pub enum ToolKind {
     Diagnostics,
     /// `textDocument/rename` and `textDocument/prepareRename`.
     Rename,
+    /// `workspace/willRenameFiles`.
+    FileMove,
     /// `textDocument/completion`.
     Completions,
     /// `textDocument/signatureHelp`.
@@ -145,6 +147,7 @@ impl ToolKind {
         Self::References,
         Self::Diagnostics,
         Self::Rename,
+        Self::FileMove,
         Self::Completions,
         Self::SignatureHelp,
         Self::DocumentSymbols,
@@ -172,6 +175,7 @@ impl ToolKind {
             Self::References => "references",
             Self::Diagnostics => "diagnostics",
             Self::Rename => "rename",
+            Self::FileMove => "file_move",
             Self::Completions => "completions",
             Self::SignatureHelp => "signature_help",
             Self::DocumentSymbols => "document_symbols",
@@ -1237,7 +1241,7 @@ mod tests {
     fn test_tool_kind_as_str_and_all_len() {
         assert_eq!(ToolKind::Hover.as_str(), "hover");
         assert_eq!(ToolKind::CallHierarchy.as_str(), "call_hierarchy");
-        assert_eq!(ToolKind::ALL.len(), 21);
+        assert_eq!(ToolKind::ALL.len(), 22);
 
         // `ALL` is a slice now, so nothing pins its element count at compile
         // time the way `[Self; 15]` used to -- guard against duplicate or

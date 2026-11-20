@@ -157,6 +157,10 @@ impl Selection {
     pub(crate) fn root(&self) -> &Path {
         &self.identity.root
     }
+
+    pub(crate) fn same_workspace(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
 }
 struct Entry {
     selection: Selection,
