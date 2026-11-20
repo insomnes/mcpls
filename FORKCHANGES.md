@@ -30,15 +30,26 @@ This fork is version `0.10.0+insomnes.1`. It merges the complete upstream
 
 - The public Rust field `LspServerConfig.initialization_options` remains `Option<serde_json::Value>`. Private boundary adapters reject nested TOML datetimes. Settings and parent configuration Debug output redact values; initialization and configuration transmission preserve valid values.
 - Every completion response is ranked before count or byte cuts, including responses with at most 100 candidates. Defaults remain 20 items and no documentation. Existing 65536-byte compact output and field-clipping limits, omission metadata, and provider completeness remain independent.
-- Opt in to `include_completion_refs` to resolve deferred detail and documentation for one selected completion in the same session. `resolve_completion` uses the original file and live provider and returns bounded display fields. List again when a reference becomes stale.
+- `get_completions` returns inline detail when the provider supplies it. Set
+  `include_documentation: true` for inline documentation. For deferred fields,
+  request `include_completion_refs: true` and pass one reference and its original
+  file to `resolve_completion` in the same session. It returns bounded display
+  fields from the original provider. List again if the reference becomes stale.
 - Diagnostic deltas qualify removals only from complete comparable evidence. Lost pushes remain visible as evicted evidence even when an older pull remains cached; uncertain removals stay conservative. Fresh recovery can restore ordinary comparisons.
 - `get_workspace_diagnostics` pulls fresh workspace diagnostics from one
   configured server. It returns bounded results for authorized files and
-  distinguishes incomplete, unsupported, and failed reports.
+  distinguishes incomplete, unsupported, and failed reports. In standalone
+  mode, clients can retry `ServerInitializing` (`-32051`) while the provider starts.
 - `get_references` accepts `include_targets:true` to attach portable occurrence targets or unavailable reasons to retained locations. Files mode omits portable targets. Copy each complete target into definition or context navigation without reconstructing coordinates.
 - Portable symbol targets retain their existing format, consumers, workspace and source validation, runtime binding, and acquisition budgets. Multi-server symbols normalize with each producer's encoding before target acquisition.
 - The fork retains its exact `globset = 0.4.20` pin and Unicode regex matching for Watchman registration patterns.
-- `preview_file_move` proposes dependent edits for a single file move within one workspace. It uses the source language's `file_move` route and checks the server's static `workspace/willRenameFiles` filters.
+- `preview_file_move` proposes dependent edits for a single file move within one workspace. It uses the source language's `file_move` route and checks the server's static `workspace/willRenameFiles` filters. If the provider cancels the request, the tool returns the error after one attempt.
+- By default, mcpls records each stdio or HTTP `tools/call` that reaches the
+  handler once. A diagnostics batch counts as one call. Local SQLite history
+  stores hourly counts and durations by workspace, tool, and outcome, with
+  a daily rollup. Calls without a unique eligible workspace use `unattributed`.
+  Set `MCPLS_USAGE=0` before startup to disable collection for that process.
+  See [Local MCP Tool Usage](book/src/reference/tool-usage.md) for the stored fields and queries.
 - Shared HTTP workspaces, workspace isolation, Watchman, call graphs, bounded navigation and edit previews, private local feedback, and both tool profiles are retained. The static agent and full profiles expose 37 and 40 tools respectively. The unprefixed catalogue allows 170000 compact bytes total, 9000 per tool, and 35000 for schema descriptions.
 
 ## Navigation source options
