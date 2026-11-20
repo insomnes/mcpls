@@ -58,27 +58,7 @@ fn stdio_flushes_only_tool_calls_with_validated_scope() {
     let real_state = root.path().join("local-state");
     fs::create_dir(&real_state).unwrap();
     symlink(real_state, &state).unwrap();
-    let run = |usage: Option<&str>| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_mcpls"));
-        child
-            .args(["--config", config.to_str().unwrap()])
-            .current_dir(root.path())
-            .env("XDG_STATE_HOME", &state)
-            .env_remove("MCPLS_LISTEN")
-            .env_remove("MCPLS_USAGE");
-        if let Some(value) = usage {
-            child.env("MCPLS_USAGE", value);
-        }
-        child
-            .timeout(Duration::from_secs(15))
-            .write_stdin(stdin.as_str())
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone()
-    };
-
+    let run = |usage| run_stdio(root.path(), &config, &state, &stdin, usage);
     let db = state.join("mcpls/usage.sqlite");
     run(Some("0"));
     assert!(!db.exists());
@@ -123,20 +103,45 @@ fn stdio_flushes_only_tool_calls_with_validated_scope() {
             1,
         ),
     ];
-    assert_eq!(history(&db), expected);
+    assert_eq!(history(&db).unwrap(), expected);
     run(Some("0"));
-    assert_eq!(history(&db), expected);
+    assert_eq!(history(&db).unwrap(), expected);
 }
 
-fn history(db: &Path) -> Vec<(String, String, String, i64)> {
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+fn run_stdio(
+    root: &Path,
+    config: &Path,
+    state: &Path,
+    stdin: &str,
+    usage: Option<&str>,
+) -> Vec<u8> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mcpls"));
+    child
+        .arg("--config")
+        .arg(config)
+        .current_dir(root)
+        .env("XDG_STATE_HOME", state)
+        .env_remove("MCPLS_LISTEN")
+        .env_remove("MCPLS_USAGE");
+    if let Some(value) = usage {
+        child.env("MCPLS_USAGE", value);
+    }
+    child
+        .timeout(Duration::from_secs(15))
+        .write_stdin(stdin)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone()
+}
+
+fn history(db: &Path) -> rusqlite::Result<Vec<(String, String, String, i64)>> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut rows = conn
-        .prepare("SELECT workspace, tool, outcome, call_count FROM usage_hourly ORDER BY tool")
-        .unwrap();
-    rows.query_map([], |row| {
+        .prepare("SELECT workspace, tool, outcome, call_count FROM usage_hourly ORDER BY tool")?;
+    let rows = rows.query_map([], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-    })
-    .unwrap()
-    .collect::<Result<_, _>>()
-    .unwrap()
+    })?;
+    rows.collect()
 }
