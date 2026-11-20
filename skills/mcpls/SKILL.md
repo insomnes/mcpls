@@ -70,6 +70,13 @@ Batch `results` preserve input order and duplicates. Each item has `input_index`
 
 Batch output retains at most 100 diagnostics per file, 256 overall, 8192 compact JSON UTF-8 bytes per complete diagnostic, and 131072 bytes per structured result. Budgets allocate in input order and omit whole diagnostics. Error objects use at most 1024 bytes; shortening sets item `truncated`. Outer `truncated` means at least one item was shortened. An empty published report means clean only when untruncated; pending, evicted, failed, or truncated outcomes do not establish cleanliness. One batch call does not guarantee less backend work or stronger freshness. Existing single-file output stays compatible.
 
+When the affected files are unknown, use `get_workspace_diagnostics` to query one
+configured server, including for unopened files. Pass its name as `server`, or its
+language ID if unnamed. Dispatcher mode also requires an absolute, approved
+`workspace_path`. Interpret ranges as zero-based LSP positions using the returned
+`position_encoding`. Check `status` and `truncated` before interpreting an empty
+report. Even a complete report covers only that provider's current settings.
+
 `get_completions` returns API-discovery candidates ranked by typed-prefix match and sortText, without insertion text or snippet edits. `limit` accepts integers 1 through 100 (default 20); `include_documentation` defaults to false. Null or invalid option values fail. Disabled or absent documentation is null; enabled empty documentation remains empty.
 
 Set `include_completion_refs: true` to select one candidate for deferred detail
@@ -446,6 +453,10 @@ no environment variable equivalent.
 | `--http-allowed-host <HOST>` | — | `MCPLS_HTTP_ALLOWED_HOSTS` | none | Extra `Host` header value (`host[:port]`, no wildcards, repeatable or comma-separated) accepted besides `localhost`, `127.0.0.1`, `::1` and the bound IP address; without a port any port matches; ports 80, 443 and 0 are rejected (clients omit the default ports). Needed when reaching mcpls by name or when bound to `0.0.0.0`. |
 
 Plus standard `--version` / `--help`. No subcommands.
+
+By default, mcpls records aggregate tool-call counts and durations in a local
+SQLite database for both stdio and HTTP. To disable collection for one process,
+set `MCPLS_USAGE=0` in its environment before startup. Existing history is preserved.
 
 ## Registering with an MCP client
 
