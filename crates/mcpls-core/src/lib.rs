@@ -52,7 +52,7 @@ mod redaction;
 pub(crate) mod runtime;
 mod spelling;
 pub mod transport;
-mod usage;
+pub(crate) mod usage;
 mod util;
 
 #[cfg(test)]

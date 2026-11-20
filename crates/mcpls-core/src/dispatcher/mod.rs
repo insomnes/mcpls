@@ -437,6 +437,7 @@ impl Dispatcher {
                 git_dir: None,
                 objects: vec![approval.object.clone()],
             });
+            crate::usage::observe_selection(&identity.root);
             let (config, digest) = self.read_profile(approval, &identity.root, false)?;
             return Ok(Selection {
                 identity,
@@ -522,7 +523,9 @@ impl Dispatcher {
     ) -> Result<Selection> {
         let dispatcher = self.clone();
         let selected_path = path.clone();
-        let result = crate::on_blocking_pool(move || dispatcher.discover(&path, directory))
+        let discover =
+            crate::usage::carry_observation(move || dispatcher.discover(&path, directory));
+        let result = crate::on_blocking_pool(discover)
             .await
             .map_err(|_| DispatchError::invalid(Path::new("selected workspace")))?;
         let result = match result {
@@ -538,6 +541,7 @@ impl Dispatcher {
                         if explicit {
                             Err(DispatchError::not_approved(&selected_path))
                         } else {
+                            crate::usage::observe_selection(selection.root());
                             Ok(selection)
                         }
                     }
@@ -868,7 +872,6 @@ impl Dispatcher {
     pub(crate) async fn status(self: &Arc<Self>, path: Option<PathBuf>) -> Result<Value> {
         let selected = if let Some(path) = path {
             let selection = self.select(path, true).await?;
-            crate::usage::observe_selection(selection.root());
             let key = selection.identity.root.clone();
             let mut entries = self.entries.lock().await;
             if selection.temporary && !entries.contains_key(&key) {

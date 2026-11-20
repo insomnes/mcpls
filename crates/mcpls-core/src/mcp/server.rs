@@ -2387,12 +2387,11 @@ impl McplsServer {
     ) -> Result<Json<ToolSupportReport>, McpError> {
         let file_path = file_path.map(parse_client_path).transpose()?;
         let translator = &self.context.translator;
-        let file_language = match file_path.as_ref() {
-            Some(path) => translator.language_for_path(path).await.map(Some),
-            None => {
-                usage::observe_runtime(&self.context.workspace_roots);
-                Ok(None)
-            }
+        let file_language = if let Some(path) = file_path.as_ref() {
+            translator.language_for_path(path).await.map(Some)
+        } else {
+            usage::observe_runtime(&self.context.workspace_roots);
+            Ok(None)
         };
         let snapshot = translator.tool_support_snapshot();
         self.structured_result(file_language.map(|file_language| {

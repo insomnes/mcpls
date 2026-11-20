@@ -1,5 +1,6 @@
 //! Runtime-local MCP usage accounting and asynchronous SQLite persistence.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ const UPSERT: &str = "
 ";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     Success,
     ToolError,
     ProtocolError,
@@ -95,7 +96,7 @@ struct Bucket {
     outcome: Outcome,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Totals {
     count: i64,
     total_us: i64,
@@ -104,8 +105,8 @@ struct Totals {
 
 impl Totals {
     fn merge(&mut self, other: Self) {
-        self.count += other.count;
-        self.total_us += other.total_us;
+        self.count = self.count.saturating_add(other.count);
+        self.total_us = self.total_us.saturating_add(other.total_us);
         self.max_us = self.max_us.max(other.max_us);
     }
 }
@@ -148,12 +149,15 @@ impl State {
 
 fn completion_time() -> (i64, Instant) {
     let seconds = chrono::Utc::now().timestamp();
-    (seconds.div_euclid(3600) * 3600, Instant::now())
+    (
+        seconds.div_euclid(3600).saturating_mul(3600),
+        Instant::now(),
+    )
 }
 
 /// Shared by all serving sessions. The mutex protects only in-memory data.
 #[derive(Clone, Default)]
-pub(crate) struct Collector(Arc<Mutex<State>>);
+pub struct Collector(Arc<Mutex<State>>);
 
 impl Collector {
     pub(crate) fn begin(&self, tool: &'static str, standalone: bool) -> Option<Call> {
@@ -215,7 +219,7 @@ tokio::task_local! {
     static OBSERVATION: Option<Observation>;
 }
 
-pub(crate) struct Call {
+pub struct Call {
     observation: Observation,
     outcome: Outcome,
 }
@@ -243,7 +247,7 @@ impl Drop for Call {
 }
 
 /// Reuse a selected dispatcher root. The selector has already approved it.
-pub(crate) fn observe_selection(root: &Path) {
+pub fn observe_selection(root: &Path) {
     let _ = OBSERVATION.try_with(|current| {
         if let Some(observation) = current {
             observation.observe(root);
@@ -252,7 +256,7 @@ pub(crate) fn observe_selection(root: &Path) {
 }
 
 /// Reuse a successful standalone path validation, including its canonical form.
-pub(crate) fn observe_validation(roots: &WorkspaceRoots, path: &Path) {
+pub fn observe_validation(roots: &WorkspaceRoots, path: &Path) {
     let _ = OBSERVATION.try_with(|current| {
         if let Some(observation) = current.as_ref().filter(|call| call.standalone)
             && let Some(root) = roots.most_specific_canonical_root(path)
@@ -263,7 +267,7 @@ pub(crate) fn observe_validation(roots: &WorkspaceRoots, path: &Path) {
 }
 
 /// Used by standalone operations that already execute within the whole runtime.
-pub(crate) fn observe_runtime(roots: &WorkspaceRoots) {
+pub fn observe_runtime(roots: &WorkspaceRoots) {
     let _ = OBSERVATION.try_with(|current| {
         if let Some(observation) = current.as_ref().filter(|call| call.standalone)
             && let [root] = roots.canonical()
@@ -273,13 +277,13 @@ pub(crate) fn observe_runtime(roots: &WorkspaceRoots) {
     });
 }
 
-/// Carry existing observation context across the blocking file-move validator.
-pub(crate) fn carry_observation<T>(work: impl FnOnce() -> T) -> impl FnOnce() -> T {
+/// Carry the current tool observation into a blocking routing or validation task.
+pub fn carry_observation<T>(work: impl FnOnce() -> T) -> impl FnOnce() -> T {
     let observation = OBSERVATION.try_with(Clone::clone).ok().flatten();
     move || OBSERVATION.sync_scope(observation, work)
 }
 
-pub(crate) struct UsageRuntime {
+pub struct UsageRuntime {
     collector: Collector,
     stop: mpsc::Sender<()>,
     finished: oneshot::Receiver<()>,
@@ -394,16 +398,21 @@ fn write(directory: &Path, batch: &Batch) -> Result<(), WriteError> {
     {
         let mut statement = transaction.prepare(UPSERT)?;
         for (bucket, totals) in batch {
-            let workspace = bucket.workspace.as_deref().map_or(
-                std::borrow::Cow::Borrowed("unattributed"),
-                |root| match root.to_str() {
-                    Some(path) => std::borrow::Cow::Borrowed(path),
-                    None => std::borrow::Cow::Owned(
-                        url::Url::from_file_path(root)
-                            .map_or_else(|()| root.to_string_lossy().into_owned(), Into::into),
-                    ),
-                },
-            );
+            let workspace =
+                bucket
+                    .workspace
+                    .as_deref()
+                    .map_or(Cow::Borrowed("unattributed"), |root| {
+                        root.to_str().map_or_else(
+                            || {
+                                Cow::Owned(url::Url::from_file_path(root).map_or_else(
+                                    |()| root.to_string_lossy().into_owned(),
+                                    Into::into,
+                                ))
+                            },
+                            Cow::Borrowed,
+                        )
+                    });
             statement.execute(params![
                 bucket.hour_utc,
                 workspace,
