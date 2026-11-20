@@ -187,7 +187,7 @@ fn test_e2e_get_tool_support_reports_every_tool() -> Result<()> {
 #[test]
 #[ignore = "Requires mcpls binary built"]
 fn test_e2e_tool_profiles() -> Result<()> {
-    for (profile, count) in [("", 36), ("agent", 36), ("full", 39)] {
+    for (profile, count) in [("", 37), ("agent", 37), ("full", 40)] {
         let temp = TempDir::new()?;
         let config = temp.path().join("profile.toml");
         let mcp = if profile.is_empty() {
@@ -223,6 +223,7 @@ fn test_e2e_tool_profiles() -> Result<()> {
             .collect();
         assert_eq!(listed_names, support_names);
         assert!(listed_names.contains(name("get_call_graph").as_str()));
+        assert!(listed_names.contains(name("resolve_completion").as_str()));
         for excluded in [
             "get_folding_ranges",
             "get_selection_ranges",

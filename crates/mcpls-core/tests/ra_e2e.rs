@@ -580,19 +580,13 @@ fn sc_get_completions(client: &mut McpClient, workspace: &Path) -> Result<(), St
     // Inside caller body: `    add(1, 2)` — col 6 is after 'a','d' (prefix "ad").
     let caller_line = find_line(&lib, "pub fn caller(");
     let body_line = caller_line + 1;
+    let mut params = json!({"file_path": lib, "line": body_line, "character": 6});
 
     // Retry loop: completions may not be available until rust-analyzer is fully ready.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let resp = client
-            .call_tool(
-                "get_completions",
-                &json!({
-                    "file_path": lib.to_string_lossy(),
-                    "line": body_line,
-                    "character": 6,
-                }),
-            )
+            .call_tool("get_completions", &params)
             .map_err(|e| format!("call failed: {e}"))?;
 
         let text = assertions::assert_tool_ok(&resp);
@@ -603,11 +597,13 @@ fn sc_get_completions(client: &mut McpClient, workspace: &Path) -> Result<(), St
             .or_else(|| inner.as_array())
             .ok_or_else(|| format!("expected completions array, got {inner}"))?;
 
-        let found = items
-            .iter()
-            .any(|i| i["label"].as_str().unwrap_or("").contains("add"));
-        if found {
-            return Ok(());
+        if let Some(add) = items.iter().find(|item| item["label"] == "add") {
+            if add["detail"].as_str().is_none_or(str::is_empty) || !add["documentation"].is_null() {
+                return Err(format!(
+                    "get_completions: unexpected default fields for 'add': {add}"
+                ));
+            }
+            break;
         }
 
         if Instant::now() >= deadline {
@@ -617,6 +613,28 @@ fn sc_get_completions(client: &mut McpClient, workspace: &Path) -> Result<(), St
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+
+    params["include_documentation"] = json!(true);
+    let resp = client
+        .call_tool("get_completions", &params)
+        .map_err(|e| format!("call failed: {e}"))?;
+    let inner: Value = serde_json::from_str(&assertions::assert_tool_ok(&resp))
+        .map_err(|e| format!("bad JSON: {e}"))?;
+    let add = inner["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["label"] == "add"))
+        .ok_or_else(|| {
+            format!("get_completions: 'add' missing on documentation request: {inner}")
+        })?;
+    if !add["documentation"]
+        .as_str()
+        .is_some_and(|docs| docs.contains("Adds two integers."))
+    {
+        return Err(format!(
+            "get_completions: expected inline documentation for 'add': {add}"
+        ));
+    }
+    Ok(())
 }
 
 /// Tool 7: `get_document_symbols` — symbols in lib.rs include add, caller, Point.

@@ -296,7 +296,7 @@ Returns API-discovery completion candidates at a position. Add `trigger` (for ex
 { "file_path": "/work/app/src/billing.rs", "line": 57, "character": 18, "trigger": "." }
 ```
 
-By default, return the first 20 provider candidates without documentation. Set `limit`
+By default, return up to 20 ranked candidates without documentation. Set `limit`
 to an integer from 1 through 100. Set `include_documentation: true` to show
 documentation the provider included in the list. Null and invalid option
 values are rejected.
@@ -355,10 +355,10 @@ Both tool profiles expose this tool.
 
 `resolved` returns `item` with `label`, `kind`, `detail`, `documentation`, and
 `truncated_fields`. The same display redaction and field limits apply.
-Markup documentation is returned as text. `unsupported` returns a null item
-when the live provider does not advertise resolve. Provider failures return
-MCP errors. Resolve sends one request to the original provider, even if
-documentation was omitted from the listing. It runs no completion search
+Markup documentation is returned as text. A valid selection sends one resolve
+request to the original provider when it advertises resolve. Otherwise,
+`unsupported` returns a null item and sends zero resolve requests. Provider
+failures return MCP errors. The tool runs no completion search
 and returns no insertion text, edits, commands, or provider data.
 
 References can be evicted from the session's bounded memory. An expired or
